@@ -70,7 +70,6 @@ CREATE TABLE `t23` (
   KEY `idx_t23_year_func` ((year(`datetime_col`))),
   KEY `idx_t23_arith_expr` (((`unsigned_int_col` + `smallint_col`))),
   KEY `idx_t23_json_expr` ((cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32)))),
-  FULLTEXT KEY `ft_t23_text_cols` (`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`),
   SPATIAL KEY `sp_t23_point_col` (`point_col`),
   CONSTRAINT `fk_t23_parent_id` FOREIGN KEY (`parent_tenant_id`,`parent_subpart_id`,`parent_id_col`) REFERENCES `t1` (`tenant_id`,`subpart_id`,`id_col`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `fk_t23_parent_metric` FOREIGN KEY (`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`) REFERENCES `t1` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`) ON DELETE SET NULL ON UPDATE CASCADE

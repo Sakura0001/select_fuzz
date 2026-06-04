@@ -70,7 +70,6 @@ CREATE TABLE `t0` (
   KEY `idx_t0_year_func` ((year(`datetime_col`))),
   KEY `idx_t0_arith_expr` (((`unsigned_int_col` + `smallint_col`))),
   KEY `idx_t0_json_expr` ((cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32)))),
-  FULLTEXT KEY `ft_t0_text_cols` (`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`),
   SPATIAL KEY `sp_t0_point_col` (`point_col`)
 ) ENGINE=InnoDB AUTO_INCREMENT=89671 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='COLUMNAR=1';
 SET FOREIGN_KEY_CHECKS=1;

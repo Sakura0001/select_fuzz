@@ -170,7 +170,6 @@ def create_table_sql(index: int) -> str:
         f"  KEY `idx_t{index}_year_func` ((year(`datetime_col`))),",
         f"  KEY `idx_t{index}_arith_expr` (((`unsigned_int_col` + `smallint_col`))),",
         f"  KEY `idx_t{index}_json_expr` ((cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32)))),",
-        f"  FULLTEXT KEY `ft_t{index}_text_cols` (`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`),",
         f"  SPATIAL KEY `sp_t{index}_point_col` (`point_col`)",
     ]
     if index > 0:

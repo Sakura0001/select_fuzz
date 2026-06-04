@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL_DIR = ROOT / "sql_base_tables"
+NO_VECTOR_SQL_DIR = ROOT / "sql_base_tables_no_vector_subpartition"
 EXECUTION_DOC = SQL_DIR / "执行顺序说明.md"
 PARTITION_TABLES = set(range(7, 27))
 TOP_PARTITION_VALUES = list(range(1, 9))
@@ -127,8 +128,17 @@ def main() -> int:
         fail(f"表类型分布不匹配：{type_counts}", errors)
 
     all_sql = "\n".join(all_sql_parts)
+    if re.search(r"\bFULLTEXT\b", all_sql, re.I):
+        fail("带向量基表目录不应包含 FULLTEXT 索引", errors)
+    if NO_VECTOR_SQL_DIR.exists():
+        no_vector_sql = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in NO_VECTOR_SQL_DIR.glob("*")
+            if path.is_file()
+        )
+        if re.search(r"\bFULLTEXT\b", no_vector_sql, re.I):
+            fail("无向量副本目录不应包含 FULLTEXT 索引", errors)
     required_fragments = [
-        "FULLTEXT KEY",
         "SPATIAL KEY",
         "INVISIBLE",
         " DESC",

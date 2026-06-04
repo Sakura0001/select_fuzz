@@ -16,6 +16,7 @@ from .service import RuntimeService
 
 def create_app(service: RuntimeService) -> FastAPI:
     app = FastAPI(title="sql_fuzz 运维控制台", version="0.1.0")
+    app.state.runtime_service = service
 
     @app.get("/api/health")
     def health() -> dict:
@@ -85,7 +86,7 @@ def create_default_app() -> FastAPI:
     service = RuntimeService(
         metric_store=MetricStore(log_dir / "metrics.db"),
         log_dir=log_dir,
-        base_sql_dir=Path("sql_base_tables"),
+        base_sql_dir=Path("sql_base_tables_no_vector_subpartition"),
         db_factory=lambda node: PyMySQLClient(node),
     )
     return create_app(service)

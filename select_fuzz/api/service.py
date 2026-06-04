@@ -121,11 +121,19 @@ class RuntimeService:
 
     def coverage(self) -> List[dict]:
         registry = build_operator_registry()
+        hit_counts: Dict[str, int] = {}
+        recent_hits = set()
+        for task in self._real_tasks.values():
+            for name, count in task.coverage_counts.items():
+                hit_counts[name] = hit_counts.get(name, 0) + count
+            recent_hits.update(task.recent_coverage_hits)
         return [
             {
                 "name": operator.name,
                 "category": operator.category,
                 "implemented": operator.implemented,
+                "hit_count": hit_counts.get(operator.name, 0),
+                "recent": operator.name in recent_hits,
             }
             for operator in registry.operators.values()
         ]

@@ -49,6 +49,9 @@ def build_operator_registry() -> OperatorRegistry:
         "INTERSECT",
         "EXCEPT",
         "SUBQUERY",
+        "SCALAR SUBQUERY",
+        "EXISTS SUBQUERY",
+        "IN SUBQUERY",
         "DERIVED_TABLE",
         "VALUES",
     ]:
@@ -65,12 +68,6 @@ def build_operator_registry() -> OperatorRegistry:
     ]:
         registry.register(name, "JOIN")
     for name in [
-        "+",
-        "-",
-        "*",
-        "/",
-        "DIV",
-        "MOD",
         "=",
         "<=>",
         "<>",
@@ -87,17 +84,29 @@ def build_operator_registry() -> OperatorRegistry:
         "OR",
         "XOR",
         "NOT",
+        "LIKE",
+        "REGEXP",
+        "MEMBER OF",
+    ]:
+        registry.register(name, "谓词")
+    for name in [
+        "+",
+        "-",
+        "*",
+        "/",
+        "DIV",
+        "MOD",
         "&",
         "|",
         "^",
         "~",
         "<<",
         ">>",
-        "LIKE",
-        "REGEXP",
+    ]:
+        registry.register(name, "算术位运算")
+    for name in [
         "JSON_ARROW",
         "JSON_ARROW_UNQUOTE",
-        "MEMBER OF",
         "CAST",
         "CONVERT",
         "CASE WHEN",
@@ -105,7 +114,7 @@ def build_operator_registry() -> OperatorRegistry:
         "IFNULL",
         "NULLIF",
     ]:
-        registry.register(name, "表达式")
+        registry.register(name, "表达式函数")
     for name in [
         "COUNT",
         "SUM",
@@ -115,8 +124,21 @@ def build_operator_registry() -> OperatorRegistry:
         "GROUP_CONCAT",
         "ROW_NUMBER",
         "RANK",
+        "DENSE_RANK",
         "JSON_EXTRACT",
+        "JSON_OBJECT",
         "JSON_ARRAYAGG",
+        "HEX",
+        "UNHEX",
+        "LENGTH",
+        "CONCAT",
+        "SUBSTRING",
+        "LOWER",
+        "YEAR",
+        "DATE_ADD",
+        "ST_ASTEXT",
+        "ST_X",
+        "ST_Y",
         "MATCH_AGAINST",
         "DISTANCE_COSINE",
         "DISTANCE_EUCLIDEAN",
@@ -125,4 +147,12 @@ def build_operator_registry() -> OperatorRegistry:
         "VECTOR_TO_STRING",
     ]:
         registry.register(name, "函数")
+    for name in [
+        "FOR UPDATE",
+        "FOR SHARE",
+        "LOCK IN SHARE MODE",
+        "NOWAIT",
+        "SKIP LOCKED",
+    ]:
+        registry.register(name, "锁定读")
     return registry

@@ -2,8 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Card, Col, Collapse, Form, Input, InputNumber, Layout, Progress, Row, Select, Space, Statistic, Steps, Tag, Typography, message } from "antd";
 import { ApiOutlined, ClusterOutlined, DatabaseOutlined, DeploymentUnitOutlined, PlayCircleOutlined, WarningOutlined } from "@ant-design/icons";
 import * as echarts from "echarts";
-import { addJumpHost, createTask, loadJumpHosts, loadTasks, summarize } from "./api";
-import type { CreateTaskPayload, FuzzTask, JumpHost } from "./types";
+import { addJumpHost, createTask, loadCoverage, loadJumpHosts, loadTasks, summarize } from "./api";
+import type { CoverageItem, CreateTaskPayload, FuzzTask, JumpHost } from "./types";
 
 const { Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -126,22 +126,54 @@ function TaskCard({ task }: { task: FuzzTask }) {
 function App() {
   const [tasks, setTasks] = useState<FuzzTask[]>([]);
   const [jumpHosts, setJumpHosts] = useState<JumpHost[]>([]);
+  const [coverage, setCoverage] = useState<CoverageItem[]>([]);
   const [taskForm] = Form.useForm<CreateTaskPayload>();
   const [jumpForm] = Form.useForm<JumpHost>();
   const metrics = useMemo(() => summarize(tasks), [tasks]);
+  const coverageByCategory = useMemo(() => {
+    const groups = new Map<string, { total: number; hit: number }>();
+    coverage
+      .filter((item) => item.implemented)
+      .forEach((item) => {
+        const current = groups.get(item.category) ?? { total: 0, hit: 0 };
+        current.total += 1;
+        if (item.hit_count > 0) {
+          current.hit += 1;
+        }
+        groups.set(item.category, current);
+      });
+    return Array.from(groups.entries()).map(([category, value]) => ({
+      category,
+      percent: value.total === 0 ? 0 : Math.round((value.hit / value.total) * 100),
+      hit: value.hit,
+      total: value.total
+    }));
+  }, [coverage]);
 
   useEffect(() => {
-    loadTasks().then(setTasks);
+    const refresh = () => {
+      loadTasks().then(setTasks);
+      loadCoverage().then(setCoverage);
+    };
+    refresh();
     loadJumpHosts().then(setJumpHosts);
+    const timer = window.setInterval(refresh, 2000);
+    return () => window.clearInterval(timer);
   }, []);
 
   const handleStartTask = async (values: CreateTaskPayload) => {
-    const task = await createTask({
-      ...values,
-      node_name: values.node_name || `${values.host}:${values.port}`,
-      jump_host: values.jump_host || null
-    });
-    setTasks((current) => [task, ...current]);
+    try {
+      const task = await createTask({
+        ...values,
+        node_name: values.node_name || `${values.host}:${values.port}`,
+        jump_host: values.jump_host || null
+      });
+      setTasks((current) => [task, ...current]);
+      loadCoverage().then(setCoverage);
+      message.success("任务已启动");
+    } catch {
+      message.error("任务启动失败，请检查数据库连接和账号密码");
+    }
   };
 
   const handleSaveJumpHost = async (values: JumpHost) => {
@@ -270,9 +302,16 @@ function App() {
               />
               <Card title="覆盖进度" bordered={false}>
                 <Space direction="vertical" className="coverage">
-                  <Text>SELECT 结构</Text><Progress percent={58} strokeColor="#20c997" />
-                  <Text>表达式算子</Text><Progress percent={42} strokeColor="#3b82f6" />
-                  <Text>向量函数</Text><Progress percent={35} strokeColor="#f59e0b" />
+                  {coverageByCategory.length === 0 ? (
+                    <Text type="secondary">等待任务生成 SQL 后统计覆盖。</Text>
+                  ) : (
+                    coverageByCategory.map((item, index) => (
+                      <div key={item.category} className="coverage-row">
+                        <Text>{item.category} · {item.hit}/{item.total}</Text>
+                        <Progress percent={item.percent} strokeColor={["#20c997", "#3b82f6", "#f59e0b", "#ff7875", "#9254de"][index % 5]} />
+                      </div>
+                    ))
+                  )}
                 </Space>
               </Card>
             </Space>

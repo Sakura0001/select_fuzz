@@ -29,7 +29,8 @@ class EndToEndDatabase(DatabaseClient):
         self.connected = True
 
     def execute(self, sql: str) -> None:
-        if sql.strip().upper().startswith("SELECT") or sql.strip().upper().startswith("WITH"):
+        normalized = sql.strip().upper()
+        if normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("("):
             self.query_attempts += 1
             if self.query_attempts in {2, 3}:
                 raise LostConnectionError("Lost connection to MySQL server during query")

@@ -16,6 +16,7 @@ class ColumnTypeFamily(str, Enum):
     BINARY = "二进制"
     ENUM = "枚举"
     SET = "集合"
+    BIT = "BIT"
     JSON = "JSON"
     SPATIAL = "空间"
     VECTOR = "向量"
@@ -73,3 +74,4 @@ class TableMetadata:
     indexes: Dict[str, IndexMetadata] = field(default_factory=dict)
     foreign_keys: List[ForeignKeyMetadata] = field(default_factory=list)
     partition: Optional[PartitionMetadata] = None
+    is_temporary: bool = False

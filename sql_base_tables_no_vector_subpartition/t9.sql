@@ -43,7 +43,6 @@ CREATE TABLE `t9` (
   `unsigned_int_col` int unsigned DEFAULT NULL,
   `unsigned_decimal_col` decimal(10,0) unsigned DEFAULT NULL,
   `json_col` json DEFAULT NULL,
-  `point_col` point NOT NULL SRID 4326,
   PRIMARY KEY (`id_col`,`tenant_id`,`subpart_id`),
   UNIQUE KEY `uk_t9_ref_id` (`tenant_id`,`subpart_id`,`id_col`),
   UNIQUE KEY `uk_t9_metric_ref` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`),
@@ -66,11 +65,7 @@ CREATE TABLE `t9` (
   KEY `idx_t9_lower_varchar` ((lower(`varchar_col`))),
   KEY `idx_t9_year_func` ((year(`datetime_col`))),
   KEY `idx_t9_arith_expr` (((`unsigned_int_col` + `smallint_col`))),
-  KEY `idx_t9_json_expr` ((cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32)))),
-  FULLTEXT KEY `ft_t9_text_cols` (`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`),
-  SPATIAL KEY `sp_t9_point_col` (`point_col`),
-  CONSTRAINT `fk_t9_parent_id` FOREIGN KEY (`parent_tenant_id`,`parent_subpart_id`,`parent_id_col`) REFERENCES `t1` (`tenant_id`,`subpart_id`,`id_col`) ON DELETE CASCADE ON UPDATE CASCADE,
-  CONSTRAINT `fk_t9_parent_metric` FOREIGN KEY (`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`) REFERENCES `t1` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`) ON DELETE SET NULL ON UPDATE CASCADE
+  KEY `idx_t9_json_expr` ((cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32))))
 ) ENGINE=InnoDB AUTO_INCREMENT=89671 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 PARTITION BY RANGE COLUMNS (`tenant_id`) (
   PARTITION p0 VALUES LESS THAN (2),

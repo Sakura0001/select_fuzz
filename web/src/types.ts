@@ -45,3 +45,11 @@ export interface SummaryMetric {
   lostConnection: number;
   clusterRate: number;
 }
+
+export interface CoverageItem {
+  name: string;
+  category: string;
+  implemented: boolean;
+  hit_count: number;
+  recent: boolean;
+}

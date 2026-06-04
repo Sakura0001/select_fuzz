@@ -29,7 +29,8 @@ class FakeDatabase(DatabaseClient):
         self.connected = True
 
     def execute(self, sql: str) -> None:
-        if self.fail_next_query and sql.strip().upper().startswith("SELECT"):
+        normalized = sql.strip().upper()
+        if self.fail_next_query and (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")):
             self.fail_next_query = False
             raise LostConnectionError("Lost connection to MySQL server during query")
         self.executed.append(sql)

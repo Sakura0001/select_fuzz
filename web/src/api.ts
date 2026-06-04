@@ -1,4 +1,4 @@
-import type { CreateTaskPayload, FuzzTask, JumpHost, SummaryMetric } from "./types";
+import type { CoverageItem, CreateTaskPayload, FuzzTask, JumpHost, LostConnectionEvent, SummaryMetric } from "./types";
 
 const fallbackTasks: FuzzTask[] = [
   {
@@ -81,9 +81,39 @@ export async function loadTasks(): Promise<FuzzTask[]> {
       return fallbackTasks;
     }
     const tasks = (await response.json()) as FuzzTask[];
-    return tasks.length > 0 ? tasks.map((task) => ({ ...task, sql_rate: task.sql_rate ?? 0, events: task.events ?? [] })) : fallbackTasks;
+    return Promise.all(
+      tasks.map(async (task) => ({
+        ...task,
+        sql_rate: task.sql_rate ?? 0,
+        events: await loadLostConnections(task.task_id)
+      }))
+    );
   } catch {
     return fallbackTasks;
+  }
+}
+
+export async function loadLostConnections(taskId: string): Promise<LostConnectionEvent[]> {
+  try {
+    const response = await fetch(`/api/tasks/${taskId}/lost-connections`);
+    if (!response.ok) {
+      return [];
+    }
+    return (await response.json()) as LostConnectionEvent[];
+  } catch {
+    return [];
+  }
+}
+
+export async function loadCoverage(): Promise<CoverageItem[]> {
+  try {
+    const response = await fetch("/api/coverage");
+    if (!response.ok) {
+      return [];
+    }
+    return (await response.json()) as CoverageItem[];
+  } catch {
+    return [];
   }
 }
 
@@ -112,30 +142,16 @@ export async function addJumpHost(payload: JumpHost): Promise<JumpHost> {
 }
 
 export async function createTask(payload: CreateTaskPayload): Promise<FuzzTask> {
-  try {
-    const response = await fetch("/api/tasks", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    if (!response.ok) {
-      throw new Error("后端创建任务失败");
-    }
-    const task = (await response.json()) as FuzzTask;
-    return { ...task, sql_rate: task.sql_rate ?? 0, events: task.events ?? [] };
-  } catch {
-    return {
-      task_id: `local-${Date.now()}`,
-      node_name: payload.node_name,
-      target: `${payload.host}:${payload.port}`,
-      status: "执行 SQL",
-      jump_host: payload.jump_host ?? null,
-      sql_total: 0,
-      lost_connection_total: 0,
-      sql_rate: 0,
-      events: []
-    };
+  const response = await fetch("/api/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error("后端创建任务失败");
   }
+  const task = (await response.json()) as FuzzTask;
+  return { ...task, sql_rate: task.sql_rate ?? 0, events: task.events ?? [] };
 }
 
 export function summarize(tasks: FuzzTask[]): SummaryMetric {

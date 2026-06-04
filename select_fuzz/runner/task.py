@@ -167,6 +167,14 @@ class FuzzTask:
             self.lost_connection_total,
         )
 
+    @property
+    def coverage_counts(self) -> dict[str, int]:
+        return dict(self._generator.coverage_counts)
+
+    @property
+    def recent_coverage_hits(self) -> list[str]:
+        return list(self._generator.recent_hits)
+
     def _reset_base_tables(self) -> None:
         if not self.tables:
             return

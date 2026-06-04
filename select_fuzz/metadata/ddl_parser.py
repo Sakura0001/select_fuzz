@@ -57,6 +57,7 @@ def parse_create_table(sql: str) -> TableMetadata:
         indexes=indexes,
         foreign_keys=foreign_keys,
         partition=_parse_partition(tail),
+        is_temporary=bool(re.search(r"\bCREATE\s+TEMPORARY\s+TABLE\b", sql, re.IGNORECASE)),
     )
 
 
@@ -168,6 +169,8 @@ def _type_family(sql_type: str) -> ColumnTypeFamily:
         return ColumnTypeFamily.ENUM
     if upper.startswith("SET"):
         return ColumnTypeFamily.SET
+    if upper.startswith("BIT"):
+        return ColumnTypeFamily.BIT
     if upper.startswith("JSON"):
         return ColumnTypeFamily.JSON
     if upper.startswith(("POINT", "LINESTRING", "POLYGON", "GEOMETRY", "MULTI")):

@@ -1,3 +1,7 @@
+import re
+from pathlib import Path
+
+from select_fuzz.metadata.base_sql import load_base_sql_files
 from select_fuzz.metadata.ddl_parser import parse_create_table
 from select_fuzz.sqlgen.generator import GenerationOptions, SQLGenerator
 from select_fuzz.sqlgen.operators import build_operator_registry
@@ -31,14 +35,27 @@ def _tables():
     return [parent, child]
 
 
+def _no_vector_tables():
+    tables = []
+    for sql_file in load_base_sql_files(Path("sql_base_tables_no_vector_subpartition")):
+        try:
+            tables.append(parse_create_table(sql_file.sql))
+        except ValueError:
+            continue
+    return tables
+
+
 def test_算子覆盖矩阵包含_select_核心结构和向量算子() -> None:
     registry = build_operator_registry()
 
     assert registry.has("WITH")
+    assert registry.has("WITH RECURSIVE")
     assert registry.has("JOIN ... ON")
+    assert registry.has("LEFT JOIN")
     assert registry.has("UNION")
+    assert registry.has("WINDOW")
+    assert registry.has("FOR UPDATE")
     assert registry.has("CASE WHEN")
-    assert registry.has("DISTANCE_COSINE")
     assert registry.has("JSON_ARROW_UNQUOTE")
 
 
@@ -83,3 +100,53 @@ def test_默认生成_sql_避免_only_full_group_by_风险() -> None:
 
     assert " GROUP BY " not in sql
     assert " HAVING " not in sql
+
+
+def test_no_vector_生成_sql_只引用已知表列且不生成向量算子() -> None:
+    tables = _no_vector_tables()
+    known_identifiers = {table.name for table in tables}
+    known_identifiers.update(column.name for table in tables for column in table.columns.values())
+    generator = SQLGenerator(random_seed=101, max_sql_length=6000)
+
+    for _ in range(30):
+        sql = generator.generate(tables)
+        quoted_identifiers = set(re.findall(r"`([^`]+)`", sql))
+        assert quoted_identifiers <= known_identifiers
+        assert "VECTOR" not in sql.upper()
+        assert "DISTANCE" not in sql.upper()
+
+
+def test_强制生成_select_核心结构() -> None:
+    generator = SQLGenerator(random_seed=21, max_sql_length=8000)
+
+    sql = generator.generate(
+        _no_vector_tables(),
+        GenerationOptions(
+            require_cte=True,
+            require_join=True,
+            require_set_operation=True,
+            require_subquery=True,
+            require_window=True,
+            require_locking=True,
+        ),
+    )
+
+    upper = sql.upper()
+    assert "WITH" in upper
+    assert "JOIN" in upper
+    assert any(operator in upper for operator in ["UNION", "INTERSECT", "EXCEPT"])
+    assert " OVER " in upper
+    assert " WINDOW " in upper
+    assert any(lock in upper for lock in ["FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE"])
+    assert any(subquery in upper for subquery in [" EXISTS ", " IN (SELECT", "(SELECT"])
+    assert {"WITH", "JOIN ... ON", "WINDOW"} & generator.coverage_hits
+
+
+def test_随机递归深度和长度保护稳定() -> None:
+    tables = _no_vector_tables()
+    generator = SQLGenerator(random_seed=88, max_sql_length=2500)
+
+    for _ in range(120):
+        sql = generator.generate(tables)
+        assert sql.startswith(("SELECT", "WITH", "("))
+        assert len(sql) <= 2500

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from select_fuzz.api.app import create_app
+from select_fuzz.api.app import create_app, create_default_app
 from select_fuzz.api.service import RuntimeService
 from select_fuzz.monitor.events import LostConnectionEvent
 from select_fuzz.monitor.logs import SqlLogRecord, append_jsonl
@@ -85,6 +85,7 @@ def test_指标_覆盖矩阵_跳板机接口(tmp_path: Path) -> None:
 
     assert "任务数" in metrics
     assert any(item["name"] == "WITH" for item in coverage)
+    assert "hit_count" in coverage[0]
     assert jump_hosts[0]["name"] == "jump-prod"
 
 
@@ -168,6 +169,54 @@ def test_服务层创建真实任务时会执行基表_sql(tmp_path: Path) -> No
         "SET FOREIGN_KEY_CHECKS=1",
         "CREATE TABLE base_api (id BIGINT NOT NULL, name VARCHAR(64), PRIMARY KEY (id))",
     ]
+
+
+def test_默认_app_使用_no_vector_基表目录() -> None:
+    app = create_default_app()
+    service = app.state.runtime_service
+
+    assert service.base_sql_dir == Path("sql_base_tables_no_vector_subpartition")
+
+
+def test_真实任务执行后_覆盖接口返回命中次数(tmp_path: Path) -> None:
+    base_dir = tmp_path / "sql_base_tables"
+    base_dir.mkdir()
+    (base_dir / "001_parent.sql").write_text(
+        "CREATE TABLE parent_table (id BIGINT NOT NULL, name VARCHAR(64), PRIMARY KEY (id));",
+        encoding="utf-8",
+    )
+    (base_dir / "002_child.sql").write_text(
+        "CREATE TABLE child_table (child_id BIGINT NOT NULL, parent_id BIGINT NOT NULL, PRIMARY KEY (child_id), "
+        "CONSTRAINT fk_child_parent FOREIGN KEY (parent_id) REFERENCES parent_table(id));",
+        encoding="utf-8",
+    )
+    fake_db = ApiFakeDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: fake_db,
+        run_background=False,
+    )
+    client = TestClient(create_app(service))
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "node_name": "node-real",
+            "host": "172.18.4.12",
+            "port": 3306,
+            "username": "fuzz",
+            "password": "secret",
+        },
+    )
+    task = service._real_tasks[response.json()["task_id"]]
+    task.step()
+
+    coverage = client.get("/api/coverage").json()
+    hit_rows = [item for item in coverage if item["hit_count"] > 0]
+    assert hit_rows
+    assert coverage[0]["recent"] in {True, False}
 
 
 def test_跳板机_post_接口保存配置(tmp_path: Path) -> None:

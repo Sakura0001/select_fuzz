@@ -14,6 +14,7 @@ EXECUTION_DOC = SQL_DIR / "执行顺序说明.md"
 PARTITION_TABLES = set(range(7, 27))
 TOP_PARTITION_VALUES = list(range(1, 9))
 SUBPARTITION_VALUES = [1, 2]
+TARGET_TOTAL_INDEX_COUNT = 61
 
 
 def fail(message: str, errors: list[str]) -> None:
@@ -51,6 +52,10 @@ def vector_dimensions(sql: str) -> list[int]:
     return [int(value) for value in re.findall(r"\bvector\((\d+)\)", sql, flags=re.I)]
 
 
+def sql_secondary_index_count(sql: str) -> int:
+    return len(re.findall(r"^\s+(?:UNIQUE\s+KEY|KEY|SPATIAL\s+KEY)\s+`", sql, flags=re.I | re.M))
+
+
 def main() -> int:
     errors: list[str] = []
     files = sorted(path.name for path in SQL_DIR.glob("t*.sql"))
@@ -73,6 +78,9 @@ def main() -> int:
             if dimension > 16383:
                 fail(f"t{index}.sql 向量维度超过 16383：{dimension}", errors)
         vector_index_count = sql.count("imci_vector_index=")
+        effective_index_count = sql_secondary_index_count(sql) + vector_index_count
+        if effective_index_count != TARGET_TOTAL_INDEX_COUNT:
+            fail(f"t{index}.sql 索引数量应为 {TARGET_TOTAL_INDEX_COUNT}，实际 {effective_index_count}", errors)
         if index <= 1:
             if vector_index_count != 1:
                 fail(f"t{index}.sql 普通表应有且仅有 1 个向量索引，实际 {vector_index_count} 个", errors)
@@ -138,6 +146,23 @@ def main() -> int:
         )
         if re.search(r"\bFULLTEXT\b", no_vector_sql, re.I):
             fail("无向量副本目录不应包含 FULLTEXT 索引", errors)
+        if re.search(r"\bVECTOR\s*\(|STRING_TO_VECTOR|imci_vector_index", no_vector_sql, re.I):
+            fail("无向量副本目录不应包含向量列、向量值或向量索引", errors)
+        if re.search(r"\bSUBPARTITION\b", no_vector_sql, re.I):
+            fail("无向量副本目录不应包含二级分区语法", errors)
+        expected_no_vector_files = {f"t{index}.sql" for index in range(11)} | {"zz_seed_fk_data.sql"}
+        actual_no_vector_files = {path.name for path in NO_VECTOR_SQL_DIR.glob("*.sql")}
+        if actual_no_vector_files != expected_no_vector_files:
+            fail(f"无向量副本 SQL 文件集合不匹配：{sorted(actual_no_vector_files)}", errors)
+        for index in range(11):
+            path = NO_VECTOR_SQL_DIR / f"t{index}.sql"
+            if not path.exists():
+                fail(f"无向量副本目录缺少 {path.name}", errors)
+                continue
+            no_vector_table_sql = path.read_text(encoding="utf-8")
+            no_vector_index_count = sql_secondary_index_count(no_vector_table_sql)
+            if no_vector_index_count != TARGET_TOTAL_INDEX_COUNT:
+                fail(f"无向量副本 {path.name} 索引数量应为 {TARGET_TOTAL_INDEX_COUNT}，实际 {no_vector_index_count}", errors)
     required_fragments = [
         "SPATIAL KEY",
         "INVISIBLE",
@@ -189,6 +214,9 @@ def main() -> int:
         for fragment in ["READ-COMMITTED", "vidx_disabled", "SUPER", "vidx_hnsw_cache_size", "LIMIT", "ASC", "VEC_DISTANCE"]:
             if fragment not in doc:
                 fail(f"执行顺序说明缺少约束说明：{fragment}", errors)
+        for fragment in ["64 个二级索引", "61 个索引", "PRIMARY KEY"]:
+            if fragment not in doc:
+                fail(f"执行顺序说明缺少索引上限说明：{fragment}", errors)
 
     if errors:
         print("\n".join(errors))

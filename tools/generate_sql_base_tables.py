@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "sql_base_tables"
+NO_VECTOR_OUT_DIR = ROOT / "sql_base_tables_no_vector_subpartition"
 TOP_PARTITION_VALUES = list(range(1, 9))
 SUBPARTITION_VALUES = [1, 2]
+TARGET_TOTAL_INDEX_COUNT = 61
 
 
 def table_kind(index: int) -> str:
@@ -92,11 +95,61 @@ SUBPARTITION BY {inner} (`subpart_id`) SUBPARTITIONS 2 (
 )"""
 
 
+def supplemental_index_lines(index: int, target_sql_index_count: int) -> list[str]:
+    index_lines = [
+        f"  KEY `idx_t{index}_extra_tenant_int` (`tenant_id`,`int_col`)",
+        f"  KEY `idx_t{index}_extra_subpart_big` (`subpart_id`,`bigint_col`)",
+        f"  KEY `idx_t{index}_extra_tenant_year_date` (`tenant_id`,`year_col`,`date_col`)",
+        f"  KEY `idx_t{index}_extra_char_varchar` (`char_col`,`varchar_col`(32))",
+        f"  KEY `idx_t{index}_extra_tiny_bool` (`tinyint_col`,`bool_col`)",
+        f"  KEY `idx_t{index}_extra_small_medium_desc` (`smallint_col` DESC,`mediumint_col`)",
+        f"  KEY `idx_t{index}_extra_decimal_desc` (`decimal_col` DESC)",
+        f"  KEY `idx_t{index}_extra_float_double_desc` (`float_col`,`double_col` DESC)",
+        f"  KEY `idx_t{index}_extra_datetime_date_desc` (`datetime_col`,`date_col` DESC)",
+        f"  KEY `idx_t{index}_extra_time_timestamp` (`time_col`,`timestamp_col`)",
+        f"  KEY `idx_t{index}_extra_varbinary_binary` (`varbinary_col`(32),`binary_col`)",
+        f"  KEY `idx_t{index}_extra_tinyblob` (`tinyblob_col`(8))",
+        f"  KEY `idx_t{index}_extra_blob_tenant` (`blob_col`(16),`tenant_id`)",
+        f"  KEY `idx_t{index}_extra_mediumblob` (`mediumblob_col`(16))",
+        f"  KEY `idx_t{index}_extra_longblob` (`longblob_col`(16))",
+        f"  KEY `idx_t{index}_extra_tinytext_enum` (`tinytext_col`(12),`enum_col`)",
+        f"  KEY `idx_t{index}_extra_text_set` (`text_col`(12),`set_col`)",
+        f"  KEY `idx_t{index}_extra_mediumtext_bit` (`mediumtext_col`(12),`bit_col`)",
+        f"  KEY `idx_t{index}_extra_longtext_unsigned` (`longtext_col`(12),`unsigned_int_col`)",
+        f"  KEY `idx_t{index}_extra_enum_scope` (`enum_col`,`tenant_id`,`subpart_id`)",
+        f"  KEY `idx_t{index}_extra_set_unsigned` (`set_col`,`unsigned_int_col`)",
+        f"  KEY `idx_t{index}_extra_bit_decimal` (`bit_col`,`unsigned_decimal_col`)",
+        f"  KEY `idx_t{index}_extra_parent_chain` (`parent_id_col`,`parent_int_col`,`parent_bigint_col`)",
+        f"  KEY `idx_t{index}_extra_metric_parent_desc` (`metric_parent_tenant_id`,`parent_bigint_col` DESC)",
+        f"  KEY `idx_t{index}_extra_json_n` ((cast(json_extract(`json_col`,_utf8mb4'$.n') as unsigned)))",
+        f"  KEY `idx_t{index}_extra_json_k_lower` ((lower(cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32)))))",
+        f"  KEY `idx_t{index}_extra_dayofweek` ((dayofweek(`date_col`)))",
+        f"  KEY `idx_t{index}_extra_month_datetime` ((month(`datetime_col`)))",
+        f"  KEY `idx_t{index}_extra_time_to_sec` ((time_to_sec(`time_col`)))",
+        f"  KEY `idx_t{index}_extra_abs_smallint` ((abs(`smallint_col`)))",
+        f"  KEY `idx_t{index}_extra_unsigned_coalesce` ((coalesce(`unsigned_int_col`,0)))",
+        f"  KEY `idx_t{index}_extra_concat_code` ((cast(left(concat(`char_col`,`varchar_col`),32) as char(32))))",
+        f"  KEY `idx_t{index}_extra_crc32_varchar` ((crc32(`varchar_col`)))",
+        f"  KEY `idx_t{index}_extra_date_days` ((to_days(`date_col`)))",
+        f"  KEY `idx_t{index}_extra_timestamp_seconds` ((timestampdiff(second,`datetime_col`,`timestamp_col`)))",
+        f"  KEY `idx_t{index}_extra_decimal_round` ((round(`decimal_col`,2)))",
+        f"  KEY `idx_t{index}_extra_float_floor` ((floor(`float_col`)))",
+        f"  KEY `idx_t{index}_extra_double_ceiling` ((ceiling(`double_col`)))",
+    ]
+    existing_sql_index_count = 23
+    missing_count = target_sql_index_count - existing_sql_index_count
+    if missing_count < 0 or missing_count > len(index_lines):
+        raise ValueError(f"无法补齐 t{index} 的索引数量：需要新增 {missing_count} 个")
+    return index_lines[:missing_count]
+
+
 def create_table_sql(index: int) -> str:
     kind = table_kind(index)
     create_keyword = "CREATE TEMPORARY TABLE" if kind == "temporary" else "CREATE TABLE"
     drop_keyword = "DROP TEMPORARY TABLE" if kind == "temporary" else "DROP TABLE"
     vector_col_suffix = f" COMMENT '{vector_index_comment(index)}'" if index <= 1 else ""
+    target_sql_index_count = TARGET_TOTAL_INDEX_COUNT - (1 if index <= 1 else 0)
+    supplemental_indexes = supplemental_index_lines(index, target_sql_index_count)
     lines = [
         "SET transaction_isolation = 'READ-COMMITTED';",
         "SET FOREIGN_KEY_CHECKS=0;",
@@ -170,6 +223,7 @@ def create_table_sql(index: int) -> str:
         f"  KEY `idx_t{index}_year_func` ((year(`datetime_col`))),",
         f"  KEY `idx_t{index}_arith_expr` (((`unsigned_int_col` + `smallint_col`))),",
         f"  KEY `idx_t{index}_json_expr` ((cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32)))),",
+        *[f"{index_line}," for index_line in supplemental_indexes],
         f"  SPATIAL KEY `sp_t{index}_point_col` (`point_col`)",
     ]
     if index > 0:
@@ -381,6 +435,77 @@ def execution_doc() -> str:
             "- `t0.sql` 和 `t1.sql` 是普通 InnoDB 表，每张表有且仅有一个向量索引。",
             "- `t2.sql` 到 `t6.sql` 是临时表，保留向量列但不创建向量索引。",
             "- `t7.sql` 到 `t26.sql` 是分区表，保留向量列但不创建向量索引。",
+            "- 按 InnoDB 每表最多 64 个二级索引计算，每张表补齐到索引上限数减 3，即 61 个索引；`PRIMARY KEY` 不计入该数量。",
+            "- `t0.sql` 和 `t1.sql` 的 61 个索引包含 1 个向量索引和 60 个常规二级索引，其余表为 61 个常规二级索引。",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def no_vector_table_sql(index: int) -> str:
+    sql = create_table_sql(index)
+    lines: list[str] = []
+    for line in sql.splitlines():
+        lowered = line.lower()
+        if "`vector_col`" in lowered or "`vector_aux_col`" in lowered:
+            continue
+        line = line.replace(" COMMENT='COLUMNAR=1'", "")
+        if index <= 1 and line.strip().startswith("SPATIAL KEY"):
+            lines.append(f"  KEY `idx_t{index}_extra_no_vector_fill` ((length(`varchar_col`))),")
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def no_vector_seed_sql() -> str:
+    seed_lines: list[str] = []
+    for line in seed_sql().splitlines():
+        if re.match(r"DELETE FROM `t(?:1[1-9]|2[0-6])`;", line):
+            continue
+        if re.match(r"/\* t(?:1[1-9]|2[0-6]):", line):
+            continue
+        if re.match(r"INSERT INTO `t(?:1[1-9]|2[0-6])`", line):
+            continue
+        if line.startswith("INSERT INTO `t"):
+            line = line.replace(",`vector_col`,`vector_aux_col`", "")
+            line = re.sub(r", STRING_TO_VECTOR\('[^']+'\), STRING_TO_VECTOR\('[^']+'\)\);$", ");", line)
+        seed_lines.append(line)
+    return "\n".join(seed_lines) + "\n"
+
+
+def no_vector_execution_doc() -> str:
+    table_files = [f"t{index}.sql" for index in range(11)]
+    lines = [
+        "# SQL 基表执行顺序说明",
+        "",
+        "本目录下的 SQL 文件需要在同一个数据库中执行，不在文件内创建或切换数据库。",
+        "",
+        "## 执行前提",
+        "",
+        "- `t2.sql` 到 `t6.sql` 是临时表，必须和 `zz_seed_fk_data.sql` 在同一个 session 内执行。",
+        "- 每个建表文件都会短暂执行 `SET FOREIGN_KEY_CHECKS=0;`，建表完成后恢复为 `SET FOREIGN_KEY_CHECKS=1;`。",
+        "- `zz_seed_fk_data.sql` 会先按依赖反序清理数据，再恢复外键检查并插入种子数据。",
+        "- 按 InnoDB 每表最多 64 个二级索引计算，每张表补齐到索引上限数减 3，即 61 个索引；`PRIMARY KEY` 不计入该数量。",
+        "",
+        "## 推荐执行顺序",
+        "",
+        "1. 执行普通父表：`t0.sql`、`t1.sql`。",
+        "2. 在同一个 session 中执行临时表：`t2.sql`、`t3.sql`、`t4.sql`、`t5.sql`、`t6.sql`。",
+        "3. 执行一级分区表：`t7.sql`、`t8.sql`、`t9.sql`、`t10.sql`。",
+        "4. 执行种子数据脚本：`zz_seed_fk_data.sql`。",
+        "",
+        "## 完整文件顺序",
+        "",
+    ]
+    lines.extend(f"{idx + 1}. `{name}`" for idx, name in enumerate(table_files))
+    lines.append(f"{len(table_files) + 1}. `zz_seed_fk_data.sql`")
+    lines.extend(
+        [
+            "",
+            "## 分区数据覆盖",
+            "",
+            "- `t7.sql` 到 `t10.sql` 每张一级分区表有 8 个一级分区。",
+            "- 种子数据使用 `tenant_id` 1 到 8，保证每个一级分区至少一行。",
+            "- 外键父表固定为 `t0` 或 `t1`，避免永久表引用临时表造成生命周期不稳定。",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -394,6 +519,13 @@ def main() -> None:
         (OUT_DIR / f"t{index}.sql").write_text(create_table_sql(index), encoding="utf-8")
     (OUT_DIR / "zz_seed_fk_data.sql").write_text(seed_sql(), encoding="utf-8")
     (OUT_DIR / "执行顺序说明.md").write_text(execution_doc(), encoding="utf-8")
+    NO_VECTOR_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    for path in NO_VECTOR_OUT_DIR.glob("*.sql"):
+        path.unlink()
+    for index in range(11):
+        (NO_VECTOR_OUT_DIR / f"t{index}.sql").write_text(no_vector_table_sql(index), encoding="utf-8")
+    (NO_VECTOR_OUT_DIR / "zz_seed_fk_data.sql").write_text(no_vector_seed_sql(), encoding="utf-8")
+    (NO_VECTOR_OUT_DIR / "执行顺序说明.md").write_text(no_vector_execution_doc(), encoding="utf-8")
 
 
 if __name__ == "__main__":

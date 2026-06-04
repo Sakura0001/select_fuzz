@@ -64,7 +64,6 @@ def test_创建停止任务并查询任务列表(tmp_path: Path) -> None:
             "port": 3306,
             "username": "fuzz",
             "password": "secret",
-            "database": "select_fuzz",
             "jump_host": "jump-prod",
         },
     )
@@ -156,11 +155,34 @@ def test_服务层创建真实任务时会执行基表_sql(tmp_path: Path) -> No
             "port": 3306,
             "username": "fuzz",
             "password": "secret",
-            "database": "select_fuzz",
         },
     )
 
     assert response.status_code == 200
+    assert response.json()["database"] == "test"
     assert fake_db.executed == [
-        "CREATE TABLE base_api (id BIGINT NOT NULL, name VARCHAR(64), PRIMARY KEY (id));"
+        "CREATE DATABASE IF NOT EXISTS `test`",
+        "USE `test`",
+        "SET FOREIGN_KEY_CHECKS=0",
+        "DROP TABLE IF EXISTS `base_api`",
+        "SET FOREIGN_KEY_CHECKS=1",
+        "CREATE TABLE base_api (id BIGINT NOT NULL, name VARCHAR(64), PRIMARY KEY (id));",
     ]
+
+
+def test_跳板机_post_接口保存配置(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+
+    response = client.post(
+        "/api/jump-hosts",
+        json={
+            "name": "jump-dev",
+            "host": "10.9.0.1",
+            "port": 22,
+            "username": "ops",
+        },
+    )
+    jump_hosts = client.get("/api/jump-hosts").json()
+
+    assert response.status_code == 200
+    assert any(item["name"] == "jump-dev" for item in jump_hosts)

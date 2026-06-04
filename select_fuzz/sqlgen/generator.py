@@ -53,7 +53,6 @@ class SQLGenerator:
             join_table = next(table for table in tables if table.name != base_table.name)
             join_clause = self._join_clause(base_table, join_table)
         where_clause = self._where_clause(base_table)
-        group_clause = self._group_clause(base_table)
         order_clause = self._order_clause(base_table)
         self._hit("FROM")
         self._hit("WHERE")
@@ -65,7 +64,6 @@ class SQLGenerator:
                 from_clause,
                 join_clause,
                 where_clause,
-                group_clause,
                 order_clause,
                 "LIMIT 50",
             ]
@@ -110,14 +108,6 @@ class SQLGenerator:
             return f"WHERE t0.`{column.name}` LIKE '%a%'"
         self._hit("IS NULL")
         return f"WHERE t0.`{column.name}` IS NOT NULL"
-
-    def _group_clause(self, table: TableMetadata) -> str:
-        column = self._first_column(table, ColumnTypeFamily.STRING)
-        if not column:
-            return ""
-        self._hit("GROUP BY")
-        self._hit("COUNT")
-        return f"GROUP BY t0.`{column.name}` HAVING COUNT(*) >= 0"
 
     def _order_clause(self, table: TableMetadata) -> str:
         column = self._predicate_column(table)

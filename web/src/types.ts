@@ -22,6 +22,23 @@ export interface FuzzTask {
   events: LostConnectionEvent[];
 }
 
+export interface JumpHost {
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  private_key_path?: string | null;
+}
+
+export interface CreateTaskPayload {
+  node_name: string;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  jump_host?: string | null;
+}
+
 export interface SummaryMetric {
   activeTasks: number;
   sqlTotal: number;

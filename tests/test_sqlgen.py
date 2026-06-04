@@ -74,3 +74,12 @@ def test_sql_长度保护会回退到简单查询() -> None:
 
     assert len(sql) <= 40
     assert sql.startswith("SELECT")
+
+
+def test_默认生成_sql_避免_only_full_group_by_风险() -> None:
+    generator = SQLGenerator(random_seed=1)
+
+    sql = generator.generate(_tables())
+
+    assert " GROUP BY " not in sql
+    assert " HAVING " not in sql

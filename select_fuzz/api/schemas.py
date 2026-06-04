@@ -11,7 +11,7 @@ class TaskCreateRequest(BaseModel):
     port: int = Field(..., description="数据库端口")
     username: str = Field(..., description="数据库用户")
     password: str = Field(..., description="数据库密码")
-    database: str = Field(..., description="数据库名")
+    database: str = Field(default="test", description="数据库名")
     jump_host: Optional[str] = Field(default=None, description="跳板机配置名")
 
 
@@ -20,6 +20,7 @@ class TaskResponse(BaseModel):
     node_name: str
     target: str
     status: str
+    database: str = "test"
     jump_host: Optional[str] = None
     sql_total: int = 0
     lost_connection_total: int = 0

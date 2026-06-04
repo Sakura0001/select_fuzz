@@ -39,7 +39,6 @@ class PyMySQLClient:
             port=self.port,
             user=self.node.username,
             password=self.node.password,
-            database=self.node.database,
             autocommit=True,
             connect_timeout=10,
             read_timeout=60,

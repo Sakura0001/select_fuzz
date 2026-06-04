@@ -23,7 +23,7 @@ class TargetNodeConfig:
     port: int
     username: str
     password: str
-    database: str
+    database: str = "test"
     jump_host: Optional[str] = None
 
     @property

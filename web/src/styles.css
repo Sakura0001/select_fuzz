@@ -79,6 +79,14 @@ body {
   width: 100%;
 }
 
+.full-input {
+  width: 100%;
+}
+
+.form-note {
+  margin-bottom: 12px;
+}
+
 .task-card {
   background: rgba(15, 23, 42, 0.74) !important;
   border: 1px solid rgba(148, 163, 184, 0.16);

@@ -1,4 +1,4 @@
-import type { FuzzTask, SummaryMetric } from "./types";
+import type { CreateTaskPayload, FuzzTask, JumpHost, SummaryMetric } from "./types";
 
 const fallbackTasks: FuzzTask[] = [
   {
@@ -87,16 +87,31 @@ export async function loadTasks(): Promise<FuzzTask[]> {
   }
 }
 
-export async function createTask(): Promise<FuzzTask> {
-  const payload = {
-    node_name: `polardb-node-${Math.floor(Math.random() * 90 + 10)}`,
-    host: "172.18.4.12",
-    port: 3306,
-    username: "fuzz",
-    password: "secret",
-    database: "select_fuzz",
-    jump_host: "jump-prod"
-  };
+export async function loadJumpHosts(): Promise<JumpHost[]> {
+  try {
+    const response = await fetch("/api/jump-hosts");
+    if (!response.ok) {
+      return [];
+    }
+    return (await response.json()) as JumpHost[];
+  } catch {
+    return [];
+  }
+}
+
+export async function addJumpHost(payload: JumpHost): Promise<JumpHost> {
+  const response = await fetch("/api/jump-hosts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error("保存跳板机失败");
+  }
+  return (await response.json()) as JumpHost;
+}
+
+export async function createTask(payload: CreateTaskPayload): Promise<FuzzTask> {
   try {
     const response = await fetch("/api/tasks", {
       method: "POST",
@@ -114,7 +129,7 @@ export async function createTask(): Promise<FuzzTask> {
       node_name: payload.node_name,
       target: `${payload.host}:${payload.port}`,
       status: "执行 SQL",
-      jump_host: payload.jump_host,
+      jump_host: payload.jump_host ?? null,
       sql_total: 0,
       lost_connection_total: 0,
       sql_rate: 0,

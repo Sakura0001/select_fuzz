@@ -58,13 +58,19 @@ class FuzzTask:
         self.status = TaskStatus.CONNECTING
         self.db.connect()
         self.status = TaskStatus.SEEDING
+        database = self.node.database or "test"
+        self.db.execute(f"CREATE DATABASE IF NOT EXISTS {_quote_identifier(database)}")
+        self.db.execute(f"USE {_quote_identifier(database)}")
         self.tables.clear()
-        for sql_file in load_base_sql_files(self.base_sql_dir):
-            self.db.execute(sql_file.sql)
+        sql_files = load_base_sql_files(self.base_sql_dir)
+        for sql_file in sql_files:
             try:
                 self.tables.append(parse_create_table(sql_file.sql))
             except ValueError:
                 continue
+        self._reset_base_tables()
+        for sql_file in sql_files:
+            self.db.execute(sql_file.sql)
         self.status = TaskStatus.RUNNING
         self._write_metrics()
 
@@ -159,3 +165,15 @@ class FuzzTask:
             self.sql_total,
             self.lost_connection_total,
         )
+
+    def _reset_base_tables(self) -> None:
+        if not self.tables:
+            return
+        self.db.execute("SET FOREIGN_KEY_CHECKS=0")
+        for table in reversed(self.tables):
+            self.db.execute(f"DROP TABLE IF EXISTS {_quote_identifier(table.name)}")
+        self.db.execute("SET FOREIGN_KEY_CHECKS=1")
+
+
+def _quote_identifier(identifier: str) -> str:
+    return f"`{identifier.replace('`', '``')}`"

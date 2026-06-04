@@ -84,8 +84,58 @@ def test_任务启动时按顺序执行基表目录全部_sql(tmp_path: Path) ->
     task.start()
 
     assert task.status is TaskStatus.RUNNING
-    assert db.executed[0].startswith("CREATE TABLE parent_table")
-    assert db.executed[1].startswith("CREATE TABLE child_table")
+    assert db.executed[0] == "CREATE DATABASE IF NOT EXISTS `select_fuzz`"
+    assert db.executed[1] == "USE `select_fuzz`"
+    assert db.executed[2] == "SET FOREIGN_KEY_CHECKS=0"
+    assert db.executed[3] == "DROP TABLE IF EXISTS `child_table`"
+    assert db.executed[4] == "DROP TABLE IF EXISTS `parent_table`"
+    assert db.executed[5] == "SET FOREIGN_KEY_CHECKS=1"
+    assert db.executed[6].startswith("CREATE TABLE parent_table")
+    assert db.executed[7].startswith("CREATE TABLE child_table")
+
+
+def test_任务启动默认创建并使用_test_库(tmp_path: Path) -> None:
+    db = FakeDatabase()
+    node = TargetNodeConfig(
+        name="node-a",
+        host="127.0.0.1",
+        port=3306,
+        username="root",
+        password="Taurus_123",
+    )
+    task = FuzzTask(
+        task_id="task-1",
+        node=node,
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    task.start()
+
+    assert db.executed[0] == "CREATE DATABASE IF NOT EXISTS `test`"
+    assert db.executed[1] == "USE `test`"
+
+
+def test_任务启动会先清理已存在基表再重建(tmp_path: Path) -> None:
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    task.start()
+
+    drop_child_index = db.executed.index("DROP TABLE IF EXISTS `child_table`")
+    create_child_index = next(index for index, sql in enumerate(db.executed) if sql.startswith("CREATE TABLE child_table"))
+    assert drop_child_index < create_child_index
 
 
 def test_执行查询会写入_sql_日志(tmp_path: Path) -> None:
@@ -137,4 +187,4 @@ def test_lost_connection_后每分钟检测恢复且不重建基表(tmp_path: Pa
     clock.advance(60)
     task.probe_recovery()
     assert task.status is TaskStatus.RUNNING
-    assert len([sql for sql in db.executed if sql.startswith("CREATE TABLE")]) == ddl_count
+    assert len([sql for sql in db.executed if sql.startswith("CREATE TABLE")]) == 2

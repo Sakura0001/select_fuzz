@@ -24,6 +24,7 @@ class TaskSnapshot:
     node_name: str
     target: str
     status: str
+    database: str = "test"
     jump_host: Optional[str] = None
     sql_total: int = 0
     lost_connection_total: int = 0
@@ -60,6 +61,7 @@ class RuntimeService:
             node_name=request.node_name,
             target=f"{request.host}:{request.port}",
             status="执行 SQL",
+            database=request.database or "test",
             jump_host=request.jump_host,
         )
         self._tasks[task_id] = snapshot
@@ -70,7 +72,7 @@ class RuntimeService:
                 port=request.port,
                 username=request.username,
                 password=request.password,
-                database=request.database,
+                database=request.database or "test",
                 jump_host=request.jump_host,
             )
             real_task = FuzzTask(

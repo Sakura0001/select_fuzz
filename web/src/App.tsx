@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Col, Collapse, Form, Input, Layout, Progress, Row, Select, Space, Statistic, Steps, Tag, Typography } from "antd";
+import { Alert, Button, Card, Col, Collapse, Form, Input, InputNumber, Layout, Progress, Row, Select, Space, Statistic, Steps, Tag, Typography, message } from "antd";
 import { ApiOutlined, ClusterOutlined, DatabaseOutlined, DeploymentUnitOutlined, PlayCircleOutlined, WarningOutlined } from "@ant-design/icons";
 import * as echarts from "echarts";
-import { createTask, loadTasks, summarize } from "./api";
-import type { FuzzTask } from "./types";
+import { addJumpHost, createTask, loadJumpHosts, loadTasks, summarize } from "./api";
+import type { CreateTaskPayload, FuzzTask, JumpHost } from "./types";
 
 const { Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -125,16 +125,42 @@ function TaskCard({ task }: { task: FuzzTask }) {
 
 function App() {
   const [tasks, setTasks] = useState<FuzzTask[]>([]);
+  const [jumpHosts, setJumpHosts] = useState<JumpHost[]>([]);
+  const [taskForm] = Form.useForm<CreateTaskPayload>();
+  const [jumpForm] = Form.useForm<JumpHost>();
   const metrics = useMemo(() => summarize(tasks), [tasks]);
 
   useEffect(() => {
     loadTasks().then(setTasks);
+    loadJumpHosts().then(setJumpHosts);
   }, []);
 
-  const handleStartTask = async () => {
-    const task = await createTask();
+  const handleStartTask = async (values: CreateTaskPayload) => {
+    const task = await createTask({
+      ...values,
+      node_name: values.node_name || `${values.host}:${values.port}`,
+      jump_host: values.jump_host || null
+    });
     setTasks((current) => [task, ...current]);
   };
+
+  const handleSaveJumpHost = async (values: JumpHost) => {
+    const saved = await addJumpHost(values);
+    setJumpHosts((current) => {
+      const others = current.filter((item) => item.name !== saved.name);
+      return [...others, saved];
+    });
+    jumpForm.resetFields();
+    message.success("跳板机配置已保存");
+  };
+
+  const jumpOptions = [
+    { label: "不使用跳板机", value: "" },
+    ...jumpHosts.map((item) => ({
+      label: `${item.name} · ${item.username}@${item.host}`,
+      value: item.name
+    }))
+  ];
 
   return (
     <Layout className="app-shell">
@@ -181,19 +207,56 @@ function App() {
           <Col span={8}>
             <Space direction="vertical" size={16} className="right-panel">
               <Card title="新建任务" bordered={false}>
-                <Form layout="vertical">
-                  <Form.Item label="跳板机配置">
-                    <Select value="jump-prod" options={[{ label: "jump-prod · ops@10.2.0.8", value: "jump-prod" }]} />
+                <Form
+                  layout="vertical"
+                  form={taskForm}
+                  initialValues={{
+                    node_name: "local-mysql",
+                    host: "127.0.0.1",
+                    port: 3306,
+                    username: "root",
+                    password: "",
+                    jump_host: ""
+                  }}
+                  onFinish={handleStartTask}
+                >
+                  <Form.Item name="jump_host" label="跳板机配置">
+                    <Select options={jumpOptions} />
                   </Form.Item>
                   <Row gutter={8}>
-                    <Col span={14}><Form.Item label="数据库地址"><Input value="172.18.4.12" readOnly /></Form.Item></Col>
-                    <Col span={10}><Form.Item label="端口"><Input value="3306" readOnly /></Form.Item></Col>
+                    <Col span={14}><Form.Item name="host" label="数据库地址" rules={[{ required: true, message: "请输入数据库地址" }]}><Input /></Form.Item></Col>
+                    <Col span={10}><Form.Item name="port" label="端口" rules={[{ required: true, message: "请输入端口" }]}><InputNumber min={1} max={65535} className="full-input" /></Form.Item></Col>
                   </Row>
                   <Row gutter={8}>
-                    <Col span={12}><Form.Item label="用户名"><Input value="fuzz" readOnly /></Form.Item></Col>
-                    <Col span={12}><Form.Item label="数据库名"><Input value="select_fuzz" readOnly /></Form.Item></Col>
+                    <Col span={12}><Form.Item name="username" label="用户名" rules={[{ required: true, message: "请输入用户名" }]}><Input /></Form.Item></Col>
+                    <Col span={12}><Form.Item name="password" label="密码" rules={[{ required: true, message: "请输入密码" }]}><Input.Password /></Form.Item></Col>
                   </Row>
-                  <Button type="primary" block icon={<PlayCircleOutlined />} onClick={handleStartTask}>启动任务</Button>
+                  <Form.Item name="node_name" label="任务名称" rules={[{ required: true, message: "请输入任务名称" }]}>
+                    <Input />
+                  </Form.Item>
+                  <Alert type="info" showIcon message="后台会自动创建并使用 test 库，任务表单无需填写目标库。" className="form-note" />
+                  <Button type="primary" block icon={<PlayCircleOutlined />} htmlType="submit">启动任务</Button>
+                </Form>
+              </Card>
+              <Card title="跳板机管理" bordered={false}>
+                <Form
+                  layout="vertical"
+                  form={jumpForm}
+                  initialValues={{ name: "jump-prod", host: "", port: 22, username: "ops", private_key_path: "" }}
+                  onFinish={handleSaveJumpHost}
+                >
+                  <Row gutter={8}>
+                    <Col span={12}><Form.Item name="name" label="配置名" rules={[{ required: true, message: "请输入配置名" }]}><Input /></Form.Item></Col>
+                    <Col span={12}><Form.Item name="username" label="SSH 用户" rules={[{ required: true, message: "请输入 SSH 用户" }]}><Input /></Form.Item></Col>
+                  </Row>
+                  <Row gutter={8}>
+                    <Col span={16}><Form.Item name="host" label="跳板机地址" rules={[{ required: true, message: "请输入跳板机地址" }]}><Input /></Form.Item></Col>
+                    <Col span={8}><Form.Item name="port" label="SSH 端口" rules={[{ required: true, message: "请输入 SSH 端口" }]}><InputNumber min={1} max={65535} className="full-input" /></Form.Item></Col>
+                  </Row>
+                  <Form.Item name="private_key_path" label="私钥路径">
+                    <Input placeholder="可选，例如 ~/.ssh/id_rsa" />
+                  </Form.Item>
+                  <Button block onClick={() => jumpForm.submit()}>保存跳板机</Button>
                 </Form>
               </Card>
               <Card title="执行速率趋势" bordered={false}>

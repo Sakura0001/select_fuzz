@@ -166,7 +166,7 @@ def test_服务层创建真实任务时会执行基表_sql(tmp_path: Path) -> No
         "SET FOREIGN_KEY_CHECKS=0",
         "DROP TABLE IF EXISTS `base_api`",
         "SET FOREIGN_KEY_CHECKS=1",
-        "CREATE TABLE base_api (id BIGINT NOT NULL, name VARCHAR(64), PRIMARY KEY (id));",
+        "CREATE TABLE base_api (id BIGINT NOT NULL, name VARCHAR(64), PRIMARY KEY (id))",
     ]
 
 

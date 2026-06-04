@@ -138,6 +138,39 @@ def test_任务启动会先清理已存在基表再重建(tmp_path: Path) -> Non
     assert drop_child_index < create_child_index
 
 
+def test_任务启动会逐条执行基表文件内的多条_sql(tmp_path: Path) -> None:
+    directory = tmp_path / "base"
+    directory.mkdir()
+    (directory / "t2.sql").write_text(
+        """
+        SET FOREIGN_KEY_CHECKS=0;
+        DROP TEMPORARY TABLE IF EXISTS `temp_table`;
+        CREATE TEMPORARY TABLE `temp_table` (
+          `id` BIGINT NOT NULL,
+          PRIMARY KEY (`id`)
+        );
+        SET FOREIGN_KEY_CHECKS=1;
+        """,
+        encoding="utf-8",
+    )
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=directory,
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    task.start()
+
+    assert "DROP TEMPORARY TABLE IF EXISTS `temp_table`" in db.executed
+    assert any(sql.startswith("CREATE TEMPORARY TABLE `temp_table`") for sql in db.executed)
+    assert not any(";\n" in sql for sql in db.executed)
+
+
 def test_执行查询会写入_sql_日志(tmp_path: Path) -> None:
     db = FakeDatabase()
     task = FuzzTask(

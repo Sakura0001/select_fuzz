@@ -16,6 +16,31 @@ def test_按文件名顺序读取基表_sql(tmp_path: Path) -> None:
     assert files[0].sql == "CREATE TABLE a (id INT);"
 
 
+def test_基表_sql_按数字自然顺序读取(tmp_path: Path) -> None:
+    for name in ["t10.sql", "t2.sql", "t1.sql", "zz_seed_fk_data.sql"]:
+        (tmp_path / name).write_text(f"SELECT '{name}';", encoding="utf-8")
+
+    files = load_base_sql_files(tmp_path)
+
+    assert [item.path.name for item in files] == ["t1.sql", "t2.sql", "t10.sql", "zz_seed_fk_data.sql"]
+
+
+def test_解析_create_temporary_table() -> None:
+    table = parse_create_table(
+        """
+        SET FOREIGN_KEY_CHECKS=0;
+        CREATE TEMPORARY TABLE `temp_base` (
+          `id` BIGINT NOT NULL,
+          `embedding` VECTOR(4),
+          PRIMARY KEY (`id`)
+        );
+        """
+    )
+
+    assert table.name == "temp_base"
+    assert table.columns["embedding"].type_family is ColumnTypeFamily.VECTOR
+
+
 def test_解析普通表列索引外键分区和向量列() -> None:
     sql = """
     CREATE TABLE IF NOT EXISTS vector_child (

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from select_fuzz.config import TargetNodeConfig
-from select_fuzz.metadata.base_sql import load_base_sql_files
+from select_fuzz.metadata.base_sql import load_base_sql_files, split_sql_statements
 from select_fuzz.metadata.ddl_parser import parse_create_table
 from select_fuzz.metadata.models import TableMetadata
 from select_fuzz.monitor.events import LostConnectionDeduplicator, LostConnectionEvent, is_lost_connection_error
@@ -70,7 +70,8 @@ class FuzzTask:
                 continue
         self._reset_base_tables()
         for sql_file in sql_files:
-            self.db.execute(sql_file.sql)
+            for statement in split_sql_statements(sql_file.sql):
+                self.db.execute(statement)
         self.status = TaskStatus.RUNNING
         self._write_metrics()
 

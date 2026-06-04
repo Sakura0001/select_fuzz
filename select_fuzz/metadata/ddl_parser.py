@@ -14,7 +14,7 @@ from .models import (
 
 
 _CREATE_TABLE_RE = re.compile(
-    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(?P<name>[\w$]+)`?\s*\(",
+    r"CREATE\s+(?:TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(?P<name>[\w$]+)`?\s*\(",
     re.IGNORECASE,
 )
 

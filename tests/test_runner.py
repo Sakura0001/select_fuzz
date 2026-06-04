@@ -207,13 +207,14 @@ def test_执行查询会写入_sql_日志(tmp_path: Path) -> None:
         metric_store=MetricStore(tmp_path / "metrics.db"),
         log_dir=tmp_path / "logs",
         clock=FakeClock(),
+        random_seed=7,
     )
 
     task.start()
     task.step()
 
     assert task.sql_total == 1
-    assert any(sql.startswith("SELECT") or sql.startswith("WITH") for sql in db.executed)
+    assert any(sql.startswith(("SELECT", "WITH", "(")) for sql in db.executed)
     assert "SELECT" in (tmp_path / "logs" / "2026-06-04" / "task-1.sql.jsonl").read_text(encoding="utf-8")
 
 

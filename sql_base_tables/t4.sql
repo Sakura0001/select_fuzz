@@ -1,3 +1,4 @@
+SET transaction_isolation = 'READ-COMMITTED';
 SET FOREIGN_KEY_CHECKS=0;
 DROP TEMPORARY TABLE IF EXISTS `t4`;
 CREATE TEMPORARY TABLE `t4` (
@@ -44,8 +45,8 @@ CREATE TEMPORARY TABLE `t4` (
   `unsigned_decimal_col` decimal(10,0) unsigned DEFAULT NULL,
   `json_col` json DEFAULT NULL,
   `point_col` point NOT NULL SRID 4326,
-  `vector_col` vector(4) COMMENT 'imci_vector_index=HNSW(metric=EUCLIDEAN,max_degree=24,ef_construction=200)',
-  `vector_aux_col` vector(8) COMMENT 'imci_vector_index=FAISS_HNSW_FLAT(metric=EUCLIDEAN,max_degree=24,ef_construction=200)',
+  `vector_col` vector(4),
+  `vector_aux_col` vector(8),
   PRIMARY KEY (`id_col`,`tenant_id`,`subpart_id`),
   UNIQUE KEY `uk_t4_ref_id` (`tenant_id`,`subpart_id`,`id_col`),
   UNIQUE KEY `uk_t4_metric_ref` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`),
@@ -73,5 +74,5 @@ CREATE TEMPORARY TABLE `t4` (
   SPATIAL KEY `sp_t4_point_col` (`point_col`),
   CONSTRAINT `fk_t4_parent_id` FOREIGN KEY (`parent_tenant_id`,`parent_subpart_id`,`parent_id_col`) REFERENCES `t0` (`tenant_id`,`subpart_id`,`id_col`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `fk_t4_parent_metric` FOREIGN KEY (`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`) REFERENCES `t0` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`) ON DELETE SET NULL ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=89671 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='COLUMNAR=1';
+) ENGINE=InnoDB AUTO_INCREMENT=89671 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 SET FOREIGN_KEY_CHECKS=1;

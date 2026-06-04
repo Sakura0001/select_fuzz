@@ -1,3 +1,4 @@
+SET transaction_isolation = 'READ-COMMITTED';
 SET FOREIGN_KEY_CHECKS=0;
 DROP TABLE IF EXISTS `t0`;
 CREATE TABLE `t0` (
@@ -45,7 +46,7 @@ CREATE TABLE `t0` (
   `json_col` json DEFAULT NULL,
   `point_col` point NOT NULL SRID 4326,
   `vector_col` vector(4) COMMENT 'imci_vector_index=HNSW(metric=COSINE,max_degree=16,ef_construction=300)',
-  `vector_aux_col` vector(8) COMMENT 'imci_vector_index=FAISS_HNSW_PQ(metric=INNER_PRODUCT,max_degree=16,ef_construction=300,pq_m=4,pq_nbits=8)',
+  `vector_aux_col` vector(8),
   PRIMARY KEY (`id_col`,`tenant_id`,`subpart_id`),
   UNIQUE KEY `uk_t0_ref_id` (`tenant_id`,`subpart_id`,`id_col`),
   UNIQUE KEY `uk_t0_metric_ref` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`),

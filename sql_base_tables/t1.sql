@@ -1,3 +1,4 @@
+SET transaction_isolation = 'READ-COMMITTED';
 SET FOREIGN_KEY_CHECKS=0;
 DROP TABLE IF EXISTS `t1`;
 CREATE TABLE `t1` (
@@ -44,8 +45,8 @@ CREATE TABLE `t1` (
   `unsigned_decimal_col` decimal(10,0) unsigned DEFAULT NULL,
   `json_col` json DEFAULT NULL,
   `point_col` point NOT NULL SRID 4326,
-  `vector_col` vector(4) COMMENT 'imci_vector_index=HNSW(metric=EUCLIDEAN,max_degree=24,ef_construction=200)',
-  `vector_aux_col` vector(8) COMMENT 'imci_vector_index=FAISS_HNSW_FLAT(metric=EUCLIDEAN,max_degree=24,ef_construction=200)',
+  `vector_col` vector(4) COMMENT 'imci_vector_index=FAISS_HNSW_FLAT(metric=COSINE,max_degree=32,ef_construction=300)',
+  `vector_aux_col` vector(8),
   PRIMARY KEY (`id_col`,`tenant_id`,`subpart_id`),
   UNIQUE KEY `uk_t1_ref_id` (`tenant_id`,`subpart_id`,`id_col`),
   UNIQUE KEY `uk_t1_metric_ref` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`),

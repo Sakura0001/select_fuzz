@@ -1,3 +1,4 @@
+SET transaction_isolation = 'READ-COMMITTED';
 SET FOREIGN_KEY_CHECKS=0;
 DELETE FROM `t26`;
 DELETE FROM `t25`;

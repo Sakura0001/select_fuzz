@@ -58,6 +58,33 @@ def _base_dir(tmp_path: Path) -> Path:
     return directory
 
 
+def _base_dir_with_temporary_table(tmp_path: Path) -> Path:
+    directory = tmp_path / "base_with_temp"
+    directory.mkdir()
+    (directory / "t0.sql").write_text(
+        "CREATE TABLE t0 (id BIGINT NOT NULL, PRIMARY KEY (id));",
+        encoding="utf-8",
+    )
+    (directory / "t2.sql").write_text(
+        """
+        DROP TEMPORARY TABLE IF EXISTS `t2`;
+        CREATE TEMPORARY TABLE `t2` (
+          `id` BIGINT NOT NULL,
+          PRIMARY KEY (`id`)
+        );
+        """,
+        encoding="utf-8",
+    )
+    (directory / "zz_seed_fk_data.sql").write_text(
+        """
+        INSERT INTO `t0` (`id`) VALUES (1);
+        INSERT INTO `t2` (`id`) VALUES (2);
+        """,
+        encoding="utf-8",
+    )
+    return directory
+
+
 def _node() -> TargetNodeConfig:
     return TargetNodeConfig(
         name="node-a",
@@ -85,14 +112,11 @@ def test_任务启动时按顺序执行基表目录全部_sql(tmp_path: Path) ->
     task.start()
 
     assert task.status is TaskStatus.RUNNING
-    assert db.executed[0] == "CREATE DATABASE IF NOT EXISTS `select_fuzz`"
-    assert db.executed[1] == "USE `select_fuzz`"
-    assert db.executed[2] == "SET FOREIGN_KEY_CHECKS=0"
-    assert db.executed[3] == "DROP TABLE IF EXISTS `child_table`"
-    assert db.executed[4] == "DROP TABLE IF EXISTS `parent_table`"
-    assert db.executed[5] == "SET FOREIGN_KEY_CHECKS=1"
-    assert db.executed[6].startswith("CREATE TABLE parent_table")
-    assert db.executed[7].startswith("CREATE TABLE child_table")
+    assert db.executed[0] == "DROP DATABASE IF EXISTS `select_fuzz`"
+    assert db.executed[1] == "CREATE DATABASE `select_fuzz`"
+    assert db.executed[2] == "USE `select_fuzz`"
+    assert db.executed[3].startswith("CREATE TABLE parent_table")
+    assert db.executed[4].startswith("CREATE TABLE child_table")
 
 
 def test_任务启动默认创建并使用_test_库(tmp_path: Path) -> None:
@@ -116,8 +140,9 @@ def test_任务启动默认创建并使用_test_库(tmp_path: Path) -> None:
 
     task.start()
 
-    assert db.executed[0] == "CREATE DATABASE IF NOT EXISTS `test`"
-    assert db.executed[1] == "USE `test`"
+    assert db.executed[0] == "DROP DATABASE IF EXISTS `test`"
+    assert db.executed[1] == "CREATE DATABASE `test`"
+    assert db.executed[2] == "USE `test`"
 
 
 def test_任务启动会先清理已存在基表再重建(tmp_path: Path) -> None:
@@ -134,9 +159,9 @@ def test_任务启动会先清理已存在基表再重建(tmp_path: Path) -> Non
 
     task.start()
 
-    drop_child_index = db.executed.index("DROP TABLE IF EXISTS `child_table`")
+    drop_database_index = db.executed.index("DROP DATABASE IF EXISTS `select_fuzz`")
     create_child_index = next(index for index, sql in enumerate(db.executed) if sql.startswith("CREATE TABLE child_table"))
-    assert drop_child_index < create_child_index
+    assert drop_database_index < create_child_index
 
 
 def test_任务启动会逐条执行基表文件内的多条_sql(tmp_path: Path) -> None:
@@ -192,7 +217,7 @@ def test_执行查询会写入_sql_日志(tmp_path: Path) -> None:
     assert "SELECT" in (tmp_path / "logs" / "2026-06-04" / "task-1.sql.jsonl").read_text(encoding="utf-8")
 
 
-def test_lost_connection_后每分钟检测恢复且不重建基表(tmp_path: Path) -> None:
+def test_lost_connection_后每分钟检测恢复且不重建永久表(tmp_path: Path) -> None:
     clock = FakeClock()
     db = FakeDatabase()
     db.fail_next_query = True
@@ -222,3 +247,31 @@ def test_lost_connection_后每分钟检测恢复且不重建基表(tmp_path: Pa
     task.probe_recovery()
     assert task.status is TaskStatus.RUNNING
     assert len([sql for sql in db.executed if sql.startswith("CREATE TABLE")]) == 2
+
+
+def test_lost_connection_恢复后重建临时表并只插入临时表数据(tmp_path: Path) -> None:
+    clock = FakeClock()
+    db = FakeDatabase()
+    db.fail_next_query = True
+    db.ping_results = [True]
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir_with_temporary_table(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+
+    task.start()
+    task.step()
+    clock.advance(60)
+    task.probe_recovery()
+
+    assert task.status is TaskStatus.RUNNING
+    assert db.executed.count("USE `select_fuzz`") == 2
+    assert len([sql for sql in db.executed if sql.startswith("CREATE TABLE t0")]) == 1
+    assert len([sql for sql in db.executed if sql.startswith("CREATE TEMPORARY TABLE `t2`")]) == 2
+    assert db.executed.count("INSERT INTO `t0` (`id`) VALUES (1)") == 1
+    assert db.executed.count("INSERT INTO `t2` (`id`) VALUES (2)") == 2

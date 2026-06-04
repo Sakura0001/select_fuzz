@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -9,7 +10,7 @@ from typing import Callable, List, Optional
 from select_fuzz.config import TargetNodeConfig
 from select_fuzz.metadata.base_sql import load_base_sql_files, split_sql_statements
 from select_fuzz.metadata.ddl_parser import parse_create_table
-from select_fuzz.metadata.models import TableMetadata
+from select_fuzz.metadata.models import BaseSqlFile, TableMetadata
 from select_fuzz.monitor.events import LostConnectionDeduplicator, LostConnectionEvent, is_lost_connection_error
 from select_fuzz.monitor.logs import SqlLogRecord, append_jsonl
 from select_fuzz.monitor.store import MetricStore
@@ -58,9 +59,7 @@ class FuzzTask:
         self.status = TaskStatus.CONNECTING
         self.db.connect()
         self.status = TaskStatus.SEEDING
-        database = self.node.database or "test"
-        self.db.execute(f"CREATE DATABASE IF NOT EXISTS {_quote_identifier(database)}")
-        self.db.execute(f"USE {_quote_identifier(database)}")
+        self._recreate_database()
         self.tables.clear()
         sql_files = load_base_sql_files(self.base_sql_dir)
         for sql_file in sql_files:
@@ -68,7 +67,6 @@ class FuzzTask:
                 self.tables.append(parse_create_table(sql_file.sql))
             except ValueError:
                 continue
-        self._reset_base_tables()
         for sql_file in sql_files:
             for statement in split_sql_statements(sql_file.sql):
                 self.db.execute(statement)
@@ -109,6 +107,12 @@ class FuzzTask:
         if self._next_probe_at is not None and now < self._next_probe_at:
             return
         if self.db.ping():
+            try:
+                self._rebuild_temporary_tables()
+            except Exception:
+                self._next_probe_at = now + timedelta(seconds=self.recovery_probe_seconds)
+                self._write_metrics()
+                return
             self.status = TaskStatus.RUNNING
             self._next_probe_at = None
         else:
@@ -175,13 +179,45 @@ class FuzzTask:
     def recent_coverage_hits(self) -> list[str]:
         return list(self._generator.recent_hits)
 
-    def _reset_base_tables(self) -> None:
-        if not self.tables:
+    def _database_name(self) -> str:
+        return self.node.database or "test"
+
+    def _recreate_database(self) -> None:
+        database = self._database_name()
+        self.db.execute(f"DROP DATABASE IF EXISTS {_quote_identifier(database)}")
+        self.db.execute(f"CREATE DATABASE {_quote_identifier(database)}")
+        self.db.execute(f"USE {_quote_identifier(database)}")
+
+    def _rebuild_temporary_tables(self) -> None:
+        temporary_names = {table.name for table in self.tables if table.is_temporary}
+        if not temporary_names:
             return
-        self.db.execute("SET FOREIGN_KEY_CHECKS=0")
-        for table in reversed(self.tables):
-            self.db.execute(f"DROP TABLE IF EXISTS {_quote_identifier(table.name)}")
-        self.db.execute("SET FOREIGN_KEY_CHECKS=1")
+        self.db.execute(f"USE {_quote_identifier(self._database_name())}")
+        sql_files = load_base_sql_files(self.base_sql_dir)
+        for sql_file in sql_files:
+            if self._is_temporary_table_file(sql_file):
+                self._execute_statements(sql_file)
+        self._execute_temporary_seed_statements(sql_files, temporary_names)
+
+    def _execute_statements(self, sql_file: BaseSqlFile) -> None:
+        for statement in split_sql_statements(sql_file.sql):
+            self.db.execute(statement)
+
+    def _is_temporary_table_file(self, sql_file: BaseSqlFile) -> bool:
+        return bool(re.search(r"\bCREATE\s+TEMPORARY\s+TABLE\b", sql_file.sql, re.IGNORECASE))
+
+    def _execute_temporary_seed_statements(self, sql_files: List[BaseSqlFile], temporary_names: set[str]) -> None:
+        for sql_file in sql_files:
+            if self._is_temporary_table_file(sql_file):
+                continue
+            for statement in split_sql_statements(sql_file.sql):
+                target = self._insert_target_table(statement)
+                if target in temporary_names:
+                    self.db.execute(statement)
+
+    def _insert_target_table(self, statement: str) -> Optional[str]:
+        match = re.match(r"\s*INSERT\s+INTO\s+`?(?P<table>[\w$]+)`?", statement, re.IGNORECASE)
+        return match.group("table") if match else None
 
 
 def _quote_identifier(identifier: str) -> str:

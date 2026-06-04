@@ -162,11 +162,9 @@ def test_服务层创建真实任务时会执行基表_sql(tmp_path: Path) -> No
     assert response.status_code == 200
     assert response.json()["database"] == "test"
     assert fake_db.executed == [
-        "CREATE DATABASE IF NOT EXISTS `test`",
+        "DROP DATABASE IF EXISTS `test`",
+        "CREATE DATABASE `test`",
         "USE `test`",
-        "SET FOREIGN_KEY_CHECKS=0",
-        "DROP TABLE IF EXISTS `base_api`",
-        "SET FOREIGN_KEY_CHECKS=1",
         "CREATE TABLE base_api (id BIGINT NOT NULL, name VARCHAR(64), PRIMARY KEY (id))",
     ]
 

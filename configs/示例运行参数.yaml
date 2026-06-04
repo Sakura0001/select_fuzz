@@ -1,0 +1,19 @@
+project_name: sql_fuzz
+display_name: SQL 模糊测试控制台
+base_sql_dir: sql_base_tables
+sql_log_dir: logs
+lost_connection_dedup_minutes: 10
+recovery_probe_seconds: 60
+jump_hosts:
+  - name: jump-prod
+    host: 10.2.0.8
+    port: 22
+    username: ops
+target_nodes:
+  - name: polardb-node-a
+    host: 172.18.4.12
+    port: 3306
+    username: fuzz
+    password: secret
+    database: select_fuzz
+    jump_host: jump-prod

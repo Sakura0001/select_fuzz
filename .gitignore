@@ -11,5 +11,6 @@ build/
 *.egg-info/
 node_modules/
 web/dist/
+*.tsbuildinfo
 logs/
 *.log

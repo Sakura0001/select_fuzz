@@ -197,7 +197,6 @@ def create_table_sql(index: int) -> str:
         "  `unsigned_int_col` int unsigned DEFAULT NULL,",
         "  `unsigned_decimal_col` decimal(10,0) unsigned DEFAULT NULL,",
         "  `json_col` json DEFAULT NULL,",
-        "  `point_col` point NOT NULL SRID 4326,",
         f"  `vector_col` vector(4){vector_col_suffix},",
         "  `vector_aux_col` vector(8),",
         "  PRIMARY KEY (`id_col`,`tenant_id`,`subpart_id`),",
@@ -224,7 +223,7 @@ def create_table_sql(index: int) -> str:
         f"  KEY `idx_t{index}_arith_expr` (((`unsigned_int_col` + `smallint_col`))),",
         f"  KEY `idx_t{index}_json_expr` ((cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32)))),",
         *[f"{index_line}," for index_line in supplemental_indexes],
-        f"  SPATIAL KEY `sp_t{index}_point_col` (`point_col`)",
+        f"  KEY `idx_t{index}_extra_text_length` ((char_length(`text_col`)))",
     ]
     if index > 0 and kind != "temporary":
         parent = 0 if index == 1 or index % 2 == 0 else 1
@@ -319,7 +318,6 @@ def insert_sql(index: int, tenant_id: int, subpart_id: int, row_id: int) -> str:
         "unsigned_int_col",
         "unsigned_decimal_col",
         "json_col",
-        "point_col",
         "vector_col",
         "vector_aux_col",
     ]
@@ -366,7 +364,6 @@ def insert_sql(index: int, tenant_id: int, subpart_id: int, row_id: int) -> str:
         str(10000 + index * 1000 + row_id),
         str(20000 + index * 1000 + row_id),
         f"JSON_OBJECT('k','json_{index}_{row_id}','n',{row_id})",
-        f"ST_GeomFromText('POINT({100 + index + row_id * 0.001:.3f} {30 + index + row_id * 0.001:.3f})', 4326)",
         f"STRING_TO_VECTOR('{vector_literal(index, row_id, 4)}')",
         f"STRING_TO_VECTOR('{vector_literal(index, row_id, 8)}')",
     ]
@@ -411,6 +408,7 @@ def execution_doc() -> str:
         "- 查询距离函数需要和向量索引 DISTANCE 设置一致；DESC 排序不触发向量索引。",
         "- 向量索引 ADD、DROP、RENAME 不应和其他 DDL 组合在同一条 `ALTER TABLE` 中。",
         "- 向量索引不支持 `PACK_KEYS` 等紧凑索引存储选项，`ALTER INDEX ... VISIBLE/INVISIBLE` 对向量索引无效。",
+        "- 当前基表不生成空间类型列、空间索引和空间构造函数，避免目标 InnoDB 内核报 1178。",
         "",
         "## 推荐执行顺序",
         "",
@@ -451,7 +449,7 @@ def no_vector_table_sql(index: int) -> str:
         if "`vector_col`" in lowered or "`vector_aux_col`" in lowered:
             continue
         line = line.replace(" COMMENT='COLUMNAR=1'", "")
-        if index <= 1 and line.strip().startswith("SPATIAL KEY"):
+        if index <= 1 and line.strip().startswith(f"KEY `idx_t{index}_extra_text_length`"):
             lines.append(f"  KEY `idx_t{index}_extra_no_vector_fill` ((length(`varchar_col`))),")
         lines.append(line)
     return "\n".join(lines) + "\n"
@@ -487,6 +485,7 @@ def no_vector_execution_doc() -> str:
         "- 每个建表文件都会短暂执行 `SET FOREIGN_KEY_CHECKS=0;`，建表完成后恢复为 `SET FOREIGN_KEY_CHECKS=1;`。",
         "- `zz_seed_fk_data.sql` 会先按依赖反序清理数据，再恢复外键检查并插入种子数据。",
         "- 按 InnoDB 每表最多 64 个二级索引计算，每张表补齐到索引上限数减 3，即 61 个索引；`PRIMARY KEY` 不计入该数量。",
+        "- 当前基表不生成空间类型列、空间索引和空间构造函数，避免目标 InnoDB 内核报 1178。",
         "",
         "## 推荐执行顺序",
         "",

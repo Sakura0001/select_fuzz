@@ -44,7 +44,6 @@ CREATE TABLE `t0` (
   `unsigned_int_col` int unsigned DEFAULT NULL,
   `unsigned_decimal_col` decimal(10,0) unsigned DEFAULT NULL,
   `json_col` json DEFAULT NULL,
-  `point_col` point NOT NULL SRID 4326,
   `vector_col` vector(4) COMMENT 'imci_vector_index=HNSW(metric=COSINE,max_degree=16,ef_construction=300)',
   `vector_aux_col` vector(8),
   PRIMARY KEY (`id_col`,`tenant_id`,`subpart_id`),
@@ -107,6 +106,6 @@ CREATE TABLE `t0` (
   KEY `idx_t0_extra_timestamp_seconds` ((timestampdiff(second,`datetime_col`,`timestamp_col`))),
   KEY `idx_t0_extra_decimal_round` ((round(`decimal_col`,2))),
   KEY `idx_t0_extra_float_floor` ((floor(`float_col`))),
-  SPATIAL KEY `sp_t0_point_col` (`point_col`)
+  KEY `idx_t0_extra_text_length` ((char_length(`text_col`)))
 ) ENGINE=InnoDB AUTO_INCREMENT=89671 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='COLUMNAR=1';
 SET FOREIGN_KEY_CHECKS=1;

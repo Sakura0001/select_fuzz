@@ -44,7 +44,6 @@ CREATE TABLE `t1` (
   `unsigned_int_col` int unsigned DEFAULT NULL,
   `unsigned_decimal_col` decimal(10,0) unsigned DEFAULT NULL,
   `json_col` json DEFAULT NULL,
-  `point_col` point NOT NULL SRID 4326,
   `vector_col` vector(4) COMMENT 'imci_vector_index=FAISS_HNSW_FLAT(metric=COSINE,max_degree=32,ef_construction=300)',
   `vector_aux_col` vector(8),
   PRIMARY KEY (`id_col`,`tenant_id`,`subpart_id`),
@@ -107,7 +106,7 @@ CREATE TABLE `t1` (
   KEY `idx_t1_extra_timestamp_seconds` ((timestampdiff(second,`datetime_col`,`timestamp_col`))),
   KEY `idx_t1_extra_decimal_round` ((round(`decimal_col`,2))),
   KEY `idx_t1_extra_float_floor` ((floor(`float_col`))),
-  SPATIAL KEY `sp_t1_point_col` (`point_col`),
+  KEY `idx_t1_extra_text_length` ((char_length(`text_col`))),
   CONSTRAINT `fk_t1_parent_id` FOREIGN KEY (`parent_tenant_id`,`parent_subpart_id`,`parent_id_col`) REFERENCES `t0` (`tenant_id`,`subpart_id`,`id_col`) ON DELETE CASCADE ON UPDATE CASCADE,
   CONSTRAINT `fk_t1_parent_metric` FOREIGN KEY (`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`) REFERENCES `t0` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=89671 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='COLUMNAR=1';

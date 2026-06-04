@@ -15,6 +15,13 @@ PARTITION_TABLES = set(range(7, 27))
 TOP_PARTITION_VALUES = list(range(1, 9))
 SUBPARTITION_VALUES = [1, 2]
 TARGET_TOTAL_INDEX_COUNT = 61
+UNSUPPORTED_GEOMETRY_PATTERN = re.compile(
+    r"\b(?:GEOMETRY|POINT|LINESTRING|POLYGON|MULTIPOINT|MULTILINESTRING|MULTIPOLYGON|GEOMETRYCOLLECTION)\b"
+    r"|\bSPATIAL\s+KEY\b"
+    r"|\bSRID\b"
+    r"|\bST_GeomFromText\b",
+    flags=re.I,
+)
 
 
 def fail(message: str, errors: list[str]) -> None:
@@ -54,6 +61,12 @@ def vector_dimensions(sql: str) -> list[int]:
 
 def sql_secondary_index_count(sql: str) -> int:
     return len(re.findall(r"^\s+(?:UNIQUE\s+KEY|KEY|SPATIAL\s+KEY)\s+`", sql, flags=re.I | re.M))
+
+
+def assert_no_unsupported_geometry(sql: str, label: str, errors: list[str]) -> None:
+    match = UNSUPPORTED_GEOMETRY_PATTERN.search(sql)
+    if match:
+        fail(f"{label} 不应包含目标引擎不支持的 GEOMETRY/空间索引内容：{match.group(0)}", errors)
 
 
 def main() -> int:
@@ -141,6 +154,7 @@ def main() -> int:
         fail(f"表类型分布不匹配：{type_counts}", errors)
 
     all_sql = "\n".join(all_sql_parts)
+    assert_no_unsupported_geometry(all_sql, "带向量基表目录", errors)
     if re.search(r"\bFULLTEXT\b", all_sql, re.I):
         fail("带向量基表目录不应包含 FULLTEXT 索引", errors)
     if NO_VECTOR_SQL_DIR.exists():
@@ -149,6 +163,7 @@ def main() -> int:
             for path in NO_VECTOR_SQL_DIR.glob("*")
             if path.is_file()
         )
+        assert_no_unsupported_geometry(no_vector_sql, "无向量副本目录", errors)
         if re.search(r"\bFULLTEXT\b", no_vector_sql, re.I):
             fail("无向量副本目录不应包含 FULLTEXT 索引", errors)
         if re.search(r"\bVECTOR\s*\(|STRING_TO_VECTOR|imci_vector_index", no_vector_sql, re.I):
@@ -179,7 +194,6 @@ def main() -> int:
                 if fragment not in no_vector_doc:
                     fail(f"无向量副本执行顺序说明缺少临时表外键限制说明：{fragment}", errors)
     required_fragments = [
-        "SPATIAL KEY",
         "INVISIBLE",
         " DESC",
         "lower(`varchar_col`)",
@@ -202,6 +216,7 @@ def main() -> int:
         fail("缺少 zz_seed_fk_data.sql", errors)
     else:
         seed_sql = seed_path.read_text(encoding="utf-8")
+        assert_no_unsupported_geometry(seed_sql, "带向量基表种子数据", errors)
         expected_insert_count = sum(len(expected_seed_rows(index)) for index in range(27))
         if "SET transaction_isolation = 'READ-COMMITTED';" not in seed_sql:
             fail("种子数据脚本缺少 READ COMMITTED 隔离级别设置", errors)

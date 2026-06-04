@@ -108,8 +108,6 @@ CREATE TEMPORARY TABLE `t5` (
   KEY `idx_t5_extra_decimal_round` ((round(`decimal_col`,2))),
   KEY `idx_t5_extra_float_floor` ((floor(`float_col`))),
   KEY `idx_t5_extra_double_ceiling` ((ceiling(`double_col`))),
-  SPATIAL KEY `sp_t5_point_col` (`point_col`),
-  CONSTRAINT `fk_t5_parent_id` FOREIGN KEY (`parent_tenant_id`,`parent_subpart_id`,`parent_id_col`) REFERENCES `t1` (`tenant_id`,`subpart_id`,`id_col`) ON DELETE CASCADE ON UPDATE CASCADE,
-  CONSTRAINT `fk_t5_parent_metric` FOREIGN KEY (`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`) REFERENCES `t1` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`) ON DELETE SET NULL ON UPDATE CASCADE
+  SPATIAL KEY `sp_t5_point_col` (`point_col`)
 ) ENGINE=InnoDB AUTO_INCREMENT=89671 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 SET FOREIGN_KEY_CHECKS=1;

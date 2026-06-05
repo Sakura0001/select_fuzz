@@ -7,6 +7,7 @@ const fallbackTasks: FuzzTask[] = [
     target: "10.23.8.41:3306",
     status: "执行 SQL",
     jump_host: null,
+    thread_count: 8,
     sql_total: 1288421,
     lost_connection_total: 0,
     sql_rate: 122,
@@ -18,6 +19,7 @@ const fallbackTasks: FuzzTask[] = [
     target: "172.18.4.10:3306",
     status: "恢复检测",
     jump_host: "jump-prod",
+    thread_count: 16,
     sql_total: 914206,
     lost_connection_total: 3,
     sql_rate: 0,
@@ -37,7 +39,7 @@ const fallbackTasks: FuzzTask[] = [
         node_name: "polardb-node-b",
         jump_host: "jump-prod",
         target: "172.18.4.10:3306",
-        sql: "WITH cte AS (...) SELECT DISTANCE(vec_col, '[0.1,0.2]', 'COSINE') ...",
+        sql: "WITH cte AS (...) SELECT DISTANCE(vector_col, STRING_TO_VECTOR('[0.1,0.2,0.3,0.4]'), 'COSINE') ...",
         window_start: "2026-06-04 10:21:03"
       },
       {
@@ -57,6 +59,7 @@ const fallbackTasks: FuzzTask[] = [
     target: "172.18.4.12:3306",
     status: "执行 SQL",
     jump_host: "jump-prod",
+    thread_count: 4,
     sql_total: 712884,
     lost_connection_total: 1,
     sql_rate: 87,
@@ -84,6 +87,7 @@ export async function loadTasks(): Promise<FuzzTask[]> {
     return Promise.all(
       tasks.map(async (task) => ({
         ...task,
+        thread_count: task.thread_count ?? 1,
         sql_rate: task.sql_rate ?? 0,
         events: await loadLostConnections(task.task_id)
       }))
@@ -151,7 +155,7 @@ export async function createTask(payload: CreateTaskPayload): Promise<FuzzTask> 
     throw new Error("后端创建任务失败");
   }
   const task = (await response.json()) as FuzzTask;
-  return { ...task, sql_rate: task.sql_rate ?? 0, events: task.events ?? [] };
+  return { ...task, thread_count: task.thread_count ?? 1, sql_rate: task.sql_rate ?? 0, events: task.events ?? [] };
 }
 
 export function summarize(tasks: FuzzTask[]): SummaryMetric {

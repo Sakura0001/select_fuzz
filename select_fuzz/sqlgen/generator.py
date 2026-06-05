@@ -92,6 +92,8 @@ class SQLGenerator:
         group_enabled = self._should_group(options)
         window_enabled = options.require_window or self.random.random() < 0.18
         locking_enabled = allow_locking and (options.require_locking or self.random.random() < 0.08)
+        if options.require_vector:
+            group_enabled = False
         if projection_count is not None:
             group_enabled = False
             window_enabled = options.require_window
@@ -110,7 +112,11 @@ class SQLGenerator:
         group_clause = self._group_clause(group_columns)
         having_clause = self._having_clause(group_enabled)
         window_clause = self._window_clause(refs, window_enabled, group_columns if group_enabled else None)
-        order_clause = self._order_clause(refs, orderable_aliases, modifier.strip() == "DISTINCT" or group_enabled)
+        order_clause = self._vector_order_clause(refs, options.require_vector, group_enabled) or self._order_clause(
+            refs,
+            orderable_aliases,
+            modifier.strip() == "DISTINCT" or group_enabled,
+        )
         limit_clause = self._limit_clause()
         locking_clause = self._locking_clause(refs, locking_enabled)
 
@@ -256,10 +262,14 @@ class SQLGenerator:
             orderable_aliases.append("rn")
 
         if require_vector:
-            vector = self._vector_expr(refs)
+            vector = self._vector_distance_expr(refs)
             if vector:
                 items.append(f"{vector} AS vector_distance")
                 orderable_aliases.append("vector_distance")
+            vector_text = self._vector_to_string_expr(refs)
+            if vector_text and projection_count is None:
+                items.append(f"{vector_text} AS vector_text")
+                orderable_aliases.append("vector_text")
 
         if projection_count is None and not group_enabled and self.random.random() < 0.08:
             ref = self.random.choice(refs)
@@ -400,19 +410,19 @@ class SQLGenerator:
     def _random_expr(self, refs: List[TableRef], depth: int) -> Expr:
         if self.random.random() < self._risk_probability:
             return self._risky_expr(refs, depth)
-        family = self.random.choice(
-            [
-                ColumnTypeFamily.INTEGER,
-                ColumnTypeFamily.DECIMAL,
-                ColumnTypeFamily.FLOAT,
-                ColumnTypeFamily.STRING,
-                ColumnTypeFamily.DATETIME,
-                ColumnTypeFamily.JSON,
-                ColumnTypeFamily.SPATIAL,
-                ColumnTypeFamily.BINARY,
-                ColumnTypeFamily.BIT,
-            ]
-        )
+        families = [
+            ColumnTypeFamily.INTEGER,
+            ColumnTypeFamily.DECIMAL,
+            ColumnTypeFamily.FLOAT,
+            ColumnTypeFamily.STRING,
+            ColumnTypeFamily.DATETIME,
+            ColumnTypeFamily.JSON,
+            ColumnTypeFamily.BINARY,
+            ColumnTypeFamily.BIT,
+        ]
+        if self._has_family(refs, ColumnTypeFamily.SPATIAL):
+            families.append(ColumnTypeFamily.SPATIAL)
+        family = self.random.choice(families)
         if family in {ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT, ColumnTypeFamily.BIT}:
             return self._numeric_expr(refs, depth)
         if family is ColumnTypeFamily.STRING:
@@ -499,7 +509,17 @@ class SQLGenerator:
             return Expr(f"LENGTH({column.sql})", ColumnTypeFamily.INTEGER)
         return Expr(f"HEX({column.sql})", ColumnTypeFamily.STRING)
 
-    def _vector_expr(self, refs: List[TableRef]) -> Optional[str]:
+    def _vector_order_clause(self, refs: List[TableRef], require_vector: bool, group_enabled: bool) -> str:
+        if group_enabled or (not require_vector and self.random.random() >= 0.08):
+            return ""
+        distance = self._vector_distance_expr(refs)
+        if not distance:
+            return ""
+        self._hit("ORDER BY ASC")
+        self._hit("LIMIT")
+        return f"ORDER BY {distance} ASC"
+
+    def _vector_distance_expr(self, refs: List[TableRef]) -> Optional[str]:
         candidates: List[tuple[TableRef, ColumnMetadata]] = []
         for ref in refs:
             for column in ref.table.columns.values():
@@ -508,9 +528,22 @@ class SQLGenerator:
         if not candidates:
             return None
         ref, column = self.random.choice(candidates)
-        self._hit("DISTANCE_COSINE")
+        metric = self.random.choice(["COSINE", "EUCLIDEAN", "DOT"])
+        self._hit(f"DISTANCE_{metric}")
         self._hit("STRING_TO_VECTOR")
-        return f"DISTANCE({ref.alias}.{_q(column.name)}, STRING_TO_VECTOR('{self._vector_literal(column)}'), 'COSINE')"
+        return f"DISTANCE({ref.alias}.{_q(column.name)}, STRING_TO_VECTOR('{self._vector_literal(column)}'), '{metric}')"
+
+    def _vector_to_string_expr(self, refs: List[TableRef]) -> Optional[str]:
+        candidates: List[tuple[TableRef, ColumnMetadata]] = []
+        for ref in refs:
+            for column in ref.table.columns.values():
+                if column.type_family is ColumnTypeFamily.VECTOR:
+                    candidates.append((ref, column))
+        if not candidates:
+            return None
+        ref, column = self.random.choice(candidates)
+        self._hit("VECTOR_TO_STRING")
+        return f"VECTOR_TO_STRING({ref.alias}.{_q(column.name)})"
 
     def _risky_expr(self, refs: List[TableRef], depth: int) -> Expr:
         left = self._column_expr(refs)
@@ -545,6 +578,8 @@ class SQLGenerator:
         candidates: List[tuple[TableRef, ColumnMetadata]] = []
         for ref in refs:
             for column in ref.table.columns.values():
+                if column.type_family is ColumnTypeFamily.VECTOR and preferred is None:
+                    continue
                 if preferred is None or column.type_family in preferred:
                     candidates.append((ref, column))
         if not candidates:
@@ -626,6 +661,9 @@ class SQLGenerator:
             if column.type_family is family:
                 return column
         return None
+
+    def _has_family(self, refs: List[TableRef], family: ColumnTypeFamily) -> bool:
+        return any(column.type_family is family for ref in refs for column in ref.table.columns.values())
 
     def _compatible_column(self, table: TableMetadata, family: ColumnTypeFamily) -> ColumnMetadata | None:
         compatible = {

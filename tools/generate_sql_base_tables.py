@@ -3,13 +3,11 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "sql_base_tables"
-NO_VECTOR_OUT_DIR = ROOT / "sql_base_tables_no_vector_subpartition"
 TOP_PARTITION_VALUES = list(range(1, 9))
 SUBPARTITION_VALUES = [1, 2]
 TARGET_TOTAL_INDEX_COUNT = 61
@@ -405,7 +403,7 @@ def execution_doc() -> str:
         "- `t7.sql` 到 `t26.sql` 是分区表，只保留父表引用列、关联索引和种子数据关系，不声明 `FOREIGN KEY`，避免 InnoDB 在建分区表时报 1506。",
         "- 每个建表文件都会短暂执行 `SET FOREIGN_KEY_CHECKS=0;`，建表完成后恢复为 `SET FOREIGN_KEY_CHECKS=1;`。",
         "- `zz_seed_fk_data.sql` 会先按依赖反序清理数据，再恢复外键检查并插入种子数据。",
-        "- 向量索引查询需要使用 `VEC_DISTANCE`，参数形式为向量列加常量向量，排序方向使用 ASC，并带 LIMIT。",
+        "- 向量索引查询需要使用 `DISTANCE(vector_col, STRING_TO_VECTOR('[...]'), '<metric>')`，排序方向使用 ASC，并带 LIMIT。",
         "- 查询距离函数需要和向量索引 DISTANCE 设置一致；DESC 排序不触发向量索引。",
         "- 向量索引 ADD、DROP、RENAME 不应和其他 DDL 组合在同一条 `ALTER TABLE` 中。",
         "- 向量索引不支持 `PACK_KEYS` 等紧凑索引存储选项，`ALTER INDEX ... VISIBLE/INVISIBLE` 对向量索引无效。",
@@ -441,79 +439,6 @@ def execution_doc() -> str:
     )
     return "\n".join(lines) + "\n"
 
-
-def no_vector_table_sql(index: int) -> str:
-    sql = create_table_sql(index)
-    lines: list[str] = []
-    for line in sql.splitlines():
-        lowered = line.lower()
-        if "`vector_col`" in lowered or "`vector_aux_col`" in lowered:
-            continue
-        line = line.replace(" COMMENT='COLUMNAR=1'", "")
-        if index <= 1 and line.strip().startswith(f"KEY `idx_t{index}_extra_text_length`"):
-            lines.append(f"  KEY `idx_t{index}_extra_no_vector_fill` ((length(`varchar_col`))),")
-        lines.append(line)
-    return "\n".join(lines) + "\n"
-
-
-def no_vector_seed_sql() -> str:
-    seed_lines: list[str] = []
-    for line in seed_sql().splitlines():
-        if re.match(r"DELETE FROM `t(?:1[1-9]|2[0-6])`;", line):
-            continue
-        if re.match(r"/\* t(?:1[1-9]|2[0-6]):", line):
-            continue
-        if re.match(r"INSERT INTO `t(?:1[1-9]|2[0-6])`", line):
-            continue
-        if line.startswith("INSERT INTO `t"):
-            line = line.replace(",`vector_col`,`vector_aux_col`", "")
-            line = re.sub(r", STRING_TO_VECTOR\('[^']+'\), STRING_TO_VECTOR\('[^']+'\)\);$", ");", line)
-        seed_lines.append(line)
-    return "\n".join(seed_lines) + "\n"
-
-
-def no_vector_execution_doc() -> str:
-    table_files = [f"t{index}.sql" for index in range(11)]
-    lines = [
-        "# SQL 基表执行顺序说明",
-        "",
-        "本目录下的 SQL 文件需要在同一个数据库中执行，不在文件内创建或切换数据库。",
-        "",
-        "## 执行前提",
-        "",
-        "- `t2.sql` 到 `t6.sql` 是临时表，必须和 `zz_seed_fk_data.sql` 在同一个 session 内执行。",
-        "- `t2.sql` 到 `t6.sql` 是临时表，只保留父表引用列和种子数据关系，不声明 `FOREIGN KEY`，避免 InnoDB 在建临时表时报 1215。",
-        "- `t7.sql` 到 `t10.sql` 是分区表，只保留父表引用列、关联索引和种子数据关系，不声明 `FOREIGN KEY`，避免 InnoDB 在建分区表时报 1506。",
-        "- 每个建表文件都会短暂执行 `SET FOREIGN_KEY_CHECKS=0;`，建表完成后恢复为 `SET FOREIGN_KEY_CHECKS=1;`。",
-        "- `zz_seed_fk_data.sql` 会先按依赖反序清理数据，再恢复外键检查并插入种子数据。",
-        "- 按 InnoDB 每表最多 64 个二级索引计算，每张表补齐到索引上限数减 3，即 61 个索引；`PRIMARY KEY` 不计入该数量。",
-        "- 当前基表不生成空间类型列、空间索引和空间构造函数，避免目标 InnoDB 内核报 1178。",
-        "",
-        "## 推荐执行顺序",
-        "",
-        "1. 执行普通父表：`t0.sql`、`t1.sql`。",
-        "2. 在同一个 session 中执行临时表：`t2.sql`、`t3.sql`、`t4.sql`、`t5.sql`、`t6.sql`。",
-        "3. 执行一级分区表：`t7.sql`、`t8.sql`、`t9.sql`、`t10.sql`。",
-        "4. 执行种子数据脚本：`zz_seed_fk_data.sql`。",
-        "",
-        "## 完整文件顺序",
-        "",
-    ]
-    lines.extend(f"{idx + 1}. `{name}`" for idx, name in enumerate(table_files))
-    lines.append(f"{len(table_files) + 1}. `zz_seed_fk_data.sql`")
-    lines.extend(
-        [
-            "",
-            "## 分区数据覆盖",
-            "",
-            "- `t7.sql` 到 `t10.sql` 每张一级分区表有 8 个一级分区。",
-            "- 种子数据使用 `tenant_id` 1 到 8，保证每个一级分区至少一行。",
-            "- 父表引用数据固定指向 `t0` 或 `t1`，避免永久表引用临时表造成生命周期不稳定。",
-        ]
-    )
-    return "\n".join(lines) + "\n"
-
-
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for path in OUT_DIR.glob("*.sql"):
@@ -522,13 +447,6 @@ def main() -> None:
         (OUT_DIR / f"t{index}.sql").write_text(create_table_sql(index), encoding="utf-8")
     (OUT_DIR / "zz_seed_fk_data.sql").write_text(seed_sql(), encoding="utf-8")
     (OUT_DIR / "执行顺序说明.md").write_text(execution_doc(), encoding="utf-8")
-    NO_VECTOR_OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for path in NO_VECTOR_OUT_DIR.glob("*.sql"):
-        path.unlink()
-    for index in range(11):
-        (NO_VECTOR_OUT_DIR / f"t{index}.sql").write_text(no_vector_table_sql(index), encoding="utf-8")
-    (NO_VECTOR_OUT_DIR / "zz_seed_fk_data.sql").write_text(no_vector_seed_sql(), encoding="utf-8")
-    (NO_VECTOR_OUT_DIR / "执行顺序说明.md").write_text(no_vector_execution_doc(), encoding="utf-8")
 
 
 if __name__ == "__main__":

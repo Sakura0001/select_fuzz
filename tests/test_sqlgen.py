@@ -35,9 +35,9 @@ def _tables():
     return [parent, child]
 
 
-def _no_vector_tables():
+def _base_tables():
     tables = []
-    for sql_file in load_base_sql_files(Path("sql_base_tables_no_vector_subpartition")):
+    for sql_file in load_base_sql_files(Path("sql_base_tables")):
         try:
             tables.append(parse_create_table(sql_file.sql))
         except ValueError:
@@ -102,8 +102,8 @@ def test_默认生成_sql_避免_only_full_group_by_风险() -> None:
     assert " HAVING " not in sql
 
 
-def test_no_vector_生成_sql_只引用已知表列且不生成向量算子() -> None:
-    tables = _no_vector_tables()
+def test_完整基表生成_sql_只引用已知表列并使用_polarDB_向量函数白名单() -> None:
+    tables = _base_tables()
     known_identifiers = {table.name for table in tables}
     known_identifiers.update(column.name for table in tables for column in table.columns.values())
     generator = SQLGenerator(random_seed=101, max_sql_length=6000)
@@ -112,15 +112,22 @@ def test_no_vector_生成_sql_只引用已知表列且不生成向量算子() ->
         sql = generator.generate(tables)
         quoted_identifiers = set(re.findall(r"`([^`]+)`", sql))
         assert quoted_identifiers <= known_identifiers
-        assert "VECTOR" not in sql.upper()
-        assert "DISTANCE" not in sql.upper()
+        upper = sql.upper()
+        assert "VEC_DISTANCE" not in upper
+        assert "VEC_FROMTEXT" not in upper
+        assert "VECTOR_DISTANCE" not in upper
+        if "DISTANCE(" in upper:
+            assert "STRING_TO_VECTOR(" in upper
+            assert any(metric in upper for metric in ["'COSINE'", "'EUCLIDEAN'", "'DOT'"])
+        assert "ST_GEOMFROMTEXT" not in upper
+        assert "ST_ASTEXT" not in upper
 
 
 def test_强制生成_select_核心结构() -> None:
     generator = SQLGenerator(random_seed=21, max_sql_length=8000)
 
     sql = generator.generate(
-        _no_vector_tables(),
+        _base_tables(),
         GenerationOptions(
             require_cte=True,
             require_join=True,
@@ -143,10 +150,24 @@ def test_强制生成_select_核心结构() -> None:
 
 
 def test_随机递归深度和长度保护稳定() -> None:
-    tables = _no_vector_tables()
+    tables = _base_tables()
     generator = SQLGenerator(random_seed=88, max_sql_length=2500)
 
     for _ in range(120):
         sql = generator.generate(tables)
         assert sql.startswith(("SELECT", "WITH", "("))
         assert len(sql) <= 2500
+
+
+def test_强制生成_polarDB_兼容向量表达式() -> None:
+    generator = SQLGenerator(random_seed=31, max_sql_length=8000)
+
+    sql = generator.generate(_base_tables(), GenerationOptions(require_vector=True))
+    upper = sql.upper()
+
+    assert "DISTANCE(" in upper
+    assert "STRING_TO_VECTOR(" in upper
+    assert any(metric in upper for metric in ["'COSINE'", "'EUCLIDEAN'", "'DOT'"])
+    assert "VEC_DISTANCE" not in upper
+    assert "VEC_FROMTEXT" not in upper
+    assert "VECTOR_TO_STRING(" in upper or "DISTANCE(" in upper

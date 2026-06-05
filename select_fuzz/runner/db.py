@@ -17,6 +17,9 @@ class DatabaseClient(Protocol):
     def execute(self, sql: str) -> None:
         ...
 
+    def query_scalar(self, sql: str) -> int:
+        ...
+
     def ping(self) -> bool:
         ...
 
@@ -56,6 +59,22 @@ class PyMySQLClient:
             if is_lost_connection_error(exc):
                 raise LostConnectionError(str(exc)) from exc
             raise
+
+    def query_scalar(self, sql: str) -> int:
+        if self._connection is None:
+            self.connect()
+        try:
+            with self._connection.cursor() as cursor:
+                cursor.execute(sql)
+                row = cursor.fetchone()
+        except Exception as exc:
+            if is_lost_connection_error(exc):
+                raise LostConnectionError(str(exc)) from exc
+            raise
+        if row is None:
+            return 0
+        value = row[0]
+        return int(value or 0)
 
     def ping(self) -> bool:
         try:

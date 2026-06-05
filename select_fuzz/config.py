@@ -37,14 +37,19 @@ class RuntimeConfig:
     display_name: str = "SQL 模糊测试控制台"
     base_sql_dir: Path = Path("sql_base_tables")
     sql_log_dir: Path = Path("logs")
+    failed_sql_dir: Path = Path("logs/failed_sql")
     lost_connection_dedup_minutes: int = 10
     recovery_probe_seconds: int = 60
+    default_thread_count: int = 1
     jump_hosts: List[JumpHostConfig] = field(default_factory=list)
     target_nodes: List[TargetNodeConfig] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_sql_dir", Path(self.base_sql_dir))
         object.__setattr__(self, "sql_log_dir", Path(self.sql_log_dir))
+        object.__setattr__(self, "failed_sql_dir", Path(self.failed_sql_dir))
+        if self.default_thread_count < 1:
+            raise ValueError("默认线程数必须大于等于 1")
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:

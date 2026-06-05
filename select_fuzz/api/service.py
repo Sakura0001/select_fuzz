@@ -26,6 +26,7 @@ class TaskSnapshot:
     status: str
     database: str = "test"
     jump_host: Optional[str] = None
+    thread_count: int = 1
     sql_total: int = 0
     lost_connection_total: int = 0
 
@@ -38,6 +39,7 @@ class RuntimeService:
         self,
         metric_store: MetricStore,
         log_dir: Path | str,
+        failed_sql_dir: Path | str | None = None,
         base_sql_dir: Path | str | None = None,
         db_factory: Optional[Callable[[TargetNodeConfig], DatabaseClient]] = None,
         run_background: bool = True,
@@ -45,6 +47,7 @@ class RuntimeService:
     ) -> None:
         self.metric_store = metric_store
         self.log_dir = Path(log_dir)
+        self.failed_sql_dir = Path(failed_sql_dir) if failed_sql_dir is not None else self.log_dir / "failed_sql"
         self.base_sql_dir = Path(base_sql_dir) if base_sql_dir is not None else None
         self.db_factory = db_factory
         self.run_background = run_background
@@ -63,6 +66,7 @@ class RuntimeService:
             status="执行 SQL",
             database=request.database or "test",
             jump_host=request.jump_host,
+            thread_count=request.thread_count,
         )
         self._tasks[task_id] = snapshot
         if self.base_sql_dir is not None and self.db_factory is not None:
@@ -80,9 +84,12 @@ class RuntimeService:
                 node=node,
                 base_sql_dir=self.base_sql_dir,
                 db=self.db_factory(node),
+                db_factory=lambda: self.db_factory(node),
                 metric_store=self.metric_store,
                 log_dir=self.log_dir,
+                failed_sql_dir=self.failed_sql_dir,
                 clock=lambda: datetime.now(timezone.utc),
+                thread_count=request.thread_count,
             )
             real_task.start()
             self._real_tasks[task_id] = real_task
@@ -154,14 +161,15 @@ class RuntimeService:
         return rows
 
     def _start_background_loop(self, task: FuzzTask) -> None:
-        def run() -> None:
+        def run(worker_id: int) -> None:
             while task.status is not TaskStatus.STOPPED:
-                task.step()
+                task.step(worker_id)
                 snapshot = self._tasks[task.task_id]
                 snapshot.status = task.status.value
                 snapshot.sql_total = task.sql_total
                 snapshot.lost_connection_total = task.lost_connection_total
                 time.sleep(self.query_interval_seconds)
 
-        thread = threading.Thread(target=run, name=f"sql_fuzz-{task.task_id}", daemon=True)
-        thread.start()
+        for worker_id in range(task.thread_count):
+            thread = threading.Thread(target=run, args=(worker_id,), name=f"sql_fuzz-{task.task_id}-{worker_id}", daemon=True)
+            thread.start()

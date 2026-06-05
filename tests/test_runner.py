@@ -22,7 +22,10 @@ class FakeDatabase(DatabaseClient):
     def __init__(self) -> None:
         self.connected = False
         self.executed: list[str] = []
+        self.scalar_queries: list[str] = []
+        self.table_counts: dict[str, int] = {}
         self.fail_next_query = False
+        self.fail_next_ordinary_error = False
         self.ping_results: list[bool] = []
 
     def connect(self) -> None:
@@ -30,10 +33,20 @@ class FakeDatabase(DatabaseClient):
 
     def execute(self, sql: str) -> None:
         normalized = sql.strip().upper()
+        if self.fail_next_ordinary_error and (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")):
+            self.fail_next_ordinary_error = False
+            raise RuntimeError("普通 SQL 执行失败")
         if self.fail_next_query and (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")):
             self.fail_next_query = False
             raise LostConnectionError("Lost connection to MySQL server during query")
         self.executed.append(sql)
+
+    def query_scalar(self, sql: str) -> int:
+        self.scalar_queries.append(sql)
+        for table_name, count in self.table_counts.items():
+            if f"`{table_name}`" in sql:
+                return count
+        return 1
 
     def ping(self) -> bool:
         if self.ping_results:
@@ -197,6 +210,45 @@ def test_任务启动会逐条执行基表文件内的多条_sql(tmp_path: Path)
     assert not any(";\n" in sql for sql in db.executed)
 
 
+def test_任务启动后检查每张基表已插入数据(tmp_path: Path) -> None:
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir_with_temporary_table(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    task.start()
+
+    assert "SELECT COUNT(*) FROM `t0`" in db.scalar_queries
+    assert "SELECT COUNT(*) FROM `t2`" in db.scalar_queries
+
+
+def test_任务启动发现基表无数据会失败(tmp_path: Path) -> None:
+    db = FakeDatabase()
+    db.table_counts["t0"] = 0
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir_with_temporary_table(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    try:
+        task.start()
+    except RuntimeError as exc:
+        assert "基表初始化未插入数据" in str(exc)
+    else:
+        raise AssertionError("基表无数据时必须失败")
+
+
 def test_执行查询会写入_sql_日志(tmp_path: Path) -> None:
     db = FakeDatabase()
     task = FuzzTask(
@@ -216,6 +268,31 @@ def test_执行查询会写入_sql_日志(tmp_path: Path) -> None:
     assert task.sql_total == 1
     assert any(sql.startswith(("SELECT", "WITH", "(")) for sql in db.executed)
     assert "SELECT" in (tmp_path / "logs" / "2026-06-04" / "task-1.sql.jsonl").read_text(encoding="utf-8")
+
+
+def test_普通执行失败会把原始_sql_写入失败目录(tmp_path: Path) -> None:
+    db = FakeDatabase()
+    db.fail_next_ordinary_error = True
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        failed_sql_dir=tmp_path / "failed_sql",
+        clock=FakeClock(),
+        random_seed=7,
+    )
+
+    task.start()
+    task.step()
+
+    failed_files = list((tmp_path / "failed_sql").glob("2026-06-04/*.sql"))
+    assert len(failed_files) == 1
+    content = failed_files[0].read_text(encoding="utf-8")
+    assert content.startswith("SELECT")
+    assert "\"status\"" not in content
 
 
 def test_lost_connection_后每分钟检测恢复且不重建永久表(tmp_path: Path) -> None:
@@ -276,3 +353,28 @@ def test_lost_connection_恢复后重建临时表并只插入临时表数据(tmp
     assert len([sql for sql in db.executed if sql.startswith("CREATE TEMPORARY TABLE `t2`")]) == 2
     assert db.executed.count("INSERT INTO `t0` (`id`) VALUES (1)") == 1
     assert db.executed.count("INSERT INTO `t2` (`id`) VALUES (2)") == 2
+
+
+def test_多线程任务为每个_worker_准备独立临时表会话(tmp_path: Path) -> None:
+    dbs = [FakeDatabase(), FakeDatabase(), FakeDatabase()]
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir_with_temporary_table(tmp_path),
+        db=dbs[0],
+        db_factory=lambda: dbs[len([db for db in dbs if db.connected])],
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+        thread_count=3,
+    )
+
+    task.start()
+
+    assert task.thread_count == 3
+    assert dbs[0].executed.count("CREATE TABLE t0 (id BIGINT NOT NULL, PRIMARY KEY (id))") == 1
+    for db in dbs:
+        assert db.connected is True
+        assert "USE `select_fuzz`" in db.executed
+        assert any(sql.startswith("CREATE TEMPORARY TABLE `t2`") for sql in db.executed)
+        assert db.executed.count("INSERT INTO `t2` (`id`) VALUES (2)") == 1

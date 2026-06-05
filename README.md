@@ -10,8 +10,10 @@
 - 基于已知表和列元数据生成随机 SELECT SQL。
 - 支持一任务绑定一个 MySQL 节点。
 - 支持任务级跳板机配置复用。
+- 支持为单个实例配置并发线程数，每个 worker 使用独立数据库连接执行查询。
 - 持续执行查询 SQL，不校验查询结果正确性。
 - 记录日期、任务、节点、执行状态和 SQL。
+- 普通错误和 lost connection 的失败 SQL 会额外写入 `logs/failed_sql/日期/任务.sql`，文件内容只包含原始 SQL 语句。
 - lost connection 按同一节点 10 分钟窗口去重。
 - lost connection 后每 1 分钟探测数据库状态，恢复后继续执行查询。
 - 提供 FastAPI 接口和中文前端大屏。
@@ -44,7 +46,11 @@ npm run dev -- --port 5173
 
 ## 基表 SQL 目录
 
-基表 SQL 目录不由本实现生成。每个任务启动时，程序会读取配置中的 `base_sql_dir`，按文件名排序读取所有 `.sql` 文件，并在目标数据库上全部执行。后续持续执行阶段只生成并执行 SELECT SQL，不重建表、不重新插入数据。
+项目默认使用 `sql_base_tables/`。每个任务启动时，程序会读取配置中的 `base_sql_dir`，按文件名排序读取所有 `.sql` 文件，并在目标数据库上全部执行。启动阶段会执行 `DROP DATABASE IF EXISTS test`、`CREATE DATABASE test`、`USE test`，随后创建基表和插入种子数据，并对每张解析到的表执行 `SELECT COUNT(*)` 校验，发现 0 行会直接失败。
+
+`sql_base_tables/` 包含普通表、临时表、一级分区表、二级分区表和 `VECTOR(N)` 列。由于临时表是 session 级对象，多线程任务会在每个 worker 连接中单独创建临时表并插入临时表种子数据。lost connection 恢复后也只重建临时表并重新插入临时表数据，不重建永久表。
+
+向量查询按 PolarDB MySQL 当前公开能力生成：`STRING_TO_VECTOR`、`VECTOR_TO_STRING`、`DISTANCE(..., 'COSINE'/'EUCLIDEAN'/'DOT')`。生成器不会使用 `VEC_DISTANCE`、`VEC_FROMTEXT`，也不会把向量列用于主键、外键、唯一键、分区键、普通跨类型比较、通用分组或普通排序表达式。
 
 ## lost connection 规则
 
@@ -53,3 +59,24 @@ npm run dev -- --port 5173
 - 发生 lost connection 后任务进入恢复检测状态。
 - 恢复检测每 1 分钟执行一次。
 - 数据库恢复后继续执行查询 SQL。
+
+## Windows 运行方式
+
+Windows 推荐使用 PowerShell：
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m uvicorn select_fuzz.api.app:app --host 127.0.0.1 --port 8000
+```
+
+另开一个 PowerShell 启动前端：
+
+```powershell
+cd web
+npm install
+npm run dev -- --port 5173
+```
+
+浏览器打开 `http://localhost:5173/`。如果要通过跳板机连接内网实例，先在页面保存跳板机配置，再新建任务时选择该配置并设置并发线程数。

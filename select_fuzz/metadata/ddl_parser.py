@@ -246,20 +246,20 @@ def _parse_foreign_key(definition: str) -> Optional[ForeignKeyMetadata]:
 
 def _parse_partition(tail: str) -> Optional[PartitionMetadata]:
     partition_match = re.search(
-        r"PARTITION\s+BY\s+(?P<type>\w+)\s*\((?P<expr>.*?)\)",
+        r"PARTITION\s+BY\s+(?P<type>(?:LINEAR\s+)?(?:RANGE|LIST|HASH|KEY)(?:\s+COLUMNS)?)\s*\((?P<expr>.*?)\)",
         tail,
         re.IGNORECASE | re.DOTALL,
     )
     if not partition_match:
         return None
     subpartition_match = re.search(
-        r"SUBPARTITION\s+BY\s+(?P<type>\w+)\s*\((?P<expr>.*?)\)",
+        r"SUBPARTITION\s+BY\s+(?P<type>(?:LINEAR\s+)?(?:HASH|KEY)(?:\s+COLUMNS)?)\s*\((?P<expr>.*?)\)",
         tail,
         re.IGNORECASE | re.DOTALL,
     )
     return PartitionMetadata(
-        partition_type=partition_match.group("type").upper(),
+        partition_type=" ".join(partition_match.group("type").upper().split()),
         partition_expr=partition_match.group("expr").strip(),
-        subpartition_type=subpartition_match.group("type").upper() if subpartition_match else None,
+        subpartition_type=" ".join(subpartition_match.group("type").upper().split()) if subpartition_match else None,
         subpartition_expr=subpartition_match.group("expr").strip() if subpartition_match else None,
     )

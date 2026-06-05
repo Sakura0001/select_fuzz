@@ -86,7 +86,8 @@ def create_default_app() -> FastAPI:
     service = RuntimeService(
         metric_store=MetricStore(log_dir / "metrics.db"),
         log_dir=log_dir,
-        base_sql_dir=Path("sql_base_tables_no_vector_subpartition"),
+        failed_sql_dir=log_dir / "failed_sql",
+        base_sql_dir=Path("sql_base_tables"),
         db_factory=lambda node: PyMySQLClient(node),
     )
     return create_app(service)

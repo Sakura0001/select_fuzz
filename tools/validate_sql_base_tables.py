@@ -9,7 +9,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL_DIR = ROOT / "sql_base_tables"
-NO_VECTOR_SQL_DIR = ROOT / "sql_base_tables_no_vector_subpartition"
 EXECUTION_DOC = SQL_DIR / "执行顺序说明.md"
 PARTITION_TABLES = set(range(7, 27))
 TOP_PARTITION_VALUES = list(range(1, 9))
@@ -164,44 +163,6 @@ def main() -> int:
     assert_no_unsupported_geometry(all_sql, "带向量基表目录", errors)
     if re.search(r"\bFULLTEXT\b", all_sql, re.I):
         fail("带向量基表目录不应包含 FULLTEXT 索引", errors)
-    if NO_VECTOR_SQL_DIR.exists():
-        no_vector_sql = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in NO_VECTOR_SQL_DIR.glob("*")
-            if path.is_file()
-        )
-        assert_no_unsupported_geometry(no_vector_sql, "无向量副本目录", errors)
-        if re.search(r"\bFULLTEXT\b", no_vector_sql, re.I):
-            fail("无向量副本目录不应包含 FULLTEXT 索引", errors)
-        if re.search(r"\bVECTOR\s*\(|STRING_TO_VECTOR|imci_vector_index", no_vector_sql, re.I):
-            fail("无向量副本目录不应包含向量列、向量值或向量索引", errors)
-        if re.search(r"\bSUBPARTITION\b", no_vector_sql, re.I):
-            fail("无向量副本目录不应包含二级分区语法", errors)
-        expected_no_vector_files = {f"t{index}.sql" for index in range(11)} | {"zz_seed_fk_data.sql"}
-        actual_no_vector_files = {path.name for path in NO_VECTOR_SQL_DIR.glob("*.sql")}
-        if actual_no_vector_files != expected_no_vector_files:
-            fail(f"无向量副本 SQL 文件集合不匹配：{sorted(actual_no_vector_files)}", errors)
-        for index in range(11):
-            path = NO_VECTOR_SQL_DIR / f"t{index}.sql"
-            if not path.exists():
-                fail(f"无向量副本目录缺少 {path.name}", errors)
-                continue
-            no_vector_table_sql = path.read_text(encoding="utf-8")
-            no_vector_index_count = sql_secondary_index_count(no_vector_table_sql)
-            if no_vector_index_count != TARGET_TOTAL_INDEX_COUNT:
-                fail(f"无向量副本 {path.name} 索引数量应为 {TARGET_TOTAL_INDEX_COUNT}，实际 {no_vector_index_count}", errors)
-            if 2 <= index <= 6 and re.search(r"\bFOREIGN\s+KEY\b", no_vector_table_sql, re.I):
-                fail(f"无向量副本 {path.name} 临时表不应声明 FOREIGN KEY，避免 InnoDB 1215", errors)
-            if 7 <= index <= 10 and re.search(r"\bFOREIGN\s+KEY\b", no_vector_table_sql, re.I):
-                fail(f"无向量副本 {path.name} 分区表不应声明 FOREIGN KEY，避免 InnoDB 1506", errors)
-        no_vector_doc_path = NO_VECTOR_SQL_DIR / "执行顺序说明.md"
-        if not no_vector_doc_path.exists():
-            fail("无向量副本目录缺少执行顺序说明.md", errors)
-        else:
-            no_vector_doc = no_vector_doc_path.read_text(encoding="utf-8")
-            for fragment in ["临时表", "分区表", "不声明 `FOREIGN KEY`", "1215", "1506"]:
-                if fragment not in no_vector_doc:
-                    fail(f"无向量副本执行顺序说明缺少表外键限制说明：{fragment}", errors)
     required_fragments = [
         "INVISIBLE",
         " DESC",
@@ -250,7 +211,7 @@ def main() -> int:
         for name in ["t0.sql", "t1.sql", *[f"t{index}.sql" for index in range(2, 27)], "zz_seed_fk_data.sql"]:
             if name not in doc:
                 fail(f"执行顺序说明缺少 {name}", errors)
-        for fragment in ["READ-COMMITTED", "vidx_disabled", "SUPER", "vidx_hnsw_cache_size", "LIMIT", "ASC", "VEC_DISTANCE"]:
+        for fragment in ["READ-COMMITTED", "vidx_disabled", "SUPER", "vidx_hnsw_cache_size", "LIMIT", "ASC", "DISTANCE"]:
             if fragment not in doc:
                 fail(f"执行顺序说明缺少约束说明：{fragment}", errors)
         for fragment in ["64 个二级索引", "61 个索引", "PRIMARY KEY"]:

@@ -68,6 +68,7 @@ function TaskCard({ task }: { task: FuzzTask }) {
               <div className="kv-line"><span>配置名</span><b>{task.jump_host ?? "直连"}</b></div>
               <div className="kv-line"><span>目标实例</span><b>{task.target}</b></div>
               <div className="kv-line"><span>复用范围</span><b>当前任务全部连接</b></div>
+              <div className="kv-line"><span>并发线程</span><b>{task.thread_count} 个 worker</b></div>
               <div className="kv-line"><span>任务编号</span><b>{task.task_id}</b></div>
             </Card>
           </Col>
@@ -109,7 +110,7 @@ function TaskCard({ task }: { task: FuzzTask }) {
             items={[
               { title: "连接实例", description: "完成" },
               { title: "准备基表", description: "每表 10 行" },
-              { title: "执行 SQL", description: task.status === "恢复检测" ? "恢复检测" : `${task.sql_rate} 条/秒` }
+              { title: "执行 SQL", description: task.status === "恢复检测" ? "恢复检测" : `${task.thread_count} 线程 · ${task.sql_rate} 条/秒` }
             ]}
           />
         </Col>
@@ -248,7 +249,8 @@ function App() {
                     port: 3306,
                     username: "root",
                     password: "",
-                    jump_host: ""
+                    jump_host: "",
+                    thread_count: 1
                   }}
                   onFinish={handleStartTask}
                 >
@@ -265,6 +267,13 @@ function App() {
                   </Row>
                   <Form.Item name="node_name" label="任务名称" rules={[{ required: true, message: "请输入任务名称" }]}>
                     <Input />
+                  </Form.Item>
+                  <Form.Item
+                    name="thread_count"
+                    label="并发线程数"
+                    rules={[{ required: true, message: "请输入并发线程数" }]}
+                  >
+                    <InputNumber min={1} max={128} className="full-input" />
                   </Form.Item>
                   <Alert type="info" showIcon message="后台会自动创建并使用 test 库，任务表单无需填写目标库。" className="form-note" />
                   <Button type="primary" block icon={<PlayCircleOutlined />} htmlType="submit">启动任务</Button>

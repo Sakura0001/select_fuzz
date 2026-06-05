@@ -1,4 +1,4 @@
-export type TaskStatus = "执行 SQL" | "恢复检测" | "已停止";
+export type TaskStatus = "新建" | "连接实例" | "准备基表" | "执行 SQL" | "恢复检测" | "已停止";
 
 export interface LostConnectionEvent {
   timestamp: string;
@@ -16,6 +16,7 @@ export interface FuzzTask {
   target: string;
   status: TaskStatus;
   jump_host?: string | null;
+  thread_count: number;
   sql_total: number;
   lost_connection_total: number;
   sql_rate: number;
@@ -37,6 +38,7 @@ export interface CreateTaskPayload {
   username: string;
   password: string;
   jump_host?: string | null;
+  thread_count: number;
 }
 
 export interface SummaryMetric {

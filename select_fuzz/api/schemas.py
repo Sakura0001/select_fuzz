@@ -13,6 +13,7 @@ class TaskCreateRequest(BaseModel):
     password: str = Field(..., description="数据库密码")
     database: str = Field(default="test", description="数据库名")
     jump_host: Optional[str] = Field(default=None, description="跳板机配置名")
+    thread_count: int = Field(default=1, ge=1, le=128, description="并发查询线程数")
 
 
 class TaskResponse(BaseModel):
@@ -22,6 +23,7 @@ class TaskResponse(BaseModel):
     status: str
     database: str = "test"
     jump_host: Optional[str] = None
+    thread_count: int = 1
     sql_total: int = 0
     lost_connection_total: int = 0
 

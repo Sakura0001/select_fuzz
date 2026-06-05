@@ -18,8 +18,10 @@ def test_runtime_config_使用中文默认配置并解析基表目录(tmp_path: 
     assert config.display_name == "SQL 模糊测试控制台"
     assert config.base_sql_dir == base_dir
     assert config.sql_log_dir.name == "logs"
+    assert config.failed_sql_dir == Path("logs/failed_sql")
     assert config.lost_connection_dedup_minutes == 10
     assert config.recovery_probe_seconds == 60
+    assert config.default_thread_count == 1
 
 
 def test_节点配置支持跳板机引用() -> None:
@@ -54,8 +56,10 @@ def test_从_yaml_读取运行配置(tmp_path: Path) -> None:
                 "display_name: SQL 模糊测试控制台",
                 f"base_sql_dir: {base_dir}",
                 "sql_log_dir: logs/custom",
+                "failed_sql_dir: logs/custom_failed",
                 "lost_connection_dedup_minutes: 10",
                 "recovery_probe_seconds: 60",
+                "default_thread_count: 4",
                 "jump_hosts:",
                 "  - name: jump-prod",
                 "    host: 10.2.0.8",
@@ -78,5 +82,7 @@ def test_从_yaml_读取运行配置(tmp_path: Path) -> None:
 
     assert config.base_sql_dir == base_dir
     assert config.sql_log_dir == Path("logs/custom")
+    assert config.failed_sql_dir == Path("logs/custom_failed")
+    assert config.default_thread_count == 4
     assert config.jump_hosts[0].name == "jump-prod"
     assert config.target_nodes[0].jump_host == "jump-prod"

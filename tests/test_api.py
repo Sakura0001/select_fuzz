@@ -14,12 +14,17 @@ from select_fuzz.runner.db import DatabaseClient
 class ApiFakeDatabase(DatabaseClient):
     def __init__(self) -> None:
         self.executed: list[str] = []
+        self.scalar_queries: list[str] = []
 
     def connect(self) -> None:
         return None
 
     def execute(self, sql: str) -> None:
         self.executed.append(sql)
+
+    def query_scalar(self, sql: str) -> int:
+        self.scalar_queries.append(sql)
+        return 1
 
     def ping(self) -> bool:
         return True
@@ -167,13 +172,64 @@ def test_服务层创建真实任务时会执行基表_sql(tmp_path: Path) -> No
         "USE `test`",
         "CREATE TABLE base_api (id BIGINT NOT NULL, name VARCHAR(64), PRIMARY KEY (id))",
     ]
+    assert fake_db.scalar_queries == ["SELECT COUNT(*) FROM `base_api`"]
 
 
-def test_默认_app_使用_no_vector_基表目录() -> None:
+def test_默认_app_使用完整基表目录() -> None:
     app = create_default_app()
     service = app.state.runtime_service
 
-    assert service.base_sql_dir == Path("sql_base_tables_no_vector_subpartition")
+    assert service.base_sql_dir == Path("sql_base_tables")
+
+
+def test_创建真实任务支持自定义线程数并为每个_worker_准备临时表(tmp_path: Path) -> None:
+    base_dir = tmp_path / "sql_base_tables"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text(
+        "CREATE TABLE t0 (id BIGINT NOT NULL, PRIMARY KEY (id));",
+        encoding="utf-8",
+    )
+    (base_dir / "t2.sql").write_text(
+        "CREATE TEMPORARY TABLE `t2` (id BIGINT NOT NULL, PRIMARY KEY (id));",
+        encoding="utf-8",
+    )
+    (base_dir / "zz_seed_fk_data.sql").write_text(
+        "INSERT INTO `t0` (`id`) VALUES (1); INSERT INTO `t2` (`id`) VALUES (2);",
+        encoding="utf-8",
+    )
+    dbs = [ApiFakeDatabase(), ApiFakeDatabase(), ApiFakeDatabase()]
+
+    def factory(_node):
+        return dbs.pop(0)
+
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=factory,
+        run_background=False,
+    )
+    client = TestClient(create_app(service))
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "node_name": "node-real",
+            "host": "172.18.4.12",
+            "port": 3306,
+            "username": "fuzz",
+            "password": "secret",
+            "thread_count": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["thread_count"] == 3
+    created_dbs = [task_worker.db for task_worker in service._real_tasks[response.json()["task_id"]]._workers]
+    assert len(created_dbs) == 3
+    assert created_dbs[0].executed.count("CREATE TABLE t0 (id BIGINT NOT NULL, PRIMARY KEY (id))") == 1
+    for db in created_dbs:
+        assert any(sql.startswith("CREATE TEMPORARY TABLE `t2`") for sql in db.executed)
 
 
 def test_真实任务执行后_覆盖接口返回命中次数(tmp_path: Path) -> None:

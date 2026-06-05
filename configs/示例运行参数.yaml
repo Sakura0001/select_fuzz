@@ -2,8 +2,10 @@ project_name: sql_fuzz
 display_name: SQL 模糊测试控制台
 base_sql_dir: sql_base_tables
 sql_log_dir: logs
+failed_sql_dir: logs/failed_sql
 lost_connection_dedup_minutes: 10
 recovery_probe_seconds: 60
+default_thread_count: 4
 jump_hosts:
   - name: jump-prod
     host: 10.2.0.8

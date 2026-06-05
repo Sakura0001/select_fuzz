@@ -36,6 +36,9 @@ class EndToEndDatabase(DatabaseClient):
                 raise LostConnectionError("Lost connection to MySQL server during query")
         self.executed.append(sql)
 
+    def query_scalar(self, sql: str) -> int:
+        return 1
+
     def ping(self) -> bool:
         return True
 

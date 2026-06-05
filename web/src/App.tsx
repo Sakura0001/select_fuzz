@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Col, Collapse, Form, Input, InputNumber, Layout, Progress, Row, Select, Space, Statistic, Steps, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Collapse, Empty, Form, Input, InputNumber, Layout, Progress, Row, Select, Space, Statistic, Steps, Tag, Typography, message } from "antd";
 import { ApiOutlined, ClusterOutlined, DatabaseOutlined, DeploymentUnitOutlined, PlayCircleOutlined, WarningOutlined } from "@ant-design/icons";
 import * as echarts from "echarts";
 import { addJumpHost, createTask, loadCoverage, loadJumpHosts, loadTasks, summarize } from "./api";
@@ -8,7 +8,7 @@ import type { CoverageItem, CreateTaskPayload, FuzzTask, JumpHost } from "./type
 const { Sider, Content } = Layout;
 const { Title, Text } = Typography;
 
-function TrendChart() {
+function TrendChart({ clusterRate }: { clusterRate: number }) {
   useEffect(() => {
     const element = document.getElementById("trend-chart");
     if (!element) {
@@ -28,7 +28,7 @@ function TrendChart() {
           name: "SQL 执行速率",
           type: "line",
           smooth: true,
-          data: [380, 421, 407, 455, 431, 448],
+          data: Array.from({ length: 6 }, () => clusterRate),
           areaStyle: { color: "rgba(32,201,151,.16)" },
           lineStyle: { color: "#20c997", width: 3 },
           symbol: "circle"
@@ -41,7 +41,7 @@ function TrendChart() {
       window.removeEventListener("resize", resize);
       chart.dispose();
     };
-  }, []);
+  }, [clusterRate]);
   return <div id="trend-chart" className="trend-chart" />;
 }
 
@@ -128,6 +128,7 @@ function App() {
   const [tasks, setTasks] = useState<FuzzTask[]>([]);
   const [jumpHosts, setJumpHosts] = useState<JumpHost[]>([]);
   const [coverage, setCoverage] = useState<CoverageItem[]>([]);
+  const [backendConnected, setBackendConnected] = useState(true);
   const [taskForm] = Form.useForm<CreateTaskPayload>();
   const [jumpForm] = Form.useForm<JumpHost>();
   const metrics = useMemo(() => summarize(tasks), [tasks]);
@@ -153,7 +154,10 @@ function App() {
 
   useEffect(() => {
     const refresh = () => {
-      loadTasks().then(setTasks);
+      loadTasks().then((result) => {
+        setBackendConnected(result.backendConnected);
+        setTasks(result.tasks);
+      });
       loadCoverage().then(setCoverage);
     };
     refresh();
@@ -231,10 +235,26 @@ function App() {
           <Col span={6}><Card bordered={false}><Statistic title="集群速率" value={metrics.clusterRate} suffix="条/秒" /></Card></Col>
         </Row>
 
+        {!backendConnected && (
+          <Alert
+            type="warning"
+            showIcon
+            message="后端未连接"
+            description="当前页面没有加载任何默认任务数据。请先启动 FastAPI 后端，或检查 /api 代理配置。"
+            className="form-note"
+          />
+        )}
+
         <Row gutter={16}>
           <Col span={16}>
             <Space direction="vertical" size={12} className="task-list">
-              {tasks.map((task) => <TaskCard key={task.task_id} task={task} />)}
+              {tasks.length === 0 ? (
+                <Card bordered={false}>
+                  <Empty description={backendConnected ? "暂无任务" : "后端未连接，暂无任务"} />
+                </Card>
+              ) : (
+                tasks.map((task) => <TaskCard key={task.task_id} task={task} />)
+              )}
             </Space>
           </Col>
           <Col span={8}>
@@ -301,7 +321,7 @@ function App() {
                 </Form>
               </Card>
               <Card title="执行速率趋势" bordered={false}>
-                <TrendChart />
+                <TrendChart clusterRate={metrics.clusterRate} />
               </Card>
               <Alert
                 type="error"

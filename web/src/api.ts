@@ -1,90 +1,13 @@
-import type { CoverageItem, CreateTaskPayload, FuzzTask, JumpHost, LostConnectionEvent, SummaryMetric } from "./types";
+import type { CoverageItem, CreateTaskPayload, FuzzTask, JumpHost, LostConnectionEvent, SummaryMetric, TaskLoadResult } from "./types";
 
-const fallbackTasks: FuzzTask[] = [
-  {
-    task_id: "task-1042",
-    node_name: "polardb-node-a",
-    target: "10.23.8.41:3306",
-    status: "执行 SQL",
-    jump_host: null,
-    thread_count: 8,
-    sql_total: 1288421,
-    lost_connection_total: 0,
-    sql_rate: 122,
-    events: []
-  },
-  {
-    task_id: "task-1043",
-    node_name: "polardb-node-b",
-    target: "172.18.4.10:3306",
-    status: "恢复检测",
-    jump_host: "jump-prod",
-    thread_count: 16,
-    sql_total: 914206,
-    lost_connection_total: 3,
-    sql_rate: 0,
-    events: [
-      {
-        timestamp: "2026-06-04 10:42:11",
-        task_id: "task-1043",
-        node_name: "polardb-node-b",
-        jump_host: "jump-prod",
-        target: "172.18.4.10:3306",
-        sql: "SELECT /* node-b */ ... FROM partition_l2 p JOIN fk_child c ...",
-        window_start: "2026-06-04 10:42:11"
-      },
-      {
-        timestamp: "2026-06-04 10:21:03",
-        task_id: "task-1043",
-        node_name: "polardb-node-b",
-        jump_host: "jump-prod",
-        target: "172.18.4.10:3306",
-        sql: "WITH cte AS (...) SELECT DISTANCE(vector_col, STRING_TO_VECTOR('[0.1,0.2,0.3,0.4]'), 'COSINE') ...",
-        window_start: "2026-06-04 10:21:03"
-      },
-      {
-        timestamp: "2026-06-04 09:58:16",
-        task_id: "task-1043",
-        node_name: "polardb-node-b",
-        jump_host: "jump-prod",
-        target: "172.18.4.10:3306",
-        sql: "SELECT JSON_EXTRACT(j, '$.a'), BIT_COUNT(flags) FROM all_types_base ...",
-        window_start: "2026-06-04 09:58:16"
-      }
-    ]
-  },
-  {
-    task_id: "task-1044",
-    node_name: "polardb-node-c",
-    target: "172.18.4.12:3306",
-    status: "执行 SQL",
-    jump_host: "jump-prod",
-    thread_count: 4,
-    sql_total: 712884,
-    lost_connection_total: 1,
-    sql_rate: 87,
-    events: [
-      {
-        timestamp: "2026-06-04 08:11:19",
-        task_id: "task-1044",
-        node_name: "polardb-node-c",
-        jump_host: "jump-prod",
-        target: "172.18.4.12:3306",
-        sql: "SELECT ST_AsText(geo), CAST(blob_col AS CHAR) FROM all_types_base ...",
-        window_start: "2026-06-04 08:11:19"
-      }
-    ]
-  }
-];
-
-export async function loadTasks(): Promise<FuzzTask[]> {
+export async function loadTasks(): Promise<TaskLoadResult> {
   try {
     const response = await fetch("/api/tasks");
     if (!response.ok) {
-      return fallbackTasks;
+      return { backendConnected: false, tasks: [] };
     }
     const tasks = (await response.json()) as FuzzTask[];
-    return Promise.all(
+    const rows = await Promise.all(
       tasks.map(async (task) => ({
         ...task,
         thread_count: task.thread_count ?? 1,
@@ -92,8 +15,9 @@ export async function loadTasks(): Promise<FuzzTask[]> {
         events: await loadLostConnections(task.task_id)
       }))
     );
+    return { backendConnected: true, tasks: rows };
   } catch {
-    return fallbackTasks;
+    return { backendConnected: false, tasks: [] };
   }
 }
 

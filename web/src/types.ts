@@ -23,6 +23,11 @@ export interface FuzzTask {
   events: LostConnectionEvent[];
 }
 
+export interface TaskLoadResult {
+  backendConnected: boolean;
+  tasks: FuzzTask[];
+}
+
 export interface JumpHost {
   name: string;
   host: string;

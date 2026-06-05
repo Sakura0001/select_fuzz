@@ -105,9 +105,7 @@ CREATE TABLE `t7` (
   KEY `idx_t7_extra_decimal_round` ((round(`decimal_col`,2))),
   KEY `idx_t7_extra_float_floor` ((floor(`float_col`))),
   KEY `idx_t7_extra_double_ceiling` ((ceiling(`double_col`))),
-  KEY `idx_t7_extra_text_length` ((char_length(`text_col`))),
-  CONSTRAINT `fk_t7_parent_id` FOREIGN KEY (`parent_tenant_id`,`parent_subpart_id`,`parent_id_col`) REFERENCES `t1` (`tenant_id`,`subpart_id`,`id_col`) ON DELETE CASCADE ON UPDATE CASCADE,
-  CONSTRAINT `fk_t7_parent_metric` FOREIGN KEY (`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`) REFERENCES `t1` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`) ON DELETE SET NULL ON UPDATE CASCADE
+  KEY `idx_t7_extra_text_length` ((char_length(`text_col`)))
 ) ENGINE=InnoDB AUTO_INCREMENT=89671 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
 PARTITION BY RANGE (`tenant_id`) (
   PARTITION p0 VALUES LESS THAN (2),

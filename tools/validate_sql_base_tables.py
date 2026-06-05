@@ -115,15 +115,18 @@ def main() -> int:
         if index == 0:
             if "CONSTRAINT `fk_t0_" in sql:
                 fail("t0.sql 不应包含父表外键", errors)
+        elif index == 1:
+            if sql.count("FOREIGN KEY") < 2:
+                fail("t1.sql 外键数量少于 2 个", errors)
+            references = set(re.findall(r"REFERENCES\s+`t(\d+)`", sql, flags=re.I))
+            if any(int(ref) >= 2 for ref in references):
+                fail(f"t1.sql 不应引用临时表或分区表作为外键父表：{sorted(references)}", errors)
         elif 2 <= index <= 6:
             if "FOREIGN KEY" in sql.upper():
                 fail(f"t{index}.sql 临时表不应声明 FOREIGN KEY，避免 InnoDB 1215", errors)
         else:
-            if sql.count("FOREIGN KEY") < 2:
-                fail(f"t{index}.sql 外键数量少于 2 个", errors)
-            references = set(re.findall(r"REFERENCES\s+`t(\d+)`", sql, flags=re.I))
-            if any(int(ref) >= 2 for ref in references):
-                fail(f"t{index}.sql 不应引用临时表或分区表作为外键父表：{sorted(references)}", errors)
+            if "FOREIGN KEY" in sql.upper():
+                fail(f"t{index}.sql 分区表不应声明 FOREIGN KEY，避免 InnoDB 1506", errors)
 
         upper_sql = sql.upper()
         if index <= 1:
@@ -142,12 +145,16 @@ def main() -> int:
                 fail(f"t{index}.sql 应为一级分区表", errors)
             if first_level_partition_count(sql) != 8:
                 fail(f"t{index}.sql 一级分区数量应为 8 个", errors)
+            if "FOREIGN KEY" in upper_sql:
+                fail(f"t{index}.sql 一级分区表不应声明 FOREIGN KEY，避免 InnoDB 1506", errors)
         else:
             type_counts["subpartition"] += 1
             if "SUBPARTITION BY" not in upper_sql:
                 fail(f"t{index}.sql 应为二级分区表", errors)
             if first_level_partition_count(sql) != 8:
                 fail(f"t{index}.sql 一级分区数量应为 8 个", errors)
+            if "FOREIGN KEY" in upper_sql:
+                fail(f"t{index}.sql 二级分区表不应声明 FOREIGN KEY，避免 InnoDB 1506", errors)
 
     expected_counts = {"normal": 2, "temporary": 5, "partition": 4, "subpartition": 16}
     if type_counts != expected_counts:
@@ -185,14 +192,16 @@ def main() -> int:
                 fail(f"无向量副本 {path.name} 索引数量应为 {TARGET_TOTAL_INDEX_COUNT}，实际 {no_vector_index_count}", errors)
             if 2 <= index <= 6 and re.search(r"\bFOREIGN\s+KEY\b", no_vector_table_sql, re.I):
                 fail(f"无向量副本 {path.name} 临时表不应声明 FOREIGN KEY，避免 InnoDB 1215", errors)
+            if 7 <= index <= 10 and re.search(r"\bFOREIGN\s+KEY\b", no_vector_table_sql, re.I):
+                fail(f"无向量副本 {path.name} 分区表不应声明 FOREIGN KEY，避免 InnoDB 1506", errors)
         no_vector_doc_path = NO_VECTOR_SQL_DIR / "执行顺序说明.md"
         if not no_vector_doc_path.exists():
             fail("无向量副本目录缺少执行顺序说明.md", errors)
         else:
             no_vector_doc = no_vector_doc_path.read_text(encoding="utf-8")
-            for fragment in ["临时表", "不声明 `FOREIGN KEY`", "1215"]:
+            for fragment in ["临时表", "分区表", "不声明 `FOREIGN KEY`", "1215", "1506"]:
                 if fragment not in no_vector_doc:
-                    fail(f"无向量副本执行顺序说明缺少临时表外键限制说明：{fragment}", errors)
+                    fail(f"无向量副本执行顺序说明缺少表外键限制说明：{fragment}", errors)
     required_fragments = [
         "INVISIBLE",
         " DESC",
@@ -247,9 +256,9 @@ def main() -> int:
         for fragment in ["64 个二级索引", "61 个索引", "PRIMARY KEY"]:
             if fragment not in doc:
                 fail(f"执行顺序说明缺少索引上限说明：{fragment}", errors)
-        for fragment in ["临时表", "不声明 `FOREIGN KEY`", "1215"]:
+        for fragment in ["临时表", "分区表", "不声明 `FOREIGN KEY`", "1215", "1506"]:
             if fragment not in doc:
-                fail(f"执行顺序说明缺少临时表外键限制说明：{fragment}", errors)
+                fail(f"执行顺序说明缺少表外键限制说明：{fragment}", errors)
 
     if errors:
         print("\n".join(errors))

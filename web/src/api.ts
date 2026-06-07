@@ -10,8 +10,10 @@ export async function loadTasks(): Promise<TaskLoadResult> {
     const rows = await Promise.all(
       tasks.map(async (task) => ({
         ...task,
+        phase: task.phase ?? task.status,
         thread_count: task.thread_count ?? 1,
         sql_rate: task.sql_rate ?? 0,
+        worker_states: task.worker_states ?? [],
         events: await loadLostConnections(task.task_id)
       }))
     );
@@ -79,12 +81,42 @@ export async function createTask(payload: CreateTaskPayload): Promise<FuzzTask> 
     throw new Error("后端创建任务失败");
   }
   const task = (await response.json()) as FuzzTask;
-  return { ...task, thread_count: task.thread_count ?? 1, sql_rate: task.sql_rate ?? 0, events: task.events ?? [] };
+  return normalizeTask(task);
+}
+
+export async function pauseTask(taskId: string): Promise<void> {
+  await postTaskAction(taskId, "pause", "暂停任务失败");
+}
+
+export async function resumeTask(taskId: string): Promise<void> {
+  await postTaskAction(taskId, "resume", "恢复任务失败");
+}
+
+export async function stopTask(taskId: string): Promise<void> {
+  await postTaskAction(taskId, "stop", "停止任务失败");
+}
+
+async function postTaskAction(taskId: string, action: string, errorMessage: string): Promise<void> {
+  const response = await fetch(`/api/tasks/${taskId}/${action}`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error(errorMessage);
+  }
+}
+
+function normalizeTask(task: FuzzTask): FuzzTask {
+  return {
+    ...task,
+    phase: task.phase ?? task.status,
+    thread_count: task.thread_count ?? 1,
+    sql_rate: task.sql_rate ?? 0,
+    worker_states: task.worker_states ?? [],
+    events: task.events ?? []
+  };
 }
 
 export function summarize(tasks: FuzzTask[]): SummaryMetric {
   return {
-    activeTasks: tasks.filter((task) => task.status !== "已停止").length,
+    activeTasks: tasks.filter((task) => task.status !== "已停止" && task.status !== "失败").length,
     sqlTotal: tasks.reduce((total, task) => total + task.sql_total, 0),
     lostConnection: tasks.reduce((total, task) => total + task.lost_connection_total, 0),
     clusterRate: tasks.reduce((total, task) => total + task.sql_rate, 0)

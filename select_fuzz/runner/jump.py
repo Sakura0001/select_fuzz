@@ -20,7 +20,8 @@ class JumpTunnel:
         self._server = SSHTunnelForwarder(
             (self.jump_host.host, self.jump_host.port),
             ssh_username=self.jump_host.username,
-            ssh_pkey=self.jump_host.private_key_path,
+            ssh_password=self.jump_host.password,
+            ssh_pkey=self.jump_host.private_key_path or None,
             remote_bind_address=(self.target_node.host, self.target_node.port),
             local_bind_address=(self.local_host, self.local_port or 0),
         )

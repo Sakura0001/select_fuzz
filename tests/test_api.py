@@ -33,6 +33,13 @@ class ApiFakeDatabase(DatabaseClient):
         return None
 
 
+class ApiFailingCreateDatabase(ApiFakeDatabase):
+    def execute(self, sql: str) -> None:
+        super().execute(sql)
+        if sql.startswith("CREATE TABLE"):
+            raise RuntimeError("模拟创建基表失败")
+
+
 def _client(tmp_path: Path) -> TestClient:
     service = RuntimeService(
         metric_store=MetricStore(tmp_path / "metrics.db"),
@@ -175,6 +182,171 @@ def test_服务层创建真实任务时会执行基表_sql(tmp_path: Path) -> No
     assert fake_db.scalar_queries == ["SELECT COUNT(*) FROM `base_api`"]
 
 
+def test_创建真实任务初始化失败会保留失败状态和原因(tmp_path: Path) -> None:
+    base_dir = tmp_path / "sql_base_tables"
+    base_dir.mkdir()
+    (base_dir / "001_base.sql").write_text(
+        "CREATE TABLE base_api (id BIGINT NOT NULL, PRIMARY KEY (id));",
+        encoding="utf-8",
+    )
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: ApiFailingCreateDatabase(),
+        run_background=False,
+    )
+    client = TestClient(create_app(service))
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "node_name": "node-fail",
+            "host": "172.18.4.12",
+            "port": 3306,
+            "username": "fuzz",
+            "password": "secret",
+        },
+    )
+    task_id = response.json()["task_id"]
+    listed_task = client.get("/api/tasks").json()[0]
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "失败"
+    assert response.json()["phase"] == "准备基表"
+    assert "准备基表失败" in response.json()["last_error"]
+    assert listed_task["task_id"] == task_id
+    assert listed_task["status"] == "失败"
+    assert listed_task["last_error"] == response.json()["last_error"]
+
+
+def test_任务支持暂停和恢复(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    response = client.post(
+        "/api/tasks",
+        json={
+            "node_name": "node-a",
+            "host": "172.18.4.12",
+            "port": 3306,
+            "username": "fuzz",
+            "password": "secret",
+        },
+    )
+    task_id = response.json()["task_id"]
+
+    paused = client.post(f"/api/tasks/{task_id}/pause")
+    loaded_paused = client.get(f"/api/tasks/{task_id}")
+    resumed = client.post(f"/api/tasks/{task_id}/resume")
+
+    assert paused.status_code == 200
+    assert paused.json()["状态"] == "已暂停"
+    assert loaded_paused.json()["status"] == "已暂停"
+    assert resumed.json()["状态"] == "执行 SQL"
+
+
+def test_跳板机启动后_db_factory_失败会关闭隧道并返回失败状态(tmp_path: Path, monkeypatch) -> None:
+    base_dir = tmp_path / "sql_base_tables"
+    base_dir.mkdir()
+    (base_dir / "001_base.sql").write_text(
+        "CREATE TABLE base_api (id BIGINT NOT NULL, PRIMARY KEY (id));",
+        encoding="utf-8",
+    )
+    events: list[str] = []
+
+    class FakeTunnel:
+        local_host = "127.0.0.1"
+        local_port = None
+
+        def __init__(self, jump_host, target_node) -> None:
+            self.jump_host = jump_host
+            self.target_node = target_node
+
+        def start(self) -> tuple[str, int]:
+            events.append("start")
+            self.local_port = 44001
+            return self.local_host, self.local_port
+
+        def stop(self) -> None:
+            events.append("stop")
+
+    def failing_factory(_node):
+        raise RuntimeError("模拟 db_factory 失败")
+
+    monkeypatch.setattr("select_fuzz.api.service.JumpTunnel", FakeTunnel)
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=failing_factory,
+        run_background=False,
+    )
+    service.add_jump_host(
+        {
+            "name": "jump-prod",
+            "host": "10.2.0.8",
+            "port": 22,
+            "username": "ops",
+            "password": "ssh-secret",
+        }
+    )
+    client = TestClient(create_app(service))
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "node_name": "node-a",
+            "host": "172.18.4.12",
+            "port": 3306,
+            "username": "fuzz",
+            "password": "secret",
+            "jump_host": "jump-prod",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "失败"
+    assert response.json()["phase"] == "连接实例"
+    assert "模拟 db_factory 失败" in response.json()["last_error"]
+    assert events == ["start", "stop"]
+
+
+def test_后台_worker_未预期异常会同步失败快照(tmp_path: Path) -> None:
+    base_dir = tmp_path / "sql_base_tables"
+    base_dir.mkdir()
+    (base_dir / "001_base.sql").write_text(
+        "CREATE TABLE base_api (id BIGINT NOT NULL, PRIMARY KEY (id));",
+        encoding="utf-8",
+    )
+    fake_db = ApiFakeDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: fake_db,
+        run_background=False,
+    )
+    client = TestClient(create_app(service))
+    response = client.post(
+        "/api/tasks",
+        json={
+            "node_name": "node-real",
+            "host": "172.18.4.12",
+            "port": 3306,
+            "username": "fuzz",
+            "password": "secret",
+        },
+    )
+    task = service._real_tasks[response.json()["task_id"]]
+    task.tables.clear()
+
+    service._run_task_step(task, 0)
+    loaded = client.get(f"/api/tasks/{task.task_id}").json()
+
+    assert loaded["status"] == "失败"
+    assert loaded["phase"] == "执行 SQL"
+    assert "至少需要一张表元数据才能生成 SQL" in loaded["last_error"]
+
+
 def test_默认_app_使用完整基表目录() -> None:
     app = create_default_app()
     service = app.state.runtime_service
@@ -283,9 +455,11 @@ def test_跳板机_post_接口保存配置(tmp_path: Path) -> None:
             "host": "10.9.0.1",
             "port": 22,
             "username": "ops",
+            "password": "ssh-secret",
         },
     )
     jump_hosts = client.get("/api/jump-hosts").json()
 
     assert response.status_code == 200
-    assert any(item["name"] == "jump-dev" for item in jump_hosts)
+    saved = next(item for item in jump_hosts if item["name"] == "jump-dev")
+    assert saved["password"] == "ssh-secret"

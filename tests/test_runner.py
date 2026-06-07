@@ -248,6 +248,59 @@ def test_任务启动发现基表无数据会失败(tmp_path: Path) -> None:
     else:
         raise AssertionError("基表无数据时必须失败")
 
+    assert task.status is TaskStatus.FAILED
+    assert task.phase == "准备基表"
+    assert task.last_error is not None
+    assert "准备基表失败" in task.last_error
+
+
+def test_任务启动没有可解析基表会失败(tmp_path: Path) -> None:
+    directory = tmp_path / "empty_base"
+    directory.mkdir()
+    (directory / "001_seed.sql").write_text("INSERT INTO missing_table VALUES (1);", encoding="utf-8")
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=directory,
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    try:
+        task.start()
+    except RuntimeError as exc:
+        assert "至少需要一张可解析的基表" in str(exc)
+    else:
+        raise AssertionError("没有可解析基表时必须失败")
+
+    assert task.status is TaskStatus.FAILED
+    assert task.phase == "准备基表"
+
+
+def test_step_遇到未预期异常会标记任务失败(tmp_path: Path) -> None:
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    task.tables.clear()
+
+    task.step()
+
+    assert task.status is TaskStatus.FAILED
+    assert task.phase == "执行 SQL"
+    assert task.last_error is not None
+    assert "至少需要一张表元数据才能生成 SQL" in task.last_error
+
 
 def test_执行查询会写入_sql_日志(tmp_path: Path) -> None:
     db = FakeDatabase()
@@ -378,3 +431,108 @@ def test_多线程任务为每个_worker_准备独立临时表会话(tmp_path: P
         assert "USE `select_fuzz`" in db.executed
         assert any(sql.startswith("CREATE TEMPORARY TABLE `t2`") for sql in db.executed)
         assert db.executed.count("INSERT INTO `t2` (`id`) VALUES (2)") == 1
+
+
+def test_多线程新增_worker_准备失败会关闭该连接(tmp_path: Path) -> None:
+    class FailingPrepareDatabase(FakeDatabase):
+        def execute(self, sql: str) -> None:
+            super().execute(sql)
+            if sql.startswith("CREATE TEMPORARY TABLE"):
+                raise RuntimeError("模拟临时表创建失败")
+
+    dbs = [FakeDatabase(), FailingPrepareDatabase()]
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir_with_temporary_table(tmp_path),
+        db=dbs[0],
+        db_factory=lambda: dbs[1],
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+        thread_count=2,
+    )
+
+    try:
+        task.start()
+    except RuntimeError as exc:
+        assert "模拟临时表创建失败" in str(exc)
+    else:
+        raise AssertionError("新增 worker 准备失败时必须失败")
+
+    assert task.status is TaskStatus.FAILED
+    assert dbs[1].connected is False
+
+
+def test_任务暂停后_step_不会继续发送_sql(tmp_path: Path) -> None:
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+        random_seed=7,
+    )
+    task.start()
+    before = len(db.executed)
+
+    task.pause()
+    task.step()
+    task.resume()
+    task.step()
+
+    assert task.status is TaskStatus.RUNNING
+    assert len(db.executed) == before + 1
+
+
+def test_看门狗会关闭长时间执行_sql_的_worker_连接(tmp_path: Path) -> None:
+    clock = FakeClock()
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    task.record_worker_sql_start(0, "SELECT SLEEP(999)", clock())
+    clock.advance(31)
+
+    interrupted = task.interrupt_stalled_workers(timeout_seconds=30)
+    worker_state = task.worker_states[0]
+
+    assert interrupted == [0]
+    assert db.connected is False
+    assert worker_state["state"] == "疑似卡住"
+    assert worker_state["current_sql"] == "SELECT SLEEP(999)"
+    assert worker_state["stalled_total"] == 1
+
+
+def test_暂停不会清空正在执行_sql_的_worker_状态(tmp_path: Path) -> None:
+    clock = FakeClock()
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    task.record_worker_sql_start(0, "SELECT SLEEP(999)", clock())
+
+    task.pause()
+    clock.advance(31)
+    interrupted = task.interrupt_stalled_workers(timeout_seconds=30)
+
+    assert task.status is TaskStatus.PAUSED
+    assert interrupted == [0]
+    assert task.worker_states[0]["current_sql"] == "SELECT SLEEP(999)"

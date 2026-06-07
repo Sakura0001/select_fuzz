@@ -44,6 +44,20 @@ def create_app(service: RuntimeService) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="任务不存在") from exc
 
+    @app.post("/api/tasks/{task_id}/pause")
+    def pause_task(task_id: str) -> dict:
+        try:
+            return {"状态": service.pause_task(task_id).status}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="任务不存在") from exc
+
+    @app.post("/api/tasks/{task_id}/resume")
+    def resume_task(task_id: str) -> dict:
+        try:
+            return {"状态": service.resume_task(task_id).status}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="任务不存在") from exc
+
     @app.get("/api/tasks/{task_id}/lost-connections")
     def lost_connections(task_id: str) -> list:
         return service.list_lost_connection_events(task_id)

@@ -30,6 +30,7 @@ def test_节点配置支持跳板机引用() -> None:
         host="10.2.0.8",
         port=22,
         username="ops",
+        password="ssh-secret",
         private_key_path="/Users/yuyu/.ssh/id_rsa",
     )
     node = TargetNodeConfig(
@@ -43,6 +44,7 @@ def test_节点配置支持跳板机引用() -> None:
     )
 
     assert jump.name == node.jump_host
+    assert jump.password == "ssh-secret"
     assert node.address == "172.18.4.12:3306"
 
 
@@ -65,6 +67,7 @@ def test_从_yaml_读取运行配置(tmp_path: Path) -> None:
                 "    host: 10.2.0.8",
                 "    port: 22",
                 "    username: ops",
+                "    password: ssh-secret",
                 "target_nodes:",
                 "  - name: node-a",
                 "    host: 172.18.4.12",
@@ -85,4 +88,5 @@ def test_从_yaml_读取运行配置(tmp_path: Path) -> None:
     assert config.failed_sql_dir == Path("logs/custom_failed")
     assert config.default_thread_count == 4
     assert config.jump_hosts[0].name == "jump-prod"
+    assert config.jump_hosts[0].password == "ssh-secret"
     assert config.target_nodes[0].jump_host == "jump-prod"

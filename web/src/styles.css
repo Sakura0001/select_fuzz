@@ -172,6 +172,35 @@ body {
   text-align: center;
 }
 
+.task-error {
+  margin-top: 10px;
+}
+
+.worker-grid {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.worker-row {
+  display: grid;
+  grid-template-columns: 78px 82px 56px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 7px;
+  background: rgba(2, 6, 23, 0.28);
+  font-size: 12px;
+}
+
+.worker-row code {
+  overflow: hidden;
+  color: #fca5a5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .trend-chart {
   height: 220px;
 }

@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Col, Collapse, Empty, Form, Input, InputNumber, Layout, Progress, Row, Select, Space, Statistic, Steps, Tag, Typography, message } from "antd";
-import { ApiOutlined, ClusterOutlined, DatabaseOutlined, DeploymentUnitOutlined, PlayCircleOutlined, WarningOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Col, Collapse, Empty, Form, Input, InputNumber, Layout, Progress, Row, Select, Space, Statistic, Steps, Tag, Tooltip, Typography, message } from "antd";
+import { ApiOutlined, ClusterOutlined, DatabaseOutlined, DeploymentUnitOutlined, PauseCircleOutlined, PlayCircleOutlined, StopOutlined, WarningOutlined } from "@ant-design/icons";
 import * as echarts from "echarts";
-import { addJumpHost, createTask, loadCoverage, loadJumpHosts, loadTasks, summarize } from "./api";
+import { addJumpHost, createTask, loadCoverage, loadJumpHosts, loadTasks, pauseTask, resumeTask, stopTask, summarize } from "./api";
 import type { CoverageItem, CreateTaskPayload, FuzzTask, JumpHost } from "./types";
 
 const { Sider, Content } = Layout;
@@ -46,8 +46,14 @@ function TrendChart({ clusterRate }: { clusterRate: number }) {
 }
 
 function statusTag(task: FuzzTask) {
+  if (task.status === "失败") {
+    return <Tag color="error">失败</Tag>;
+  }
   if (task.status === "恢复检测") {
     return <Tag color="error">告警</Tag>;
+  }
+  if (task.status === "已暂停") {
+    return <Tag color="warning">已暂停</Tag>;
   }
   if (task.status === "已停止") {
     return <Tag>已停止</Tag>;
@@ -55,7 +61,55 @@ function statusTag(task: FuzzTask) {
   return <Tag color="success">运行中</Tag>;
 }
 
-function TaskCard({ task }: { task: FuzzTask }) {
+const stepIndexByPhase = new Map([
+  ["连接实例", 0],
+  ["准备基表", 1],
+  ["执行 SQL", 2],
+  ["恢复检测", 2],
+  ["已暂停", 2]
+]);
+
+function stepDescription(task: FuzzTask, phase: string, runningDescription: string) {
+  if (task.status === "失败" && task.phase === phase) {
+    return "失败";
+  }
+  if (phase === "连接实例") {
+    return stepIndexByPhase.get(task.phase) === 0 && task.status !== "失败" ? "进行中" : "完成";
+  }
+  if (phase === "准备基表") {
+    if (stepIndexByPhase.get(task.phase) === 1 && task.status !== "失败") {
+      return "进行中";
+    }
+    return (stepIndexByPhase.get(task.phase) ?? 0) > 1 ? "完成" : "等待";
+  }
+  if (task.status === "已暂停") {
+    return "已暂停";
+  }
+  if (task.status === "恢复检测") {
+    return "恢复检测";
+  }
+  if (phase === "执行 SQL" && task.status === "失败" && task.phase !== "执行 SQL") {
+    return "未开始";
+  }
+  return runningDescription;
+}
+
+function TaskCard({
+  task,
+  onPause,
+  onResume,
+  onStop
+}: {
+  task: FuzzTask;
+  onPause: (taskId: string) => void;
+  onResume: (taskId: string) => void;
+  onStop: (taskId: string) => void;
+}) {
+  const currentStep = stepIndexByPhase.get(task.phase) ?? 0;
+  const isFailed = task.status === "失败";
+  const canPause = task.status === "执行 SQL" || task.status === "恢复检测";
+  const canResume = task.status === "已暂停";
+  const canStop = task.status !== "已停止" && task.status !== "失败";
   const items = [
     {
       key: `${task.task_id}-detail`,
@@ -73,6 +127,30 @@ function TaskCard({ task }: { task: FuzzTask }) {
             </Card>
           </Col>
           <Col span={15}>
+            <Card className="detail-card" bordered={false}>
+              <Text type="secondary">任务状态</Text>
+              {task.last_error ? (
+                <Alert type="error" showIcon message={task.phase} description={task.last_error} className="task-error" />
+              ) : (
+                <div className="empty-event">当前无失败原因</div>
+              )}
+              <div className="worker-grid">
+                {task.worker_states.length === 0 ? (
+                  <div className="empty-event">暂无 worker 状态</div>
+                ) : (
+                  task.worker_states.map((worker) => (
+                    <div className="worker-row" key={worker.worker_id}>
+                      <span>worker {worker.worker_id}</span>
+                      <Tag color={worker.state === "疑似卡住" ? "error" : worker.state === "已暂停" ? "warning" : "processing"}>{worker.state}</Tag>
+                      <b>{worker.sql_total} 条</b>
+                      {worker.last_error && <code>{worker.last_error}</code>}
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+          </Col>
+          <Col span={24}>
             <Card className="detail-card" bordered={false}>
               <Text type="secondary">最近 lost connection 事件</Text>
               <div className="event-scroll">
@@ -96,7 +174,7 @@ function TaskCard({ task }: { task: FuzzTask }) {
   ];
 
   return (
-    <Card className={`task-card ${task.status === "恢复检测" ? "task-card-alert" : ""}`} bordered={false}>
+    <Card className={`task-card ${task.status === "恢复检测" || task.status === "失败" ? "task-card-alert" : ""}`} bordered={false}>
       <Row align="middle" gutter={14}>
         <Col span={5}>
           <div className="node-name">{task.node_name}</div>
@@ -105,16 +183,37 @@ function TaskCard({ task }: { task: FuzzTask }) {
         <Col span={12}>
           <Steps
             size="small"
-            current={task.status === "恢复检测" ? 2 : 2}
-            status={task.status === "恢复检测" ? "error" : "process"}
+            current={currentStep}
+            status={isFailed || task.status === "恢复检测" ? "error" : task.status === "已暂停" ? "wait" : "process"}
             items={[
-              { title: "连接实例", description: "完成" },
-              { title: "准备基表", description: "每表 10 行" },
-              { title: "执行 SQL", description: task.status === "恢复检测" ? "恢复检测" : `${task.thread_count} 线程 · ${task.sql_rate} 条/秒` }
+              { title: "连接实例", description: stepDescription(task, "连接实例", "完成") },
+              { title: "准备基表", description: stepDescription(task, "准备基表", "每表 10 行") },
+              { title: "执行 SQL", description: stepDescription(task, "执行 SQL", `${task.thread_count} 线程 · ${task.sql_rate} 条/秒`) }
             ]}
           />
         </Col>
-        <Col span={3}>{statusTag(task)}</Col>
+        <Col span={3}>
+          <Space direction="vertical" size={6}>
+            {statusTag(task)}
+            <Space size={6}>
+              {canPause && (
+                <Tooltip title="暂停任务">
+                  <Button size="small" icon={<PauseCircleOutlined />} onClick={() => onPause(task.task_id)} />
+                </Tooltip>
+              )}
+              {canResume && (
+                <Tooltip title="恢复任务">
+                  <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => onResume(task.task_id)} />
+                </Tooltip>
+              )}
+              {canStop && (
+                <Tooltip title="停止任务">
+                  <Button size="small" danger icon={<StopOutlined />} onClick={() => onStop(task.task_id)} />
+                </Tooltip>
+              )}
+            </Space>
+          </Space>
+        </Col>
         <Col span={4}>
           <Statistic title="lost connection" value={task.lost_connection_total} valueStyle={{ color: task.lost_connection_total > 0 ? "#ff7875" : "#95de64" }} />
         </Col>
@@ -132,6 +231,12 @@ function App() {
   const [taskForm] = Form.useForm<CreateTaskPayload>();
   const [jumpForm] = Form.useForm<JumpHost>();
   const metrics = useMemo(() => summarize(tasks), [tasks]);
+  const refreshRuntime = async () => {
+    const result = await loadTasks();
+    setBackendConnected(result.backendConnected);
+    setTasks(result.tasks);
+    setCoverage(await loadCoverage());
+  };
   const coverageByCategory = useMemo(() => {
     const groups = new Map<string, { total: number; hit: number }>();
     coverage
@@ -154,11 +259,7 @@ function App() {
 
   useEffect(() => {
     const refresh = () => {
-      loadTasks().then((result) => {
-        setBackendConnected(result.backendConnected);
-        setTasks(result.tasks);
-      });
-      loadCoverage().then(setCoverage);
+      refreshRuntime();
     };
     refresh();
     loadJumpHosts().then(setJumpHosts);
@@ -175,9 +276,43 @@ function App() {
       });
       setTasks((current) => [task, ...current]);
       loadCoverage().then(setCoverage);
-      message.success("任务已启动");
+      if (task.status === "失败") {
+        message.error(task.last_error ?? "任务启动失败");
+      } else {
+        message.success("任务已启动");
+      }
     } catch {
       message.error("任务启动失败，请检查数据库连接和账号密码");
+    }
+  };
+
+  const handlePauseTask = async (taskId: string) => {
+    try {
+      await pauseTask(taskId);
+      await refreshRuntime();
+      message.success("任务已暂停");
+    } catch {
+      message.error("暂停任务失败");
+    }
+  };
+
+  const handleResumeTask = async (taskId: string) => {
+    try {
+      await resumeTask(taskId);
+      await refreshRuntime();
+      message.success("任务已恢复");
+    } catch {
+      message.error("恢复任务失败");
+    }
+  };
+
+  const handleStopTask = async (taskId: string) => {
+    try {
+      await stopTask(taskId);
+      await refreshRuntime();
+      message.success("任务已停止");
+    } catch {
+      message.error("停止任务失败");
     }
   };
 
@@ -253,7 +388,15 @@ function App() {
                   <Empty description={backendConnected ? "暂无任务" : "后端未连接，暂无任务"} />
                 </Card>
               ) : (
-                tasks.map((task) => <TaskCard key={task.task_id} task={task} />)
+                tasks.map((task) => (
+                  <TaskCard
+                    key={task.task_id}
+                    task={task}
+                    onPause={handlePauseTask}
+                    onResume={handleResumeTask}
+                    onStop={handleStopTask}
+                  />
+                ))
               )}
             </Space>
           </Col>
@@ -303,7 +446,7 @@ function App() {
                 <Form
                   layout="vertical"
                   form={jumpForm}
-                  initialValues={{ name: "jump-prod", host: "", port: 22, username: "ops", private_key_path: "" }}
+                  initialValues={{ name: "jump-prod", host: "", port: 22, username: "ops", password: "", private_key_path: "" }}
                   onFinish={handleSaveJumpHost}
                 >
                   <Row gutter={8}>
@@ -314,6 +457,9 @@ function App() {
                     <Col span={16}><Form.Item name="host" label="跳板机地址" rules={[{ required: true, message: "请输入跳板机地址" }]}><Input /></Form.Item></Col>
                     <Col span={8}><Form.Item name="port" label="SSH 端口" rules={[{ required: true, message: "请输入 SSH 端口" }]}><InputNumber min={1} max={65535} className="full-input" /></Form.Item></Col>
                   </Row>
+                  <Form.Item name="password" label="SSH 密码">
+                    <Input.Password placeholder="推荐填写账号密码；使用私钥时可留空" />
+                  </Form.Item>
                   <Form.Item name="private_key_path" label="私钥路径">
                     <Input placeholder="可选，例如 ~/.ssh/id_rsa" />
                   </Form.Item>

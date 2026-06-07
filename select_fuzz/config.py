@@ -13,6 +13,7 @@ class JumpHostConfig:
     host: str
     port: int = 22
     username: str = ""
+    password: Optional[str] = None
     private_key_path: Optional[str] = None
 
 

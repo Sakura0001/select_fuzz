@@ -21,11 +21,15 @@ class TaskResponse(BaseModel):
     node_name: str
     target: str
     status: str
+    phase: str = "新建"
+    last_error: Optional[str] = None
     database: str = "test"
     jump_host: Optional[str] = None
     thread_count: int = 1
     sql_total: int = 0
     lost_connection_total: int = 0
+    sql_rate: float = 0
+    worker_states: list[dict] = Field(default_factory=list)
 
 
 class JumpHostRequest(BaseModel):
@@ -33,4 +37,5 @@ class JumpHostRequest(BaseModel):
     host: str
     port: int = 22
     username: str
+    password: Optional[str] = None
     private_key_path: Optional[str] = None

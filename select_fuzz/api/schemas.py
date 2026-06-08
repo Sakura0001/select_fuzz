@@ -27,6 +27,9 @@ class TaskResponse(BaseModel):
     jump_host: Optional[str] = None
     thread_count: int = 1
     sql_total: int = 0
+    success_query_total: int = 0
+    failed_query_total: int = 0
+    ordinary_error_total: int = 0
     lost_connection_total: int = 0
     sql_rate: float = 0
     worker_states: list[dict] = Field(default_factory=list)

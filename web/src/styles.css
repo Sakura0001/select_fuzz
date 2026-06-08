@@ -201,6 +201,30 @@ body {
   white-space: nowrap;
 }
 
+.query-summary {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.query-summary div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.query-summary span {
+  color: #8ea0bb;
+}
+
+.query-summary b {
+  color: #dce8f8;
+}
+
+.danger-text {
+  color: #ff7875 !important;
+}
+
 .trend-chart {
   height: 220px;
 }

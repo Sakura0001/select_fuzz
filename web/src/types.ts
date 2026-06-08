@@ -20,6 +20,9 @@ export interface FuzzTask {
   jump_host?: string | null;
   thread_count: number;
   sql_total: number;
+  success_query_total: number;
+  failed_query_total: number;
+  ordinary_error_total: number;
   lost_connection_total: number;
   sql_rate: number;
   events: LostConnectionEvent[];

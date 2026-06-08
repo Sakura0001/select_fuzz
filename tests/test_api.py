@@ -173,6 +173,9 @@ def test_服务层创建真实任务时会执行基表_sql(tmp_path: Path) -> No
 
     assert response.status_code == 200
     assert response.json()["database"] == "test"
+    assert response.json()["success_query_total"] == 0
+    assert response.json()["failed_query_total"] == 0
+    assert response.json()["ordinary_error_total"] == 0
     assert fake_db.executed == [
         "DROP DATABASE IF EXISTS `test`",
         "CREATE DATABASE `test`",
@@ -397,11 +400,14 @@ def test_创建真实任务支持自定义线程数并为每个_worker_准备临
 
     assert response.status_code == 200
     assert response.json()["thread_count"] == 3
+    assert len(response.json()["worker_states"]) == 3
+    assert response.json()["success_query_total"] == 0
+    assert response.json()["failed_query_total"] == 0
     created_dbs = [task_worker.db for task_worker in service._real_tasks[response.json()["task_id"]]._workers]
     assert len(created_dbs) == 3
     assert created_dbs[0].executed.count("CREATE TABLE t0 (id BIGINT NOT NULL, PRIMARY KEY (id))") == 1
     for db in created_dbs:
-        assert any(sql.startswith("CREATE TEMPORARY TABLE `t2`") for sql in db.executed)
+        assert len([sql for sql in db.executed if sql.startswith("CREATE TEMPORARY TABLE `t2`")]) == 1
 
 
 def test_真实任务执行后_覆盖接口返回命中次数(tmp_path: Path) -> None:
@@ -439,8 +445,12 @@ def test_真实任务执行后_覆盖接口返回命中次数(tmp_path: Path) ->
     task = service._real_tasks[response.json()["task_id"]]
     task.step()
 
+    task_payload = client.get(f"/api/tasks/{response.json()['task_id']}").json()
     coverage = client.get("/api/coverage").json()
     hit_rows = [item for item in coverage if item["hit_count"] > 0]
+    assert task_payload["success_query_total"] == 1
+    assert task_payload["failed_query_total"] == 0
+    assert task_payload["ordinary_error_total"] == 0
     assert hit_rows
     assert coverage[0]["recent"] in {True, False}
 

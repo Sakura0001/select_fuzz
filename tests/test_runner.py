@@ -298,6 +298,7 @@ def test_step_遇到未预期异常会标记任务失败(tmp_path: Path) -> None
 
     assert task.status is TaskStatus.FAILED
     assert task.phase == "执行 SQL"
+    assert task.failed_query_total == 0
     assert task.last_error is not None
     assert "至少需要一张表元数据才能生成 SQL" in task.last_error
 
@@ -319,6 +320,8 @@ def test_执行查询会写入_sql_日志(tmp_path: Path) -> None:
     task.step()
 
     assert task.sql_total == 1
+    assert task.success_query_total == 1
+    assert task.failed_query_total == 0
     assert any(sql.startswith(("SELECT", "WITH", "(")) for sql in db.executed)
     assert "SELECT" in (tmp_path / "logs" / "2026-06-04" / "task-1.sql.jsonl").read_text(encoding="utf-8")
 
@@ -341,6 +344,9 @@ def test_普通执行失败会把原始_sql_写入失败目录(tmp_path: Path) -
     task.start()
     task.step()
 
+    assert task.success_query_total == 0
+    assert task.failed_query_total == 1
+    assert task.ordinary_error_total == 1
     failed_files = list((tmp_path / "failed_sql").glob("2026-06-04/*.sql"))
     assert len(failed_files) == 1
     content = failed_files[0].read_text(encoding="utf-8")
@@ -369,6 +375,7 @@ def test_lost_connection_后每分钟检测恢复且不重建永久表(tmp_path:
 
     assert task.status is TaskStatus.RECOVERING
     assert task.lost_connection_total == 1
+    assert task.failed_query_total == 1
     task.probe_recovery()
     assert task.status is TaskStatus.RECOVERING
     clock.advance(60)
@@ -378,6 +385,43 @@ def test_lost_connection_后每分钟检测恢复且不重建永久表(tmp_path:
     task.probe_recovery()
     assert task.status is TaskStatus.RUNNING
     assert len([sql for sql in db.executed if sql.startswith("CREATE TABLE")]) == 2
+
+
+def test_lost_connection_去重窗口内失败查询数仍逐次累计(tmp_path: Path) -> None:
+    class TwoLostConnectionDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.remaining_lost_queries = 2
+
+        def execute(self, sql: str) -> None:
+            normalized = sql.strip().upper()
+            if self.remaining_lost_queries > 0 and (
+                normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")
+            ):
+                self.remaining_lost_queries -= 1
+                raise LostConnectionError("Lost connection to MySQL server during query")
+            super().execute(sql)
+
+    clock = FakeClock()
+    db = TwoLostConnectionDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+
+    task.start()
+    task.step()
+    clock.advance(60)
+    task.probe_recovery()
+    task.step()
+
+    assert task.lost_connection_total == 1
+    assert task.failed_query_total == 2
 
 
 def test_lost_connection_恢复后重建临时表并只插入临时表数据(tmp_path: Path) -> None:
@@ -409,7 +453,38 @@ def test_lost_connection_恢复后重建临时表并只插入临时表数据(tmp
 
 
 def test_多线程任务为每个_worker_准备独立临时表会话(tmp_path: Path) -> None:
-    dbs = [FakeDatabase(), FakeDatabase(), FakeDatabase()]
+    class SessionTemporaryDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.temporary_t2_created = False
+            self.temporary_t2_count_checks = 0
+            self.temporary_t2_execute_checks = 0
+
+        def execute(self, sql: str) -> None:
+            normalized = sql.strip().upper()
+            if normalized.startswith("CREATE TEMPORARY TABLE `T2`"):
+                self.temporary_t2_created = True
+            if (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")) and "`T2`" in normalized:
+                if not self.temporary_t2_created:
+                    raise RuntimeError("当前 worker 会话未创建临时表 t2")
+                self.temporary_t2_execute_checks += 1
+            super().execute(sql)
+
+        def query_scalar(self, sql: str) -> int:
+            if "`t2`" in sql:
+                if not self.temporary_t2_created:
+                    raise RuntimeError("当前 worker 会话未创建临时表 t2")
+                self.temporary_t2_count_checks += 1
+            return super().query_scalar(sql)
+
+    class FixedTemporaryTableGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+
+        def generate(self, *_args, **_kwargs) -> str:
+            return "SELECT COUNT(*) FROM `t2`"
+
+    dbs = [SessionTemporaryDatabase(), SessionTemporaryDatabase(), SessionTemporaryDatabase()]
     task = FuzzTask(
         task_id="task-1",
         node=_node(),
@@ -423,6 +498,8 @@ def test_多线程任务为每个_worker_准备独立临时表会话(tmp_path: P
     )
 
     task.start()
+    for worker in task._workers:
+        worker.generator = FixedTemporaryTableGenerator()
 
     assert task.thread_count == 3
     assert dbs[0].executed.count("CREATE TABLE t0 (id BIGINT NOT NULL, PRIMARY KEY (id))") == 1
@@ -431,6 +508,14 @@ def test_多线程任务为每个_worker_准备独立临时表会话(tmp_path: P
         assert "USE `select_fuzz`" in db.executed
         assert any(sql.startswith("CREATE TEMPORARY TABLE `t2`") for sql in db.executed)
         assert db.executed.count("INSERT INTO `t2` (`id`) VALUES (2)") == 1
+        assert db.temporary_t2_count_checks == 1
+    for worker_id in range(3):
+        task.step(worker_id)
+    for db in dbs:
+        assert db.temporary_t2_execute_checks == 1
+    assert task.success_query_total == 3
+    assert task.failed_query_total == 0
+    assert [state["sql_total"] for state in task.worker_states] == [1, 1, 1]
 
 
 def test_多线程新增_worker_准备失败会关闭该连接(tmp_path: Path) -> None:

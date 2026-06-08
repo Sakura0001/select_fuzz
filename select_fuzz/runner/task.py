@@ -83,6 +83,7 @@ class FuzzTask:
     phase: str = TaskStatus.NEW.value
     last_error: Optional[str] = None
     sql_total: int = 0
+    failed_query_total: int = 0
     ordinary_error_total: int = 0
     lost_connection_total: int = 0
     tables: List[TableMetadata] = field(default_factory=list)
@@ -171,6 +172,7 @@ class FuzzTask:
                 return
             with self._lock:
                 self.ordinary_error_total += 1
+                self.failed_query_total += 1
                 self._finish_worker_sql_locked(worker_id, "空闲", str(exc))
                 self._write_sql_log("普通错误", sql)
                 self._write_failed_sql(sql)
@@ -255,6 +257,20 @@ class FuzzTask:
         with self._lock:
             return [state.to_dict() for state in self._worker_states]
 
+    def snapshot_counts(self) -> dict:
+        with self._lock:
+            return {
+                "status": self.status,
+                "phase": self.phase,
+                "last_error": self.last_error,
+                "sql_total": self.sql_total,
+                "success_query_total": self.sql_total,
+                "failed_query_total": self.failed_query_total,
+                "ordinary_error_total": self.ordinary_error_total,
+                "lost_connection_total": self.lost_connection_total,
+                "worker_states": [state.to_dict() for state in self._worker_states],
+            }
+
     def record_worker_sql_start(self, worker_id: int, sql: str, started_at: Optional[datetime] = None) -> None:
         with self._lock:
             state = self._worker_state(worker_id)
@@ -293,6 +309,7 @@ class FuzzTask:
     def _handle_lost_connection(self, sql: str) -> None:
         with self._lock:
             now = self.clock()
+            self.failed_query_total += 1
             self._write_sql_log("lost connection", sql)
             self._write_failed_sql(sql)
             if self._dedup.should_record(self.node.name, now):
@@ -444,6 +461,10 @@ class FuzzTask:
             self.sql_total,
             self.lost_connection_total,
         )
+
+    @property
+    def success_query_total(self) -> int:
+        return self.sql_total
 
     @property
     def coverage_counts(self) -> dict[str, int]:

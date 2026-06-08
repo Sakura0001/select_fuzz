@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Card, Col, Collapse, Empty, Form, Input, InputNumber, Layout, Progress, Row, Select, Space, Statistic, Steps, Tag, Tooltip, Typography, message } from "antd";
 import { ApiOutlined, ClusterOutlined, DatabaseOutlined, DeploymentUnitOutlined, PauseCircleOutlined, PlayCircleOutlined, StopOutlined, WarningOutlined } from "@ant-design/icons";
 import * as echarts from "echarts";
-import { addJumpHost, createTask, loadCoverage, loadJumpHosts, loadTasks, pauseTask, resumeTask, stopTask, summarize } from "./api";
+import { addJumpHost, createTask, loadCoverage, loadJumpHosts, loadLostConnections, loadTasks, pauseTask, resumeTask, stopTask, summarize } from "./api";
 import type { CoverageItem, CreateTaskPayload, FuzzTask, JumpHost } from "./types";
 
 const { Sider, Content } = Layout;
@@ -59,6 +59,14 @@ function statusTag(task: FuzzTask) {
     return <Tag>已停止</Tag>;
   }
   return <Tag color="success">运行中</Tag>;
+}
+
+function mergeTasksWithEvents(current: FuzzTask[], next: FuzzTask[]) {
+  const eventsByTaskId = new Map(current.map((task) => [task.task_id, task.events]));
+  return next.map((task) => ({
+    ...task,
+    events: task.events.length > 0 ? task.events : eventsByTaskId.get(task.task_id) ?? []
+  }));
 }
 
 const stepIndexByPhase = new Map([
@@ -215,7 +223,12 @@ function TaskCard({
           </Space>
         </Col>
         <Col span={4}>
-          <Statistic title="lost connection" value={task.lost_connection_total} valueStyle={{ color: task.lost_connection_total > 0 ? "#ff7875" : "#95de64" }} />
+          <div className="query-summary">
+            <div><span>成功查询</span><b>{task.success_query_total}</b></div>
+            <div><span>失败查询</span><b className={task.failed_query_total > 0 ? "danger-text" : ""}>{task.failed_query_total}</b></div>
+            <div><span>普通错误</span><b>{task.ordinary_error_total}</b></div>
+            <div><span>lost connection 事件</span><b>{task.lost_connection_total}</b></div>
+          </div>
         </Col>
       </Row>
       <Collapse ghost items={items} />
@@ -231,11 +244,11 @@ function App() {
   const [taskForm] = Form.useForm<CreateTaskPayload>();
   const [jumpForm] = Form.useForm<JumpHost>();
   const metrics = useMemo(() => summarize(tasks), [tasks]);
-  const refreshRuntime = async () => {
+  const taskIds = useMemo(() => tasks.map((task) => task.task_id).sort().join(","), [tasks]);
+  const refreshTasks = async () => {
     const result = await loadTasks();
     setBackendConnected(result.backendConnected);
-    setTasks(result.tasks);
-    setCoverage(await loadCoverage());
+    setTasks((current) => mergeTasksWithEvents(current, result.tasks));
   };
   const coverageByCategory = useMemo(() => {
     const groups = new Map<string, { total: number; hit: number }>();
@@ -258,14 +271,74 @@ function App() {
   }, [coverage]);
 
   useEffect(() => {
-    const refresh = () => {
-      refreshRuntime();
+    let cancelled = false;
+    let timer: number | undefined;
+    const refresh = async () => {
+      const result = await loadTasks();
+      if (cancelled) {
+        return;
+      }
+      setBackendConnected(result.backendConnected);
+      setTasks((current) => mergeTasksWithEvents(current, result.tasks));
+      timer = window.setTimeout(refresh, 1000);
     };
     refresh();
-    loadJumpHosts().then(setJumpHosts);
-    const timer = window.setInterval(refresh, 2000);
-    return () => window.clearInterval(timer);
+    loadJumpHosts().then((result) => {
+      if (!cancelled) {
+        setJumpHosts(result);
+      }
+    });
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    const refresh = async () => {
+      const nextCoverage = await loadCoverage();
+      if (cancelled) {
+        return;
+      }
+      setCoverage(nextCoverage);
+      timer = window.setTimeout(refresh, 5000);
+    };
+    refresh();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: number | undefined;
+    const refresh = async () => {
+      const ids = taskIds.length > 0 ? taskIds.split(",") : [];
+      if (ids.length > 0) {
+        const rows = await Promise.all(ids.map(async (taskId) => [taskId, await loadLostConnections(taskId)] as const));
+        if (cancelled) {
+          return;
+        }
+        const eventsByTaskId = new Map(rows);
+        setTasks((current) => current.map((task) => ({ ...task, events: eventsByTaskId.get(task.task_id) ?? task.events })));
+      }
+      timer = window.setTimeout(refresh, 5000);
+    };
+    refresh();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [taskIds]);
 
   const handleStartTask = async (values: CreateTaskPayload) => {
     try {
@@ -289,7 +362,7 @@ function App() {
   const handlePauseTask = async (taskId: string) => {
     try {
       await pauseTask(taskId);
-      await refreshRuntime();
+      await refreshTasks();
       message.success("任务已暂停");
     } catch {
       message.error("暂停任务失败");
@@ -299,7 +372,7 @@ function App() {
   const handleResumeTask = async (taskId: string) => {
     try {
       await resumeTask(taskId);
-      await refreshRuntime();
+      await refreshTasks();
       message.success("任务已恢复");
     } catch {
       message.error("恢复任务失败");
@@ -309,7 +382,7 @@ function App() {
   const handleStopTask = async (taskId: string) => {
     try {
       await stopTask(taskId);
-      await refreshRuntime();
+      await refreshTasks();
       message.success("任务已停止");
     } catch {
       message.error("停止任务失败");
@@ -365,8 +438,8 @@ function App() {
 
         <Row gutter={12} className="metric-row">
           <Col span={6}><Card bordered={false}><Statistic title="运行任务" value={metrics.activeTasks} suffix="个" /></Card></Col>
-          <Col span={6}><Card bordered={false}><Statistic title="已执行 SQL" value={metrics.sqlTotal} /></Card></Col>
-          <Col span={6}><Card bordered={false}><Statistic title="lost connection" value={metrics.lostConnection} valueStyle={{ color: "#ff7875" }} prefix={<WarningOutlined />} /></Card></Col>
+          <Col span={6}><Card bordered={false}><Statistic title="成功查询" value={metrics.sqlTotal} /></Card></Col>
+          <Col span={6}><Card bordered={false}><Statistic title="lost connection 事件" value={metrics.lostConnection} valueStyle={{ color: "#ff7875" }} prefix={<WarningOutlined />} /></Card></Col>
           <Col span={6}><Card bordered={false}><Statistic title="集群速率" value={metrics.clusterRate} suffix="条/秒" /></Card></Col>
         </Row>
 

@@ -7,17 +7,7 @@ export async function loadTasks(): Promise<TaskLoadResult> {
       return { backendConnected: false, tasks: [] };
     }
     const tasks = (await response.json()) as FuzzTask[];
-    const rows = await Promise.all(
-      tasks.map(async (task) => ({
-        ...task,
-        phase: task.phase ?? task.status,
-        thread_count: task.thread_count ?? 1,
-        sql_rate: task.sql_rate ?? 0,
-        worker_states: task.worker_states ?? [],
-        events: await loadLostConnections(task.task_id)
-      }))
-    );
-    return { backendConnected: true, tasks: rows };
+    return { backendConnected: true, tasks: tasks.map(normalizeTask) };
   } catch {
     return { backendConnected: false, tasks: [] };
   }
@@ -108,6 +98,9 @@ function normalizeTask(task: FuzzTask): FuzzTask {
     ...task,
     phase: task.phase ?? task.status,
     thread_count: task.thread_count ?? 1,
+    success_query_total: task.success_query_total ?? task.sql_total ?? 0,
+    failed_query_total: task.failed_query_total ?? 0,
+    ordinary_error_total: task.ordinary_error_total ?? 0,
     sql_rate: task.sql_rate ?? 0,
     worker_states: task.worker_states ?? [],
     events: task.events ?? []
@@ -117,7 +110,7 @@ function normalizeTask(task: FuzzTask): FuzzTask {
 export function summarize(tasks: FuzzTask[]): SummaryMetric {
   return {
     activeTasks: tasks.filter((task) => task.status !== "已停止" && task.status !== "失败").length,
-    sqlTotal: tasks.reduce((total, task) => total + task.sql_total, 0),
+    sqlTotal: tasks.reduce((total, task) => total + task.success_query_total, 0),
     lostConnection: tasks.reduce((total, task) => total + task.lost_connection_total, 0),
     clusterRate: tasks.reduce((total, task) => total + task.sql_rate, 0)
   };

@@ -30,6 +30,9 @@ class TaskSnapshot:
     jump_host: Optional[str] = None
     thread_count: int = 1
     sql_total: int = 0
+    success_query_total: int = 0
+    failed_query_total: int = 0
+    ordinary_error_total: int = 0
     lost_connection_total: int = 0
     sql_rate: float = 0
     worker_states: list[dict] = field(default_factory=list)
@@ -267,12 +270,16 @@ class RuntimeService:
 
     def _sync_snapshot_from_task(self, task: FuzzTask) -> None:
         snapshot = self._tasks[task.task_id]
-        snapshot.status = task.status.value
-        snapshot.phase = task.phase
-        snapshot.last_error = task.last_error
-        snapshot.sql_total = task.sql_total
-        snapshot.lost_connection_total = task.lost_connection_total
-        snapshot.worker_states = task.worker_states
+        state = task.snapshot_counts()
+        snapshot.status = state["status"].value
+        snapshot.phase = state["phase"]
+        snapshot.last_error = state["last_error"]
+        snapshot.sql_total = state["sql_total"]
+        snapshot.success_query_total = state["success_query_total"]
+        snapshot.failed_query_total = state["failed_query_total"]
+        snapshot.ordinary_error_total = state["ordinary_error_total"]
+        snapshot.lost_connection_total = state["lost_connection_total"]
+        snapshot.worker_states = state["worker_states"]
 
     def _start_jump_tunnel(self, task_id: str, node: TargetNodeConfig) -> JumpTunnel | None:
         if not node.jump_host:

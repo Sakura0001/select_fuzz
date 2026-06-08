@@ -168,13 +168,13 @@ class FuzzTask:
         except Exception as exc:
             if isinstance(exc, LostConnectionError) or is_lost_connection_error(exc):
                 self._finish_worker_sql(worker_id, "恢复检测", str(exc))
-                self._handle_lost_connection(sql)
+                self._handle_lost_connection(sql, str(exc))
                 return
             with self._lock:
                 self.ordinary_error_total += 1
                 self.failed_query_total += 1
                 self._finish_worker_sql_locked(worker_id, "空闲", str(exc))
-                self._write_sql_log("普通错误", sql)
+                self._write_sql_log("普通错误", sql, str(exc))
                 self._write_failed_sql(sql)
                 self._write_metrics()
             return
@@ -306,11 +306,11 @@ class FuzzTask:
                 self._write_metrics()
         return [worker.worker_id for worker in stalled_workers]
 
-    def _handle_lost_connection(self, sql: str) -> None:
+    def _handle_lost_connection(self, sql: str, error_message: str) -> None:
         with self._lock:
             now = self.clock()
             self.failed_query_total += 1
-            self._write_sql_log("lost connection", sql)
+            self._write_sql_log("lost connection", sql, error_message)
             self._write_failed_sql(sql)
             if self._dedup.should_record(self.node.name, now):
                 self.lost_connection_total += 1
@@ -424,13 +424,14 @@ class FuzzTask:
         for worker in list(self._workers):
             worker.db.close()
 
-    def _write_sql_log(self, status: str, sql: str) -> None:
+    def _write_sql_log(self, status: str, sql: str, error_message: Optional[str] = None) -> None:
         record = SqlLogRecord(
             timestamp=self.clock(),
             task_id=self.task_id,
             node_name=self.node.name,
             status=status,
             sql=sql,
+            error_message=error_message,
         )
         append_jsonl(self._sql_log_path(), record.to_dict())
 

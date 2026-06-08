@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from select_fuzz.config import TargetNodeConfig
+from select_fuzz.monitor.logs import read_jsonl
 from select_fuzz.monitor.store import MetricStore
 from select_fuzz.runner.db import DatabaseClient, LostConnectionError
 from select_fuzz.runner.task import FuzzTask, TaskStatus
@@ -347,6 +348,9 @@ def test_普通执行失败会把原始_sql_写入失败目录(tmp_path: Path) -
     assert task.success_query_total == 0
     assert task.failed_query_total == 1
     assert task.ordinary_error_total == 1
+    log_rows = read_jsonl(tmp_path / "logs" / "2026-06-04" / "task-1.sql.jsonl")
+    assert log_rows[0]["status"] == "普通错误"
+    assert log_rows[0]["error_message"] == "普通 SQL 执行失败"
     failed_files = list((tmp_path / "failed_sql").glob("2026-06-04/*.sql"))
     assert len(failed_files) == 1
     content = failed_files[0].read_text(encoding="utf-8")

@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -14,15 +14,19 @@ class SqlLogRecord:
     node_name: str
     status: str
     sql: str
+    error_message: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        row = {
             "timestamp": self.timestamp.isoformat(),
             "task_id": self.task_id,
             "node_name": self.node_name,
             "status": self.status,
             "sql": self.sql,
         }
+        if self.error_message is not None:
+            row["error_message"] = self.error_message
+        return row
 
 
 def append_jsonl(path: Path | str, row: Dict[str, Any]) -> None:

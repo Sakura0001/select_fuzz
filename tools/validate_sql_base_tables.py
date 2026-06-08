@@ -192,8 +192,10 @@ def main() -> int:
             fail("种子数据脚本缺少 READ COMMITTED 隔离级别设置", errors)
         if seed_sql.upper().count("INSERT INTO") != expected_insert_count:
             fail(f"种子数据脚本应包含 {expected_insert_count} 条 INSERT", errors)
-        if seed_sql.count("STRING_TO_VECTOR(") != expected_insert_count * 2:
+        if seed_sql.count("VEC_FROMTEXT(") != expected_insert_count * 2:
             fail("种子数据脚本应为每条数据插入 2 个向量值", errors)
+        if re.search(r"\b(?:STRING_TO_VECTOR|VECTOR_TO_STRING|DISTANCE)\s*\(|\bVEC_DISTANCE_DOT\b|'DOT'", seed_sql, re.I):
+            fail("种子数据脚本不应包含旧向量函数、DISTANCE 第三参数语法或 DOT 距离", errors)
         if re.search(r"\b(?:nan|inf)\b", seed_sql, re.I):
             fail("种子数据不应包含 NaN 或 Inf", errors)
         for index in range(27):

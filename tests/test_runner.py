@@ -327,6 +327,44 @@ def test_执行查询会写入_sql_日志(tmp_path: Path) -> None:
     assert "SELECT" in (tmp_path / "logs" / "2026-06-04" / "task-1.sql.jsonl").read_text(encoding="utf-8")
 
 
+def test_运行时不会强制每条查询都包含向量表达式(tmp_path: Path) -> None:
+    class RecordingGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+
+        def __init__(self, sql: str) -> None:
+            self.sql = sql
+            self.require_vector: bool | None = None
+
+        def generate(self, _tables, options) -> str:
+            self.require_vector = options.require_vector
+            return self.sql
+
+    databases = [FakeDatabase(), FakeDatabase(), FakeDatabase()]
+    database_iter = iter(databases[1:])
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=databases[0],
+        db_factory=lambda: next(database_iter),
+        thread_count=3,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    generators = [RecordingGenerator(f"SELECT {index}") for index in range(3)]
+    for worker, generator in zip(task._workers, generators):
+        worker.generator = generator
+
+    for worker_id in range(3):
+        task.step(worker_id)
+
+    assert [generator.require_vector for generator in generators] == [False, False, False]
+    assert [database.executed[-1] for database in databases] == ["SELECT 0", "SELECT 1", "SELECT 2"]
+
+
 def test_普通执行失败会把原始_sql_写入失败目录(tmp_path: Path) -> None:
     db = FakeDatabase()
     db.fail_next_ordinary_error = True

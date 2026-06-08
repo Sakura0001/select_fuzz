@@ -362,8 +362,8 @@ def insert_sql(index: int, tenant_id: int, subpart_id: int, row_id: int) -> str:
         str(10000 + index * 1000 + row_id),
         str(20000 + index * 1000 + row_id),
         f"JSON_OBJECT('k','json_{index}_{row_id}','n',{row_id})",
-        f"STRING_TO_VECTOR('{vector_literal(index, row_id, 4)}')",
-        f"STRING_TO_VECTOR('{vector_literal(index, row_id, 8)}')",
+        f"VEC_FROMTEXT('{vector_literal(index, row_id, 4)}')",
+        f"VEC_FROMTEXT('{vector_literal(index, row_id, 8)}')",
     ]
     col_sql = ",".join(f"`{column}`" for column in columns)
     val_sql = ", ".join(values)
@@ -403,7 +403,7 @@ def execution_doc() -> str:
         "- `t7.sql` 到 `t26.sql` 是分区表，只保留父表引用列、关联索引和种子数据关系，不声明 `FOREIGN KEY`，避免 InnoDB 在建分区表时报 1506。",
         "- 每个建表文件都会短暂执行 `SET FOREIGN_KEY_CHECKS=0;`，建表完成后恢复为 `SET FOREIGN_KEY_CHECKS=1;`。",
         "- `zz_seed_fk_data.sql` 会先按依赖反序清理数据，再恢复外键检查并插入种子数据。",
-        "- 向量索引查询需要使用 `DISTANCE(vector_col, STRING_TO_VECTOR('[...]'), '<metric>')`，排序方向使用 ASC，并带 LIMIT。",
+        "- 向量索引查询需要使用 `VEC_DISTANCE_COSINE(vector_col, VEC_FROMTEXT('[...]'))` 或 `VEC_DISTANCE_EUCLIDEAN(vector_col, VEC_FROMTEXT('[...]'))`，排序方向使用 ASC，并带 LIMIT；当前环境不生成 DOT 距离。",
         "- 查询距离函数需要和向量索引 DISTANCE 设置一致；DESC 排序不触发向量索引。",
         "- 向量索引 ADD、DROP、RENAME 不应和其他 DDL 组合在同一条 `ALTER TABLE` 中。",
         "- 向量索引不支持 `PACK_KEYS` 等紧凑索引存储选项，`ALTER INDEX ... VISIBLE/INVISIBLE` 对向量索引无效。",

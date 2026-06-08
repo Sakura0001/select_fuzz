@@ -55,7 +55,7 @@ npm run dev -- --port 5173
 
 `sql_base_tables/` 包含普通表、临时表、一级分区表、二级分区表和 `VECTOR(N)` 列。由于临时表是 session 级对象，多线程任务会在每个 worker 连接中单独创建临时表并插入临时表种子数据。lost connection 恢复后也只重建临时表并重新插入临时表数据，不重建永久表。
 
-向量查询按 PolarDB MySQL 当前公开能力生成：`STRING_TO_VECTOR`、`VECTOR_TO_STRING`、`DISTANCE(..., 'COSINE'/'EUCLIDEAN'/'DOT')`。生成器不会使用 `VEC_DISTANCE`、`VEC_FROMTEXT`，也不会把向量列用于主键、外键、唯一键、分区键、普通跨类型比较、通用分组或普通排序表达式。
+向量查询按当前内网环境能力生成：`VEC_FROMTEXT`、`VEC_TOTEXT`、`VEC_DISTANCE_COSINE(v1, v2)`、`VEC_DISTANCE_EUCLIDEAN(v1, v2)`。生成器不会使用 `STRING_TO_VECTOR`、`VECTOR_TO_STRING`、`DISTANCE(..., metric)` 或 `DOT` 距离，也不会把向量列用于主键、外键、唯一键、分区键、普通跨类型比较、通用分组或普通排序表达式。运行时默认不强制每条查询包含向量表达式，向量只作为小比例随机覆盖；测试可以通过 `GenerationOptions(require_vector=True)` 强制覆盖向量生成分支。
 
 ## lost connection 规则
 

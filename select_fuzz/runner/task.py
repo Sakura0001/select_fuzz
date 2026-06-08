@@ -156,7 +156,6 @@ class FuzzTask:
                 self.tables,
                 GenerationOptions(
                     require_join=len(self.tables) > 1,
-                    require_vector=any(any(col.type_family.value == "向量" for col in table.columns.values()) for table in self.tables),
                 ),
             )
         except Exception as exc:

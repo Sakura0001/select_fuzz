@@ -528,10 +528,10 @@ class SQLGenerator:
         if not candidates:
             return None
         ref, column = self.random.choice(candidates)
-        metric = self.random.choice(["COSINE", "EUCLIDEAN", "DOT"])
-        self._hit(f"DISTANCE_{metric}")
-        self._hit("STRING_TO_VECTOR")
-        return f"DISTANCE({ref.alias}.{_q(column.name)}, STRING_TO_VECTOR('{self._vector_literal(column)}'), '{metric}')"
+        metric = self.random.choice(["COSINE", "EUCLIDEAN"])
+        self._hit(f"VEC_DISTANCE_{metric}")
+        self._hit("VEC_FROMTEXT")
+        return f"VEC_DISTANCE_{metric}({ref.alias}.{_q(column.name)}, VEC_FROMTEXT('{self._vector_literal(column)}'))"
 
     def _vector_to_string_expr(self, refs: List[TableRef]) -> Optional[str]:
         candidates: List[tuple[TableRef, ColumnMetadata]] = []
@@ -542,8 +542,8 @@ class SQLGenerator:
         if not candidates:
             return None
         ref, column = self.random.choice(candidates)
-        self._hit("VECTOR_TO_STRING")
-        return f"VECTOR_TO_STRING({ref.alias}.{_q(column.name)})"
+        self._hit("VEC_TOTEXT")
+        return f"VEC_TOTEXT({ref.alias}.{_q(column.name)})"
 
     def _risky_expr(self, refs: List[TableRef], depth: int) -> Expr:
         left = self._column_expr(refs)

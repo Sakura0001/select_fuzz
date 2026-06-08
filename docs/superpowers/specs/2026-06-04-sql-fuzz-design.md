@@ -87,7 +87,7 @@ PolarDB 向量列遵守向量扩展限制：向量列不作为主键、外键、
 - `索引元数据`：索引名、索引类型、列集合、是否唯一、是否全文、是否空间、是否向量索引。
 - `外键元数据`：父表、子表、列映射、JOIN 方向。
 - `分区元数据`：分区类型、分区键、子分区类型、子分区键、分区名集合。
-- `向量元数据`：维度、距离度量、索引算法、是否可用于 `DISTANCE()`。
+- `向量元数据`：维度、距离度量、索引算法、是否可用于当前环境向量距离函数。
 
 类型族至少包括：整数、浮点、DECIMAL、布尔、日期时间、字符串、二进制、枚举、集合、JSON、空间、向量。
 
@@ -257,7 +257,7 @@ JSON 运算：
 - 全文检索函数：`MATCH() AGAINST()` 自然语言和布尔模式。
 - 加密压缩函数：哈希、AES、压缩和解压函数。
 - 信息函数：连接、用户、数据库、版本、last insert id 等上下文函数。
-- 向量函数：`STRING_TO_VECTOR()`、`VECTOR_TO_STRING()`、`DISTANCE(..., 'COSINE')`、`DISTANCE(..., 'EUCLIDEAN')`、`DISTANCE(..., 'DOT')`。
+- 向量函数：`VEC_FROMTEXT()`、`VEC_TOTEXT()`、`VEC_DISTANCE_COSINE(v1, v2)`、`VEC_DISTANCE_EUCLIDEAN(v1, v2)`；当前环境不生成 `DOT` 距离和带第三个 metric 参数的 `DISTANCE()`。
 
 ## SQL 生成器设计
 

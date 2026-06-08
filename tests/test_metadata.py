@@ -130,7 +130,8 @@ def test_完整基表_种子数据包含向量并覆盖每张表() -> None:
 
     for index in range(27):
         assert f"INSERT INTO `t{index}` " in seed_sql
-    assert "STRING_TO_VECTOR" in seed_sql
+    assert "VEC_FROMTEXT" in seed_sql
+    assert "STRING_TO_VECTOR" not in seed_sql
 
 
 def test_解析普通表列索引外键分区和向量列() -> None:

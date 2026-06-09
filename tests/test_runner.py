@@ -327,6 +327,27 @@ def test_执行查询会写入_sql_日志(tmp_path: Path) -> None:
     assert "SELECT" in (tmp_path / "logs" / "2026-06-04" / "task-1.sql.jsonl").read_text(encoding="utf-8")
 
 
+def test_每次执行查询前设置_session_最大执行时间为_5_秒(tmp_path: Path) -> None:
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+        random_seed=7,
+    )
+    task.start()
+    startup_sql_count = len(db.executed)
+
+    task.step()
+
+    assert db.executed[startup_sql_count] == "SET SESSION max_execution_time = 5000"
+    assert db.executed[startup_sql_count + 1].startswith(("SELECT", "WITH", "("))
+
+
 def test_运行时不会强制每条查询都包含向量表达式(tmp_path: Path) -> None:
     class RecordingGenerator:
         coverage_counts: dict[str, int] = {}
@@ -646,7 +667,9 @@ def test_任务暂停后_step_不会继续发送_sql(tmp_path: Path) -> None:
     task.step()
 
     assert task.status is TaskStatus.RUNNING
-    assert len(db.executed) == before + 1
+    assert db.executed[before] == "SET SESSION max_execution_time = 5000"
+    assert db.executed[before + 1].startswith(("SELECT", "WITH", "("))
+    assert len(db.executed) == before + 2
 
 
 def test_看门狗会关闭长时间执行_sql_的_worker_连接(tmp_path: Path) -> None:

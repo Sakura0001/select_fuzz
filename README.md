@@ -18,6 +18,7 @@
 - 任务接口和前端任务卡片会展示成功查询、失败查询、普通错误和 lost connection 事件统计。
 - 启动、建库建表、种子数据校验等环节失败时，前端会保留失败任务并展示失败环节和错误原因。
 - 后台会记录每个 worker 的状态和当前 SQL；worker 执行 SQL 超过阈值时会关闭该 worker 连接并标记为“疑似卡住”，同时写入 SQL 日志、失败 SQL 文件和任务级告警，下一轮执行前会重连并重建该 worker 的临时表会话。
+- 每次执行随机查询前，后台都会对当前 worker 会话执行 `SET SESSION max_execution_time = 5000`，将单条 SELECT 最大执行时间限制为 5 秒。
 - 普通错误和 lost connection 的失败 SQL 会额外写入 `logs/failed_sql/日期/任务.sql`，文件内容只包含原始 SQL 语句；具体数据库错误信息写在 `logs/日期/任务ID.sql.jsonl` 的 `error_message` 字段。
 - lost connection 按同一节点 10 分钟窗口去重。
 - lost connection 后每 1 分钟探测数据库状态，恢复后继续执行查询。

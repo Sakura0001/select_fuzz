@@ -20,6 +20,9 @@ from select_fuzz.sqlgen.generator import GenerationOptions, SQLGenerator
 from .db import DatabaseClient, LostConnectionError
 
 
+QUERY_MAX_EXECUTION_TIME_MS = 5000
+
+
 class TaskStatus(str, Enum):
     NEW = "新建"
     CONNECTING = "连接实例"
@@ -176,6 +179,7 @@ class FuzzTask:
             return
         self.record_worker_sql_start(worker_id, sql, sql_metadata=sql_metadata)
         try:
+            self._set_query_execution_timeout(worker.db)
             worker.db.execute(sql)
         except Exception as exc:
             if isinstance(exc, LostConnectionError) or is_lost_connection_error(exc):
@@ -647,6 +651,9 @@ class FuzzTask:
     def _execute_statements(self, sql_file: BaseSqlFile, db: DatabaseClient) -> None:
         for statement in split_sql_statements(sql_file.sql):
             db.execute(statement)
+
+    def _set_query_execution_timeout(self, db: DatabaseClient) -> None:
+        db.execute(f"SET SESSION max_execution_time = {QUERY_MAX_EXECUTION_TIME_MS}")
 
     def _is_temporary_table_file(self, sql_file: BaseSqlFile) -> bool:
         return bool(re.search(r"\bCREATE\s+TEMPORARY\s+TABLE\b", sql_file.sql, re.IGNORECASE))

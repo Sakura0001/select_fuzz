@@ -115,6 +115,37 @@ def test_mysql_8022_扩展覆盖矩阵只登记当前版本支持语法() -> Non
         "DATE_FORMAT",
         "MONTH",
         "DAYOFWEEK",
+        "USE INDEX",
+        "FORCE INDEX",
+        "IGNORE INDEX",
+        "INDEX HINT FOR JOIN",
+        "INDEX HINT FOR ORDER BY",
+        "INDEX HINT FOR GROUP BY",
+        "OPTIMIZER HINT",
+        "JOIN_ORDER",
+        "JOIN_FIXED_ORDER",
+        "NO_MERGE",
+        "SET_VAR",
+        "JOIN_INDEX",
+        "NO_INDEX",
+        "ROW CONSTRUCTOR",
+        "ROW IN",
+        "ROW COMPARE",
+        "ANY SUBQUERY",
+        "SOME SUBQUERY",
+        "ALL SUBQUERY",
+        "CORRELATED SUBQUERY",
+        "LATERAL DERIVED_TABLE",
+        "ORDER BY FIELD",
+        "ORDER BY RAND",
+        "ORDER BY POSITION",
+        "USER",
+        "CURRENT_USER",
+        "DATABASE",
+        "VERSION",
+        "CONNECTION_ID",
+        "HEX_LITERAL",
+        "BIT_LITERAL",
     ]:
         assert registry.has(name)
 
@@ -240,6 +271,158 @@ def test_mysql_8022_聚合窗口_json_字符集和函数扩展能被强制覆盖
         assert name in generator.coverage_counts
 
 
+def test_mysql_8022_索引提示和优化器提示能被强制覆盖() -> None:
+    tables = _base_tables()
+
+    index_generator = SQLGenerator(random_seed=812, max_sql_length=8000)
+    index_sqls = [
+        index_generator.generate(
+            tables,
+            GenerationOptions(
+                require_feature="index_hints",
+                invalid_sql_ratio=0.0,
+                null_compare_ratio=0.0,
+                risky_expr_ratio=0.0,
+            ),
+        )
+        for _ in range(240)
+    ]
+    index_combined = "\n".join(index_sqls)
+    index_upper = index_combined.upper()
+    known_index_names = {index.name for table in tables for index in table.indexes.values() if index.columns}
+
+    assert re.search(r"\b(?:USE|FORCE|IGNORE) INDEX(?: FOR (?:JOIN|ORDER BY|GROUP BY))?\s+\(", index_upper)
+    assert any(name in index_combined for name in known_index_names)
+    for name in [
+        "USE INDEX",
+        "FORCE INDEX",
+        "IGNORE INDEX",
+        "INDEX HINT FOR JOIN",
+        "INDEX HINT FOR ORDER BY",
+        "INDEX HINT FOR GROUP BY",
+    ]:
+        assert name in index_generator.coverage_counts
+
+    hint_generator = SQLGenerator(random_seed=813, max_sql_length=8000)
+    hint_sqls = [
+        hint_generator.generate(
+            tables,
+            GenerationOptions(
+                require_feature="optimizer_hints",
+                invalid_sql_ratio=0.0,
+                null_compare_ratio=0.0,
+                risky_expr_ratio=0.0,
+            ),
+        )
+        for _ in range(260)
+    ]
+    hint_combined = "\n".join(hint_sqls).upper()
+
+    assert "SELECT /*+" in hint_combined
+    assert re.search(r"/\*\+[^*]*(?:T0|T1)", hint_combined)
+    for sql in hint_sqls:
+        if "JOIN_INDEX(" in sql or "NO_INDEX(" in sql:
+            hinted_block = sql[sql.upper().index("SELECT /*+") :]
+            assert "(SELECT * FROM" not in hinted_block
+    for name in ["OPTIMIZER HINT", "JOIN_ORDER", "JOIN_FIXED_ORDER", "NO_MERGE", "SET_VAR", "JOIN_INDEX", "NO_INDEX"]:
+        assert name in hint_generator.coverage_counts
+
+
+def test_mysql_8022_行构造器_量化子查询_相关子查询和_lateral_能被强制覆盖() -> None:
+    tables = _base_tables()
+
+    row_generator = SQLGenerator(random_seed=814, max_sql_length=8000)
+    row_sqls = [
+        row_generator.generate(
+            tables,
+            GenerationOptions(
+                require_feature="row_constructor",
+                invalid_sql_ratio=0.0,
+                null_compare_ratio=0.0,
+                risky_expr_ratio=0.0,
+            ),
+        )
+        for _ in range(160)
+    ]
+    row_combined = "\n".join(row_sqls)
+    assert re.search(r"\([^)]+`\w+`[^)]*,[^)]+`\w+`[^)]*\)\s+(?:IN|=|<=>|<>|>|>=|<|<=)\s+\(", row_combined)
+    for name in ["ROW CONSTRUCTOR", "ROW IN", "ROW COMPARE"]:
+        assert name in row_generator.coverage_counts
+
+    quantified_generator = SQLGenerator(random_seed=815, max_sql_length=8000)
+    for _ in range(220):
+        quantified_generator.generate(
+            tables,
+            GenerationOptions(
+                require_feature="quantified_subqueries",
+                invalid_sql_ratio=0.0,
+                null_compare_ratio=0.0,
+                risky_expr_ratio=0.0,
+            ),
+        )
+    for name in ["ANY SUBQUERY", "SOME SUBQUERY", "ALL SUBQUERY"]:
+        assert name in quantified_generator.coverage_counts
+
+    correlated_sql = SQLGenerator(random_seed=816, max_sql_length=8000).generate(
+        tables,
+        GenerationOptions(
+            require_feature="correlated_subquery",
+            invalid_sql_ratio=0.0,
+            null_compare_ratio=0.0,
+            risky_expr_ratio=0.0,
+        ),
+    )
+    assert "EXISTS (SELECT 1 FROM" in correlated_sql
+    assert re.search(r"EXISTS \(SELECT 1 FROM .* WHERE .*t0\.", correlated_sql)
+
+    lateral_sql = SQLGenerator(random_seed=817, max_sql_length=8000).generate(
+        tables,
+        GenerationOptions(
+            require_feature="lateral_derived_table",
+            invalid_sql_ratio=0.0,
+            null_compare_ratio=0.0,
+            risky_expr_ratio=0.0,
+        ),
+    )
+    assert "JOIN LATERAL" in lateral_sql.upper()
+    assert re.search(r"LATERAL \(SELECT .*t0\.", lateral_sql)
+
+
+def test_mysql_8022_排序表达式_上下文函数和字面量扩展能被强制覆盖() -> None:
+    tables = _base_tables()
+
+    order_generator = SQLGenerator(random_seed=818, max_sql_length=8000)
+    for _ in range(160):
+        order_generator.generate(
+            tables,
+            GenerationOptions(
+                require_feature="order_expression_extensions",
+                invalid_sql_ratio=0.0,
+                null_compare_ratio=0.0,
+                risky_expr_ratio=0.0,
+            ),
+        )
+    for name in ["ORDER BY FIELD", "ORDER BY RAND", "ORDER BY POSITION"]:
+        assert name in order_generator.coverage_counts
+
+    context_generator = SQLGenerator(random_seed=819, max_sql_length=8000)
+    context_sql = context_generator.generate(tables, GenerationOptions(require_feature="context_functions"))
+    context_upper = context_sql.upper()
+    for token in ["USER()", "CURRENT_USER()", "DATABASE()", "VERSION()", "CONNECTION_ID()"]:
+        assert token in context_upper
+    for name in ["USER", "CURRENT_USER", "DATABASE", "VERSION", "CONNECTION_ID"]:
+        assert name in context_generator.coverage_counts
+
+    literal_generator = SQLGenerator(random_seed=820, max_sql_length=8000)
+    literal_sql = literal_generator.generate(tables, GenerationOptions(require_feature="literal_extensions"))
+    literal_upper = literal_sql.upper()
+    assert "X'0F'" in literal_upper
+    assert "0XFF" in literal_upper
+    assert "B'1010'" in literal_upper
+    assert "HEX_LITERAL" in literal_generator.coverage_counts
+    assert "BIT_LITERAL" in literal_generator.coverage_counts
+
+
 def test_mysql_8022_新增扩展不生成当前版本不支持语法() -> None:
     tables = _base_tables()
     unsupported_patterns = [
@@ -265,6 +448,15 @@ def test_mysql_8022_新增扩展不生成当前版本不支持语法() -> None:
         "json_functions",
         "collation_binary",
         "math_datetime_functions",
+        "index_hints",
+        "optimizer_hints",
+        "row_constructor",
+        "quantified_subqueries",
+        "correlated_subquery",
+        "lateral_derived_table",
+        "order_expression_extensions",
+        "context_functions",
+        "literal_extensions",
     ]:
         generator = SQLGenerator(random_seed=810, max_sql_length=8000)
         for _ in range(80):
@@ -309,6 +501,14 @@ def test_mysql_8022_新增扩展语法会进入默认随机流量() -> None:
         "JSON_TABLE",
         "COLLATE",
         "ABS",
+        "USE INDEX",
+        "OPTIMIZER HINT",
+        "ROW CONSTRUCTOR",
+        "ANY SUBQUERY",
+        "CORRELATED SUBQUERY",
+        "ORDER BY FIELD",
+        "USER",
+        "HEX_LITERAL",
     ]:
         assert name in generator.coverage_counts
 
@@ -466,6 +666,7 @@ def test_完整基表生成_sql_只引用已知表列并使用当前环境向量
     tables = _base_tables()
     known_identifiers = {table.name for table in tables}
     known_identifiers.update(column.name for table in tables for column in table.columns.values())
+    known_identifiers.update(index.name for table in tables for index in table.indexes.values())
     generator = SQLGenerator(random_seed=101, max_sql_length=6000)
 
     for _ in range(30):

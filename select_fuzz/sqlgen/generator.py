@@ -4,7 +4,7 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Set
 
-from select_fuzz.metadata.models import ColumnMetadata, ColumnTypeFamily, ForeignKeyMetadata, TableMetadata
+from select_fuzz.metadata.models import ColumnMetadata, ColumnTypeFamily, ForeignKeyMetadata, IndexMetadata, TableMetadata
 
 from .operators import build_operator_registry
 
@@ -137,6 +137,9 @@ class SQLGenerator:
                     "json_functions",
                     "collation_binary",
                     "math_datetime_functions",
+                    "lateral_derived_table",
+                    "context_functions",
+                    "literal_extensions",
                 ]
             )
         if feature == "constant_select":
@@ -218,6 +221,36 @@ class SQLGenerator:
                 "MONTH(CAST('2026-01-03' AS DATE)) AS month_v, "
                 "DAYOFWEEK(CAST('2026-01-03' AS DATE)) AS dow_v"
             )
+        if feature == "lateral_derived_table":
+            table = self.random.choice(self._permanent_tables(tables))
+            column = self._first_column(table, ColumnTypeFamily.INTEGER) or self._joinable_column(table)
+            self._hit("FROM")
+            self._hit("JOIN ... ON")
+            self._hit("DERIVED_TABLE")
+            self._hit("LATERAL DERIVED_TABLE")
+            self._hit("LIMIT")
+            return (
+                f"SELECT t0.{_q(column.name)} AS c0, lat.v AS c1 "
+                f"FROM {_q(table.name)} AS t0 "
+                f"JOIN LATERAL (SELECT t0.{_q(column.name)} AS v) AS lat ON TRUE "
+                "LIMIT 10"
+            )
+        if feature == "context_functions":
+            for name in ["USER", "CURRENT_USER", "DATABASE", "VERSION", "CONNECTION_ID"]:
+                self._hit(name)
+            return (
+                "SELECT "
+                "USER() AS user_name, "
+                "CURRENT_USER() AS current_user_name, "
+                "DATABASE() AS database_name, "
+                "VERSION() AS version_text, "
+                "CONNECTION_ID() AS connection_id"
+            )
+        if feature == "literal_extensions":
+            self._hit("HEX_LITERAL")
+            self._hit("BIT_LITERAL")
+            self._hit("BIT_COUNT")
+            return "SELECT X'0F' AS hex_string, 0xFF AS hex_number, b'1010' AS bit_value, BIT_COUNT(b'1010') AS bit_count"
         return None
 
     def _select_block(
@@ -237,6 +270,8 @@ class SQLGenerator:
         if options.require_feature == "window_extensions":
             group_enabled = False
             window_enabled = True
+        if options.require_feature == "order_expression_extensions":
+            group_enabled = False
         if options.require_vector:
             group_enabled = False
         if projection_count is not None:
@@ -254,6 +289,7 @@ class SQLGenerator:
             options.require_vector,
             options.require_feature,
         )
+        optimizer_hint = self._optimizer_hint(refs, force=options.require_feature == "optimizer_hints")
         where_clause = self._where_clause(refs, tables, depth, options.require_subquery)
         group_clause = self._group_clause(group_columns)
         having_clause = self._having_clause(group_enabled)
@@ -261,7 +297,7 @@ class SQLGenerator:
         order_clause = self._vector_order_clause(refs, options.require_vector, group_enabled) or self._order_clause(
             refs,
             orderable_aliases,
-            modifier.strip() == "DISTINCT" or group_enabled,
+            modifier.strip() in {"DISTINCT", "DISTINCTROW"} or group_enabled,
         )
         limit_clause = self._limit_clause()
         locking_clause = self._locking_clause(refs, locking_enabled)
@@ -272,7 +308,7 @@ class SQLGenerator:
         return " ".join(
             part
             for part in [
-                f"SELECT {modifier}{select_items}",
+                f"SELECT {optimizer_hint}{modifier}{select_items}",
                 from_clause,
                 where_clause,
                 group_clause,
@@ -290,7 +326,16 @@ class SQLGenerator:
         table_count = self.random.randint(1, min(len(table_pool), self.random.randint(1, 5)))
         if options.require_join and len(tables) > 1:
             table_count = max(2, table_count)
+        if options.require_feature == "optimizer_hints" and len(table_pool) > 1:
+            table_count = max(2, table_count)
         chosen = self.random.sample(table_pool, min(table_count, len(table_pool)))
+        force_index_hint = options.require_feature == "index_hints"
+        if force_index_hint:
+            indexed_tables = [table for table in table_pool if self._usable_indexes(table)]
+            if indexed_tables:
+                chosen[0] = self.random.choice(indexed_tables)
+            else:
+                force_index_hint = False
         force_partition = options.require_feature == "partition_source" or self.random.random() < 0.05
         if force_partition:
             partitioned_tables = [table for table in table_pool if table.partition is not None]
@@ -303,16 +348,25 @@ class SQLGenerator:
             if vector_tables and not self._first_column(chosen[0], ColumnTypeFamily.VECTOR):
                 chosen[0] = self.random.choice(vector_tables)
         refs = [TableRef(table=chosen[0], alias="t0")]
-        sql = f"FROM {self._table_source(chosen[0], 't0', force_partition=force_partition)}"
+        sql = (
+            "FROM "
+            + self._table_source(
+                chosen[0],
+                "t0",
+                force_partition=force_partition,
+                force_index_hint=force_index_hint,
+                allow_derived=options.require_feature != "optimizer_hints",
+            )
+        )
 
         for index, table in enumerate(chosen[1:], start=1):
             ref = TableRef(table=table, alias=f"t{index}")
-            join_sql = self._join_clause(refs, ref)
+            join_sql = self._join_clause(refs, ref, allow_derived=options.require_feature != "optimizer_hints")
             refs.append(ref)
             sql = f"{sql} {join_sql}"
         return refs, sql, len(chosen) - 1
 
-    def _join_clause(self, existing: List[TableRef], new_ref: TableRef) -> str:
+    def _join_clause(self, existing: List[TableRef], new_ref: TableRef, allow_derived: bool = True) -> str:
         join_kind = self.random.choices(
             ["INNER JOIN", "LEFT JOIN", "RIGHT JOIN", "CROSS JOIN", "NATURAL JOIN", "STRAIGHT_JOIN", "JOIN ... USING", "JOIN ... ON"],
             weights=[22, 14, 10, 8, 2, 8, 3, 30],
@@ -321,24 +375,24 @@ class SQLGenerator:
         join_kind = join_kind[0]
         if join_kind == "CROSS JOIN":
             self._hit("CROSS JOIN")
-            return f"CROSS JOIN {self._table_source(new_ref.table, new_ref.alias)}"
+            return f"CROSS JOIN {self._table_source(new_ref.table, new_ref.alias, allow_derived=allow_derived)}"
         if join_kind == "NATURAL JOIN":
             self._hit("NATURAL JOIN")
-            return f"NATURAL JOIN {self._table_source(new_ref.table, new_ref.alias)}"
+            return f"NATURAL JOIN {self._table_source(new_ref.table, new_ref.alias, allow_derived=allow_derived)}"
         if join_kind == "STRAIGHT_JOIN":
             self._hit("STRAIGHT_JOIN")
-            return f"STRAIGHT_JOIN {self._table_source(new_ref.table, new_ref.alias)} ON {self._join_condition(existing, new_ref)}"
+            return f"STRAIGHT_JOIN {self._table_source(new_ref.table, new_ref.alias, allow_derived=allow_derived)} ON {self._join_condition(existing, new_ref)}"
         if join_kind == "JOIN ... USING":
             common = self._common_columns(existing[-1].table, new_ref.table)
             if common:
                 self._hit("JOIN ... USING")
                 columns = ", ".join(_q(name) for name in self.random.sample(common, min(len(common), self.random.randint(1, 3))))
-                return f"JOIN {self._table_source(new_ref.table, new_ref.alias)} USING ({columns})"
+                return f"JOIN {self._table_source(new_ref.table, new_ref.alias, allow_derived=allow_derived)} USING ({columns})"
         if join_kind in {"INNER JOIN", "LEFT JOIN", "RIGHT JOIN"}:
             self._hit(join_kind)
-            return f"{join_kind} {self._table_source(new_ref.table, new_ref.alias)} ON {self._join_condition(existing, new_ref)}"
+            return f"{join_kind} {self._table_source(new_ref.table, new_ref.alias, allow_derived=allow_derived)} ON {self._join_condition(existing, new_ref)}"
         self._hit("JOIN ... ON")
-        return f"JOIN {self._table_source(new_ref.table, new_ref.alias)} ON {self._join_condition(existing, new_ref)}"
+        return f"JOIN {self._table_source(new_ref.table, new_ref.alias, allow_derived=allow_derived)} ON {self._join_condition(existing, new_ref)}"
 
     def _join_condition(self, existing: List[TableRef], new_ref: TableRef) -> str:
         fk_condition = self._foreign_key_condition(existing, new_ref)
@@ -373,6 +427,8 @@ class SQLGenerator:
         if locking_enabled:
             self._hit("SELECT ALL")
             return "ALL "
+        if required_feature == "order_expression_extensions":
+            return ""
         if required_feature == "select_modifiers" or self.random.random() < 0.08:
             modifier_pool = [
                 "DISTINCTROW ",
@@ -392,6 +448,31 @@ class SQLGenerator:
         elif modifier == "DISTINCT ":
             self._hit("SELECT DISTINCT")
         return modifier
+
+    def _optimizer_hint(self, refs: List[TableRef], force: bool = False) -> str:
+        if not force and self.random.random() >= 0.05:
+            return ""
+        choices = ["SET_VAR", "JOIN_FIXED_ORDER", "NO_MERGE"]
+        if len(refs) >= 2:
+            choices.append("JOIN_ORDER")
+        if force and self._indexed_refs(refs):
+            choices.extend(["JOIN_INDEX", "NO_INDEX"])
+        choice = self.random.choice(choices)
+        self._hit("OPTIMIZER HINT")
+        self._hit(choice)
+
+        if choice == "SET_VAR":
+            return "/*+ SET_VAR(sort_buffer_size=262144) */ "
+        if choice == "JOIN_FIXED_ORDER":
+            return "/*+ JOIN_FIXED_ORDER() */ "
+        if choice == "JOIN_ORDER":
+            aliases = ", ".join(ref.alias for ref in refs[: min(len(refs), self.random.randint(2, 4))])
+            return f"/*+ JOIN_ORDER({aliases}) */ "
+        if choice == "NO_MERGE":
+            return f"/*+ NO_MERGE({self.random.choice(refs).alias}) */ "
+
+        ref, index = self.random.choice(self._indexed_refs(refs))
+        return f"/*+ {choice}({ref.alias} {index.name}) */ "
 
     def _select_items(
         self,
@@ -457,6 +538,7 @@ class SQLGenerator:
             or self._active_options.invalid_sql_ratio >= 1.0
             or self._active_options.null_compare_ratio >= 1.0
             or self._active_options.require_feature == "predicate_extensions"
+            or self._active_options.require_feature in {"row_constructor", "quantified_subqueries", "correlated_subquery"}
         )
         if not force_predicate and self.random.random() < 0.18:
             return ""
@@ -490,15 +572,35 @@ class SQLGenerator:
         return f"WINDOW w AS (PARTITION BY {partition} ORDER BY {order})"
 
     def _order_clause(self, refs: List[TableRef], orderable_aliases: List[str], alias_only: bool = False) -> str:
-        if self.random.random() < 0.25:
+        force_extension = self._active_options.require_feature == "order_expression_extensions"
+        if not force_extension and self.random.random() < 0.25:
             return ""
         direction = self.random.choice(["ASC", "DESC"])
+        if force_extension or (not alias_only and self.random.random() < 0.08):
+            return self._order_extension_clause(refs, direction)
         self._hit(f"ORDER BY {direction}")
         if alias_only and orderable_aliases:
             expr = self.random.choice(orderable_aliases)
         else:
             expr = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.STRING, ColumnTypeFamily.DATETIME}).sql
         return f"ORDER BY {expr} {direction}"
+
+    def _order_extension_clause(self, refs: List[TableRef], direction: str) -> str:
+        choice = self.random.choice(["FIELD", "RAND", "POSITION"])
+        self._hit(f"ORDER BY {direction}")
+        if choice == "RAND":
+            self._hit("RAND")
+            self._hit("ORDER BY RAND")
+            return f"ORDER BY RAND() {direction}"
+        if choice == "POSITION":
+            self._hit("ORDER BY POSITION")
+            return f"ORDER BY 1 {direction}"
+        column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET})
+        self._hit("FIELD")
+        self._hit("ORDER BY FIELD")
+        first = self._literal_expr(column.family).sql
+        second = self._literal_expr(column.family).sql
+        return f"ORDER BY FIELD({column.sql}, {first}, {second}) {direction}"
 
     def _limit_clause(self) -> str:
         self._hit("LIMIT")
@@ -540,8 +642,21 @@ class SQLGenerator:
             return self._intentionally_invalid_predicate_expr()
         if self._active_options.require_feature == "predicate_extensions":
             return self._extended_predicate_expr(refs, tables)
+        if self._active_options.require_feature == "row_constructor":
+            return self._row_constructor_predicate_expr(refs)
+        if self._active_options.require_feature == "quantified_subqueries":
+            return self._quantified_subquery_predicate_expr(refs, tables)
+        if self._active_options.require_feature == "correlated_subquery":
+            return self._correlated_subquery_predicate_expr(refs, tables)
         if self._chance(self._active_options.null_compare_ratio):
             return self._null_compare_predicate_expr(refs)
+        if depth > 0 and self.random.random() < 0.08:
+            choice = self.random.choice(["ROW", "QUANTIFIED", "CORRELATED"])
+            if choice == "ROW":
+                return self._row_constructor_predicate_expr(refs)
+            if choice == "QUANTIFIED":
+                return self._quantified_subquery_predicate_expr(refs, tables)
+            return self._correlated_subquery_predicate_expr(refs, tables)
         if depth > 0 and self.random.random() < 0.12:
             return self._extended_predicate_expr(refs, tables)
         if depth > 0 and (require_subquery or self.random.random() < 0.18):
@@ -704,6 +819,62 @@ class SQLGenerator:
         )
         self._hit("IS TRUE")
         return predicate
+
+    def _row_constructor_predicate_expr(self, refs: List[TableRef]) -> str:
+        ref, columns = self._row_constructor_columns(refs)
+        left = f"({ref.alias}.{_q(columns[0].name)}, {ref.alias}.{_q(columns[1].name)})"
+        first = f"({self._literal_expr(columns[0].type_family).sql}, {self._literal_expr(columns[1].type_family).sql})"
+        second = f"({self._literal_expr(columns[0].type_family).sql}, {self._literal_expr(columns[1].type_family).sql})"
+        self._hit("ROW CONSTRUCTOR")
+        if self.random.random() < 0.55:
+            self._hit("ROW IN")
+            return f"{left} IN ({first}, {second})"
+        self._hit("ROW COMPARE")
+        op = self.random.choice(["=", "<=>", "<>", ">", ">=", "<", "<="])
+        self._hit(op)
+        return f"{left} {op} {first}"
+
+    def _quantified_subquery_predicate_expr(self, refs: List[TableRef], tables: List[TableMetadata]) -> str:
+        column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT, ColumnTypeFamily.BIT})
+        table = self.random.choice(self._permanent_tables(tables))
+        sub_column = (
+            self._compatible_column(table, column.family)
+            or self._first_column(table, ColumnTypeFamily.INTEGER)
+            or self._joinable_column(table)
+        )
+        quantifier = self.random.choice(["ANY", "SOME", "ALL"])
+        op = self.random.choice(["=", "<>", ">", ">=", "<", "<="])
+        self._hit("SUBQUERY")
+        self._hit(f"{quantifier} SUBQUERY")
+        return f"{column.sql} {op} {quantifier} (SELECT sq.{_q(sub_column.name)} FROM {_q(table.name)} AS sq)"
+
+    def _correlated_subquery_predicate_expr(self, refs: List[TableRef], tables: List[TableMetadata]) -> str:
+        outer_ref = refs[0]
+        outer_column = self._joinable_column(outer_ref.table)
+        table = self.random.choice(self._permanent_tables(tables))
+        inner_column = self._compatible_column(table, outer_column.type_family) or self._joinable_column(table)
+        self._hit("SUBQUERY")
+        self._hit("EXISTS")
+        self._hit("EXISTS SUBQUERY")
+        self._hit("CORRELATED SUBQUERY")
+        return (
+            f"EXISTS (SELECT 1 FROM {_q(table.name)} AS sq "
+            f"WHERE sq.{_q(inner_column.name)} <=> {outer_ref.alias}.{_q(outer_column.name)} "
+            f"LIMIT {self.random_int(1, 5)})"
+        )
+
+    def _row_constructor_columns(self, refs: List[TableRef]) -> tuple[TableRef, List[ColumnMetadata]]:
+        preferred = {ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT, ColumnTypeFamily.BIT}
+        for ref in refs:
+            columns = [column for column in ref.table.columns.values() if column.type_family in preferred]
+            if len(columns) >= 2:
+                return ref, self.random.sample(columns, 2)
+        ref = refs[0]
+        columns = [column for column in ref.table.columns.values() if column.type_family is not ColumnTypeFamily.VECTOR]
+        if len(columns) >= 2:
+            return ref, self.random.sample(columns, 2)
+        column = next(iter(ref.table.columns.values()))
+        return ref, [column, column]
 
     def _random_expr(self, refs: List[TableRef], depth: int) -> Expr:
         if depth > 0 and self._chance(self._active_options.risky_expr_ratio):
@@ -1018,14 +1189,50 @@ class SQLGenerator:
         permanent = [table for table in tables if not table.is_temporary]
         return permanent or tables
 
-    def _table_source(self, table: TableMetadata, alias: str, force_partition: bool = False) -> str:
+    def _table_source(
+        self,
+        table: TableMetadata,
+        alias: str,
+        force_partition: bool = False,
+        force_index_hint: bool = False,
+        allow_derived: bool = True,
+    ) -> str:
+        index_hint = ""
+        if force_index_hint or self.random.random() < 0.04:
+            index_hint = self._index_hint_for_table(table)
         if force_partition and table.partition is not None:
             self._hit("EXPLICIT PARTITION")
-            return f"{_q(table.name)} PARTITION (p0) AS {alias}"
-        if not table.is_temporary and self.random.random() < 0.08:
+            return f"{_q(table.name)} PARTITION (p0) AS {alias}{index_hint}"
+        if allow_derived and not index_hint and not table.is_temporary and self.random.random() < 0.08:
             self._hit("DERIVED_TABLE")
             return f"(SELECT * FROM {_q(table.name)} LIMIT {self.random_int(1, 50)}) AS {alias}"
-        return f"{_q(table.name)} AS {alias}"
+        return f"{_q(table.name)} AS {alias}{index_hint}"
+
+    def _index_hint_for_table(self, table: TableMetadata) -> str:
+        indexes = self._usable_indexes(table)
+        if not indexes:
+            return ""
+        kind = self.random.choice(["USE INDEX", "FORCE INDEX", "IGNORE INDEX"])
+        scope = self.random.choice(["", " FOR JOIN", " FOR ORDER BY", " FOR GROUP BY"])
+        chosen = self.random.sample(indexes, min(len(indexes), self.random.randint(1, 3)))
+        self._hit(kind)
+        if scope:
+            self._hit(f"INDEX HINT{scope}")
+        names = ", ".join(_q(index.name) for index in chosen)
+        return f" {kind}{scope} ({names})"
+
+    def _usable_indexes(self, table: TableMetadata) -> List[IndexMetadata]:
+        return [
+            index
+            for index in table.indexes.values()
+            if index.columns and not index.primary and not index.fulltext and not index.spatial and not index.is_vector
+        ]
+
+    def _indexed_refs(self, refs: List[TableRef]) -> List[tuple[TableRef, IndexMetadata]]:
+        pairs: List[tuple[TableRef, IndexMetadata]] = []
+        for ref in refs:
+            pairs.extend((ref, index) for index in self._usable_indexes(ref.table))
+        return pairs
 
     def _first_column(self, table: TableMetadata, family: ColumnTypeFamily) -> ColumnMetadata | None:
         for column in table.columns.values():

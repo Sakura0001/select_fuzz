@@ -78,6 +78,14 @@ npm run dev -- --port 5173
 - `LAG()`、`LEAD()`、`NTILE()`、`FIRST_VALUE()`、`LAST_VALUE()` 和 `ROWS BETWEEN ...` 窗口 frame。
 - `JSON_TABLE()`、`JSON_CONTAINS()`、`JSON_KEYS()`、`JSON_LENGTH()`。
 - `COLLATE`、`BINARY expr`、`ABS()`、`ROUND()`、`FLOOR()`、`CEILING()`、`CRC32()`、`TIMESTAMPDIFF()`、`DATE_FORMAT()`、`MONTH()`、`DAYOFWEEK()`。
+- 表访问索引提示：`USE INDEX`、`FORCE INDEX`、`IGNORE INDEX`，并覆盖 `FOR JOIN`、`FOR ORDER BY`、`FOR GROUP BY` 作用域；索引名只取自当前表元数据。
+- `SELECT /*+ ... */` 优化器提示：`JOIN_ORDER()`、`JOIN_FIXED_ORDER()`、`NO_MERGE()`、`SET_VAR()`、`JOIN_INDEX()`、`NO_INDEX()`，提示参数只引用当前查询块内存在的表别名和索引名。
+- 行构造器谓词，例如 `(a, b) IN ((1, 2), (3, 4))` 和 `(a, b) = (...)`。
+- `ANY`、`SOME`、`ALL` 单列子查询比较，以及引用外层别名的相关 `EXISTS` 子查询。
+- `JOIN LATERAL` 派生表。
+- 排序表达式扩展：`ORDER BY FIELD(...)`、`ORDER BY RAND()`、`ORDER BY 1`。
+- 上下文函数：`USER()`、`CURRENT_USER()`、`DATABASE()`、`VERSION()`、`CONNECTION_ID()`。
+- 十六进制和 bit 字面量，例如 `X'0F'`、`0xFF`、`b'1010'`。
 
 SQL 生成策略全部由后台默认配置控制，前端不提供语法比例配置入口。默认按 MySQL 8.0.22 生成合法 SQL，同时保留小比例探索错误：`invalid_sql_ratio=0.03` 用于生成故意不合法或参数错误 SQL，`null_compare_ratio=0.08` 用于强化 `NULL` 比较覆盖，`risky_expr_ratio=0.08` 用于跨类型风险表达式。后台 SQL JSONL 日志会写入 `sql_validity`、`risk_tags` 和 `expected_error`，用于区分合法 SQL、风险 SQL 和故意不合法 SQL。
 

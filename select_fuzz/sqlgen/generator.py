@@ -23,6 +23,7 @@ class GenerationOptions:
     require_subquery: bool = False
     require_window: bool = False
     require_locking: bool = False
+    require_feature: Optional[str] = None
     invalid_sql_ratio: float = 0.03
     null_compare_ratio: float = 0.08
     risky_expr_ratio: float = 0.08
@@ -81,6 +82,10 @@ class SQLGenerator:
         return sql
 
     def _generate_query_expression(self, tables: List[TableMetadata], options: GenerationOptions, depth: int) -> str:
+        required_query = self._required_feature_query(tables, options)
+        if required_query is not None:
+            return required_query
+
         use_set_operation = options.require_set_operation or (depth > 1 and self.random.random() < 0.18)
         projection_count = 3 if use_set_operation and options.require_window else 2 if use_set_operation else None
         body = self._select_block(tables, options, depth, projection_count=projection_count)
@@ -104,6 +109,117 @@ class SQLGenerator:
 
         return body
 
+    def _required_feature_query(self, tables: List[TableMetadata], options: GenerationOptions) -> Optional[str]:
+        feature = options.require_feature
+        if (
+            feature is None
+            and not any(
+                [
+                    options.require_cte,
+                    options.require_vector,
+                    options.require_set_operation,
+                    options.require_subquery,
+                    options.require_window,
+                    options.require_locking,
+                ]
+            )
+            and self.random.random() < 0.06
+        ):
+            feature = self.random.choice(
+                [
+                    "constant_select",
+                    "constant_derived_table",
+                    "values_statement",
+                    "table_statement",
+                    "parenthesized_query",
+                    "calc_found_rows_select",
+                    "json_table",
+                    "json_functions",
+                    "collation_binary",
+                    "math_datetime_functions",
+                ]
+            )
+        if feature == "constant_select":
+            self._hit("SELECT CONSTANT")
+            return f"SELECT {self.random.choice(['1', 'NULL', 'TRUE', 'FALSE'])} AS c0"
+        if feature == "constant_derived_table":
+            self._hit("SELECT CONSTANT")
+            self._hit("DERIVED_TABLE")
+            self._hit("FROM")
+            self._hit("LIMIT")
+            return "SELECT d.const_value FROM (SELECT 1 AS const_value) AS d LIMIT 1"
+        if feature == "values_statement":
+            return self._values_query(self.random_int(1, 4))
+        if feature == "table_statement":
+            table = self.random.choice(self._permanent_tables(tables))
+            self._hit("TABLE")
+            self._hit("LIMIT")
+            return f"TABLE {_q(table.name)} LIMIT {self.random_int(1, 20)}"
+        if feature == "parenthesized_query":
+            self._hit("PARENTHESIZED_QUERY")
+            self._hit("SELECT CONSTANT")
+            return "(SELECT 1)"
+        if feature == "calc_found_rows_select":
+            self._hit("SELECT CONSTANT")
+            self._hit("SQL_CALC_FOUND_ROWS")
+            self._hit("LIMIT")
+            return "SELECT SQL_CALC_FOUND_ROWS 1 AS c0 LIMIT 1"
+        if feature == "json_table":
+            self._hit("JSON_TABLE")
+            self._hit("FROM")
+            self._hit("LIMIT")
+            return (
+                "SELECT jt.ord, jt.k "
+                "FROM JSON_TABLE(JSON_OBJECT('k', 'v'), '$' "
+                "COLUMNS (ord FOR ORDINALITY, k VARCHAR(20) PATH '$.k' NULL ON EMPTY NULL ON ERROR)) AS jt "
+                "LIMIT 5"
+            )
+        if feature == "json_functions":
+            self._hit("SELECT CONSTANT")
+            self._hit("JSON_CONTAINS")
+            self._hit("JSON_KEYS")
+            self._hit("JSON_LENGTH")
+            self._hit("JSON_OBJECT")
+            self._hit("JSON_ARRAY")
+            return (
+                "SELECT "
+                "JSON_CONTAINS(JSON_OBJECT('k', 'v'), JSON_QUOTE('v'), '$.k') AS jc, "
+                "JSON_KEYS(JSON_OBJECT('k', 'v')) AS jk, "
+                "JSON_LENGTH(JSON_ARRAY(1, 2, 3)) AS jl"
+            )
+        if feature == "collation_binary":
+            self._hit("SELECT CONSTANT")
+            self._hit("BINARY")
+            self._hit("COLLATE")
+            return "SELECT BINARY _utf8mb4'abc' AS b, _utf8mb4'abc' COLLATE utf8mb4_bin AS c"
+        if feature == "math_datetime_functions":
+            for name in [
+                "SELECT CONSTANT",
+                "ABS",
+                "ROUND",
+                "FLOOR",
+                "CEILING",
+                "CRC32",
+                "TIMESTAMPDIFF",
+                "DATE_FORMAT",
+                "MONTH",
+                "DAYOFWEEK",
+            ]:
+                self._hit(name)
+            return (
+                "SELECT "
+                "ABS(-7) AS abs_v, "
+                "ROUND(12.345, 2) AS round_v, "
+                "FLOOR(12.9) AS floor_v, "
+                "CEILING(12.1) AS ceiling_v, "
+                "CRC32(_utf8mb4'abc') AS crc_v, "
+                "TIMESTAMPDIFF(DAY, CAST('2026-01-01' AS DATE), CAST('2026-01-03' AS DATE)) AS diff_v, "
+                "DATE_FORMAT(TIMESTAMP '2026-01-03 10:11:12', '%Y-%m-%d') AS fmt_v, "
+                "MONTH(CAST('2026-01-03' AS DATE)) AS month_v, "
+                "DAYOFWEEK(CAST('2026-01-03' AS DATE)) AS dow_v"
+            )
+        return None
+
     def _select_block(
         self,
         tables: List[TableMetadata],
@@ -116,6 +232,11 @@ class SQLGenerator:
         group_enabled = self._should_group(options)
         window_enabled = options.require_window or self.random.random() < 0.18
         locking_enabled = allow_locking and (options.require_locking or self.random.random() < 0.08)
+        if options.require_feature == "aggregate_extensions":
+            group_enabled = True
+        if options.require_feature == "window_extensions":
+            group_enabled = False
+            window_enabled = True
         if options.require_vector:
             group_enabled = False
         if projection_count is not None:
@@ -123,7 +244,7 @@ class SQLGenerator:
             window_enabled = options.require_window
             locking_enabled = allow_locking and options.require_locking
 
-        modifier = self._select_modifier(locking_enabled)
+        modifier = self._select_modifier(locking_enabled, options.require_feature)
         select_items, group_columns, orderable_aliases = self._select_items(
             refs,
             depth,
@@ -131,6 +252,7 @@ class SQLGenerator:
             window_enabled,
             projection_count,
             options.require_vector,
+            options.require_feature,
         )
         where_clause = self._where_clause(refs, tables, depth, options.require_subquery)
         group_clause = self._group_clause(group_columns)
@@ -169,12 +291,19 @@ class SQLGenerator:
         if options.require_join and len(tables) > 1:
             table_count = max(2, table_count)
         chosen = self.random.sample(table_pool, min(table_count, len(table_pool)))
+        force_partition = options.require_feature == "partition_source" or self.random.random() < 0.05
+        if force_partition:
+            partitioned_tables = [table for table in table_pool if table.partition is not None]
+            if partitioned_tables:
+                chosen[0] = self.random.choice(partitioned_tables)
+            else:
+                force_partition = False
         if options.require_vector:
             vector_tables = [table for table in tables if self._first_column(table, ColumnTypeFamily.VECTOR)]
             if vector_tables and not self._first_column(chosen[0], ColumnTypeFamily.VECTOR):
                 chosen[0] = self.random.choice(vector_tables)
         refs = [TableRef(table=chosen[0], alias="t0")]
-        sql = f"FROM {self._table_source(chosen[0], 't0')}"
+        sql = f"FROM {self._table_source(chosen[0], 't0', force_partition=force_partition)}"
 
         for index, table in enumerate(chosen[1:], start=1):
             ref = TableRef(table=table, alias=f"t{index}")
@@ -240,10 +369,23 @@ class SQLGenerator:
                 return " AND ".join(parts)
         return None
 
-    def _select_modifier(self, locking_enabled: bool) -> str:
+    def _select_modifier(self, locking_enabled: bool, required_feature: Optional[str] = None) -> str:
         if locking_enabled:
             self._hit("SELECT ALL")
             return "ALL "
+        if required_feature == "select_modifiers" or self.random.random() < 0.08:
+            modifier_pool = [
+                "DISTINCTROW ",
+                "HIGH_PRIORITY ",
+                "SQL_SMALL_RESULT ",
+                "SQL_BIG_RESULT ",
+                "SQL_BUFFER_RESULT ",
+            ]
+            if required_feature == "select_modifiers":
+                modifier_pool.append("SQL_CALC_FOUND_ROWS ")
+            modifier = self.random.choice(modifier_pool)
+            self._hit(f"SELECT {modifier.strip()}" if modifier == "DISTINCTROW " else modifier.strip())
+            return modifier
         modifier = self.random.choice(["", "ALL ", "DISTINCT "])
         if modifier == "ALL ":
             self._hit("SELECT ALL")
@@ -259,6 +401,7 @@ class SQLGenerator:
         window_enabled: bool,
         projection_count: Optional[int],
         require_vector: bool,
+        required_feature: Optional[str],
     ) -> tuple[str, List[str], List[str]]:
         count = projection_count or self.random.randint(1, 6)
         items: List[str] = []
@@ -281,10 +424,15 @@ class SQLGenerator:
                 orderable_aliases.append(f"c{index}")
 
         if window_enabled:
-            function = self.random.choice(["ROW_NUMBER", "RANK", "DENSE_RANK"])
-            self._hit(function)
-            items.append(f"{function}() OVER w AS rn")
-            orderable_aliases.append("rn")
+            if required_feature == "window_extensions" or self.random.random() < 0.22:
+                items.append(f"{self._window_extension_expr(refs)} AS wx")
+                items.append(f"{self._window_frame_expr(refs)} AS wf")
+                orderable_aliases.extend(["wx", "wf"])
+            else:
+                function = self.random.choice(["ROW_NUMBER", "RANK", "DENSE_RANK"])
+                self._hit(function)
+                items.append(f"{function}() OVER w AS rn")
+                orderable_aliases.append("rn")
 
         if require_vector:
             vector = self._vector_distance_expr(refs)
@@ -308,6 +456,7 @@ class SQLGenerator:
             or self._attempt_should_generate_invalid
             or self._active_options.invalid_sql_ratio >= 1.0
             or self._active_options.null_compare_ratio >= 1.0
+            or self._active_options.require_feature == "predicate_extensions"
         )
         if not force_predicate and self.random.random() < 0.18:
             return ""
@@ -389,8 +538,12 @@ class SQLGenerator:
         if self._attempt_should_generate_invalid:
             self._attempt_should_generate_invalid = False
             return self._intentionally_invalid_predicate_expr()
+        if self._active_options.require_feature == "predicate_extensions":
+            return self._extended_predicate_expr(refs, tables)
         if self._chance(self._active_options.null_compare_ratio):
             return self._null_compare_predicate_expr(refs)
+        if depth > 0 and self.random.random() < 0.12:
+            return self._extended_predicate_expr(refs, tables)
         if depth > 0 and (require_subquery or self.random.random() < 0.18):
             require_subquery = False
             kind = self.random.choice(["EXISTS", "IN", "SCALAR"])
@@ -496,6 +649,61 @@ class SQLGenerator:
         self._hit("JSON_OBJECT")
         self._hit("JSON_ARRAY")
         return f"JSON_OBJECT('k', 'member') MEMBER OF(JSON_ARRAY({column.sql}, JSON_OBJECT('k', 'member')))"
+
+    def _extended_predicate_expr(self, refs: List[TableRef], tables: List[TableMetadata]) -> str:
+        choice = self.random.choice(
+            [
+                "NOT IN",
+                "NOT EXISTS",
+                "NOT BETWEEN",
+                "NOT LIKE",
+                "NOT REGEXP",
+                "RLIKE",
+                "LIKE ESCAPE",
+                "IS TRUE",
+            ]
+        )
+        if choice == "NOT EXISTS":
+            self._hit("NOT EXISTS")
+            self._hit("NOT")
+            self._hit("EXISTS")
+            return f"NOT EXISTS ({self._simple_subquery(tables)})"
+        if choice == "NOT IN":
+            column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT})
+            self._hit("NOT IN")
+            return f"{column.sql} NOT IN ({self.random_int(-5, 5)}, {self.random_int(6, 20)})"
+        if choice == "NOT BETWEEN":
+            column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT})
+            self._hit("NOT BETWEEN")
+            return f"{column.sql} NOT BETWEEN {self.random_int(-20, -1)} AND {self.random_int(1, 20)}"
+        if choice == "NOT LIKE":
+            column = self._column_expr(refs, preferred={ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET})
+            self._hit("NOT LIKE")
+            return f"{column.sql} NOT LIKE '%z%'"
+        if choice == "NOT REGEXP":
+            column = self._column_expr(refs, preferred={ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET})
+            self._hit("NOT REGEXP")
+            return f"{column.sql} NOT REGEXP '^[0-9]+$'"
+        if choice == "RLIKE":
+            column = self._column_expr(refs, preferred={ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET})
+            self._hit("RLIKE")
+            return f"{column.sql} RLIKE '[a-z]+'"
+        if choice == "LIKE ESCAPE":
+            column = self._column_expr(refs, preferred={ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET})
+            self._hit("LIKE")
+            self._hit("LIKE ESCAPE")
+            return f"{column.sql} LIKE '%!_%' ESCAPE '!'"
+        column = self._column_expr(refs, preferred={ColumnTypeFamily.BOOLEAN, ColumnTypeFamily.INTEGER, ColumnTypeFamily.BIT})
+        predicate = self.random.choice(
+            [
+                f"({column.sql} <> 0) IS TRUE",
+                f"({column.sql} <> 0) IS NOT TRUE",
+                f"({column.sql} = 0) IS FALSE",
+                f"({column.sql} = NULL) IS UNKNOWN",
+            ]
+        )
+        self._hit("IS TRUE")
+        return predicate
 
     def _random_expr(self, refs: List[TableRef], depth: int) -> Expr:
         if depth > 0 and self._chance(self._active_options.risky_expr_ratio):
@@ -644,6 +852,28 @@ class SQLGenerator:
         self._hit("VEC_TOTEXT")
         return f"VEC_TOTEXT({ref.alias}.{_q(column.name)})"
 
+    def _window_extension_expr(self, refs: List[TableRef]) -> str:
+        column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT})
+        choice = self.random.choice(["LAG", "LEAD", "NTILE", "FIRST_VALUE", "LAST_VALUE"])
+        self._hit(choice)
+        if choice == "LAG":
+            return f"LAG({column.sql}, 1, 0) OVER w"
+        if choice == "LEAD":
+            return f"LEAD({column.sql}, 1, 0) OVER w"
+        if choice == "NTILE":
+            return "NTILE(4) OVER w"
+        if choice == "FIRST_VALUE":
+            return f"FIRST_VALUE({column.sql}) OVER w"
+        return f"LAST_VALUE({column.sql}) OVER w"
+
+    def _window_frame_expr(self, refs: List[TableRef]) -> str:
+        column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT})
+        partition = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.STRING}).sql
+        order = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DATETIME}).sql
+        self._hit("SUM")
+        self._hit("WINDOW FRAME")
+        return f"SUM({column.sql}) OVER (PARTITION BY {partition} ORDER BY {order} ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"
+
     def _risky_expr(self, refs: List[TableRef], depth: int) -> Expr:
         left = self._column_expr(refs)
         right = self._random_expr(refs, max(0, depth - 1))
@@ -658,6 +888,8 @@ class SQLGenerator:
         return Expr(f"({left.sql} + {right.sql})", ColumnTypeFamily.DECIMAL)
 
     def _aggregate_expr(self, refs: List[TableRef]) -> str:
+        if self._active_options.require_feature == "aggregate_extensions" or self.random.random() < 0.28:
+            return self._aggregate_extension_expr(refs)
         column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT})
         function = self.random.choice(["COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT", "JSON_ARRAYAGG"])
         self._hit(function)
@@ -669,6 +901,22 @@ class SQLGenerator:
         if function == "JSON_ARRAYAGG":
             return f"JSON_ARRAYAGG({self._column_expr(refs).sql})"
         return f"{function}({column.sql})"
+
+    def _aggregate_extension_expr(self, refs: List[TableRef]) -> str:
+        choice = self.random.choice(["COUNT DISTINCT", "BIT_AND", "BIT_OR", "BIT_XOR", "GROUP_CONCAT ORDER"])
+        if choice == "COUNT DISTINCT":
+            column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM}).sql
+            self._hit("COUNT")
+            self._hit("COUNT DISTINCT")
+            return f"COUNT(DISTINCT {column})"
+        if choice in {"BIT_AND", "BIT_OR", "BIT_XOR"}:
+            column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.BIT}).sql
+            self._hit(choice)
+            return f"{choice}({column})"
+        text = self._column_expr(refs, preferred={ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET}).sql
+        self._hit("GROUP_CONCAT")
+        self._hit("GROUP_CONCAT ORDER")
+        return f"GROUP_CONCAT({text} ORDER BY {text} SEPARATOR '|')"
 
     def _aggregate_expr_from_name(self) -> str:
         function = self.random.choice(["COUNT", "SUM", "AVG", "MIN", "MAX"])
@@ -770,7 +1018,10 @@ class SQLGenerator:
         permanent = [table for table in tables if not table.is_temporary]
         return permanent or tables
 
-    def _table_source(self, table: TableMetadata, alias: str) -> str:
+    def _table_source(self, table: TableMetadata, alias: str, force_partition: bool = False) -> str:
+        if force_partition and table.partition is not None:
+            self._hit("EXPLICIT PARTITION")
+            return f"{_q(table.name)} PARTITION (p0) AS {alias}"
         if not table.is_temporary and self.random.random() < 0.08:
             self._hit("DERIVED_TABLE")
             return f"(SELECT * FROM {_q(table.name)} LIMIT {self.random_int(1, 50)}) AS {alias}"

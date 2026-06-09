@@ -19,6 +19,11 @@ class FakeClock:
         self.now += timedelta(seconds=seconds)
 
 
+def _is_query_expression(sql: str) -> bool:
+    normalized = sql.strip().upper()
+    return normalized.startswith(("SELECT", "WITH", "(", "TABLE", "VALUES"))
+
+
 class FakeDatabase(DatabaseClient):
     def __init__(self) -> None:
         self.connected = False
@@ -33,11 +38,10 @@ class FakeDatabase(DatabaseClient):
         self.connected = True
 
     def execute(self, sql: str) -> None:
-        normalized = sql.strip().upper()
-        if self.fail_next_ordinary_error and (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")):
+        if self.fail_next_ordinary_error and _is_query_expression(sql):
             self.fail_next_ordinary_error = False
             raise RuntimeError("普通 SQL 执行失败")
-        if self.fail_next_query and (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")):
+        if self.fail_next_query and _is_query_expression(sql):
             self.fail_next_query = False
             raise LostConnectionError("Lost connection to MySQL server during query")
         self.executed.append(sql)
@@ -323,7 +327,7 @@ def test_执行查询会写入_sql_日志(tmp_path: Path) -> None:
     assert task.sql_total == 1
     assert task.success_query_total == 1
     assert task.failed_query_total == 0
-    assert any(sql.startswith(("SELECT", "WITH", "(")) for sql in db.executed)
+    assert any(_is_query_expression(sql) for sql in db.executed)
     assert "SELECT" in (tmp_path / "logs" / "2026-06-04" / "task-1.sql.jsonl").read_text(encoding="utf-8")
 
 
@@ -345,7 +349,7 @@ def test_每次执行查询前设置_session_最大执行时间为_5_秒(tmp_pat
     task.step()
 
     assert db.executed[startup_sql_count] == "SET SESSION max_execution_time = 5000"
-    assert db.executed[startup_sql_count + 1].startswith(("SELECT", "WITH", "("))
+    assert _is_query_expression(db.executed[startup_sql_count + 1])
 
 
 def test_运行时不会强制每条查询都包含向量表达式(tmp_path: Path) -> None:
@@ -413,7 +417,7 @@ def test_普通执行失败会把原始_sql_写入失败目录(tmp_path: Path) -
     failed_files = list((tmp_path / "failed_sql").glob("2026-06-04/*.sql"))
     assert len(failed_files) == 1
     content = failed_files[0].read_text(encoding="utf-8")
-    assert content.startswith("SELECT")
+    assert _is_query_expression(content)
     assert "\"status\"" not in content
 
 
@@ -492,9 +496,7 @@ def test_lost_connection_去重窗口内失败查询数仍逐次累计(tmp_path:
 
         def execute(self, sql: str) -> None:
             normalized = sql.strip().upper()
-            if self.remaining_lost_queries > 0 and (
-                normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")
-            ):
+            if self.remaining_lost_queries > 0 and _is_query_expression(sql):
                 self.remaining_lost_queries -= 1
                 raise LostConnectionError("Lost connection to MySQL server during query")
             super().execute(sql)
@@ -561,7 +563,7 @@ def test_多线程任务为每个_worker_准备独立临时表会话(tmp_path: P
             normalized = sql.strip().upper()
             if normalized.startswith("CREATE TEMPORARY TABLE `T2`"):
                 self.temporary_t2_created = True
-            if (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")) and "`T2`" in normalized:
+            if _is_query_expression(sql) and "`T2`" in normalized:
                 if not self.temporary_t2_created:
                     raise RuntimeError("当前 worker 会话未创建临时表 t2")
                 self.temporary_t2_execute_checks += 1
@@ -668,7 +670,7 @@ def test_任务暂停后_step_不会继续发送_sql(tmp_path: Path) -> None:
 
     assert task.status is TaskStatus.RUNNING
     assert db.executed[before] == "SET SESSION max_execution_time = 5000"
-    assert db.executed[before + 1].startswith(("SELECT", "WITH", "("))
+    assert _is_query_expression(db.executed[before + 1])
     assert len(db.executed) == before + 2
 
 
@@ -806,7 +808,7 @@ def test_看门狗中断后下一轮会重连并重建临时表(tmp_path: Path) 
                 raise RuntimeError("worker 连接未恢复")
             if normalized.startswith("CREATE TEMPORARY TABLE `T2`"):
                 self.temporary_t2_created = True
-            if (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")) and "`T2`" in normalized:
+            if _is_query_expression(sql) and "`T2`" in normalized:
                 if not self.temporary_t2_created:
                     raise RuntimeError("worker 临时表会话未恢复")
                 self.temporary_t2_execute_checks += 1
@@ -880,7 +882,7 @@ def test_worker_被动断开后下一轮会重连并重建临时表(tmp_path: Pa
                 raise RuntimeError("worker 连接未恢复")
             if normalized.startswith("CREATE TEMPORARY TABLE `T2`"):
                 self.temporary_t2_created = True
-            if (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")) and "`T2`" in normalized:
+            if _is_query_expression(sql) and "`T2`" in normalized:
                 if not self.temporary_t2_created:
                     raise RuntimeError("worker 临时表会话未恢复")
                 self.temporary_t2_execute_checks += 1

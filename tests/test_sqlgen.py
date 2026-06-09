@@ -1,7 +1,7 @@
 import re
 from pathlib import Path
 
-from select_fuzz.metadata.base_sql import load_base_sql_files
+from select_fuzz.metadata.base_sql import is_base_table_definition_file, load_base_sql_files
 from select_fuzz.metadata.ddl_parser import parse_create_table
 from select_fuzz.sqlgen.generator import GenerationOptions, SQLGenerator, TableRef
 from select_fuzz.sqlgen.operators import build_operator_registry
@@ -38,6 +38,8 @@ def _tables():
 def _base_tables():
     tables = []
     for sql_file in load_base_sql_files(Path("sql_base_tables")):
+        if not is_base_table_definition_file(sql_file.path):
+            continue
         try:
             tables.append(parse_create_table(sql_file.sql))
         except ValueError:
@@ -64,6 +66,251 @@ def test_算子覆盖矩阵包含_select_核心结构和向量算子() -> None:
     assert registry.has("VEC_DISTANCE_COSINE")
     assert registry.has("VEC_DISTANCE_EUCLIDEAN")
     assert not registry.has("DISTANCE_DOT")
+
+
+def test_mysql_8022_扩展覆盖矩阵只登记当前版本支持语法() -> None:
+    registry = build_operator_registry()
+
+    for name in [
+        "SELECT CONSTANT",
+        "SELECT DISTINCTROW",
+        "HIGH_PRIORITY",
+        "SQL_SMALL_RESULT",
+        "SQL_BIG_RESULT",
+        "SQL_BUFFER_RESULT",
+        "SQL_CALC_FOUND_ROWS",
+        "TABLE",
+        "PARENTHESIZED_QUERY",
+        "EXPLICIT PARTITION",
+        "NOT BETWEEN",
+        "NOT IN",
+        "NOT EXISTS",
+        "NOT LIKE",
+        "NOT REGEXP",
+        "RLIKE",
+        "LIKE ESCAPE",
+        "IS TRUE",
+        "COUNT DISTINCT",
+        "BIT_AND",
+        "BIT_OR",
+        "BIT_XOR",
+        "LAG",
+        "LEAD",
+        "NTILE",
+        "FIRST_VALUE",
+        "LAST_VALUE",
+        "WINDOW FRAME",
+        "JSON_TABLE",
+        "JSON_CONTAINS",
+        "JSON_KEYS",
+        "JSON_LENGTH",
+        "COLLATE",
+        "BINARY",
+        "ABS",
+        "ROUND",
+        "FLOOR",
+        "CEILING",
+        "CRC32",
+        "TIMESTAMPDIFF",
+        "DATE_FORMAT",
+        "MONTH",
+        "DAYOFWEEK",
+    ]:
+        assert registry.has(name)
+
+    for unsupported in ["INTERSECT", "INTERSECT ALL", "EXCEPT", "EXCEPT ALL", "MINUS", "SQL_CACHE", "SQL_NO_CACHE"]:
+        assert not registry.has(unsupported)
+
+
+def test_mysql_8022_可强制生成新增查询形态() -> None:
+    tables = _base_tables()
+
+    constant_sql = SQLGenerator(random_seed=801).generate(tables, GenerationOptions(require_feature="constant_select"))
+    assert constant_sql.upper().startswith("SELECT ")
+    assert " FROM " not in constant_sql.upper()
+
+    derived_sql = SQLGenerator(random_seed=802).generate(tables, GenerationOptions(require_feature="constant_derived_table"))
+    assert "FROM (SELECT 1 AS const_value)" in derived_sql
+
+    values_sql = SQLGenerator(random_seed=803).generate(tables, GenerationOptions(require_feature="values_statement"))
+    assert values_sql.upper().startswith("VALUES ROW(")
+
+    table_sql = SQLGenerator(random_seed=804).generate(tables, GenerationOptions(require_feature="table_statement"))
+    assert table_sql.upper().startswith("TABLE `T")
+
+    parenthesized_sql = SQLGenerator(random_seed=805).generate(tables, GenerationOptions(require_feature="parenthesized_query"))
+    assert parenthesized_sql.startswith("(")
+    assert parenthesized_sql.endswith(")")
+
+    partition_sql = SQLGenerator(random_seed=806).generate(tables, GenerationOptions(require_feature="partition_source"))
+    assert " PARTITION (" in partition_sql.upper()
+
+
+def test_mysql_8022_新增谓词和_select_modifier_能被强制覆盖() -> None:
+    tables = _base_tables()
+    generator = SQLGenerator(random_seed=807, max_sql_length=8000)
+    sqls = [
+        generator.generate(
+            tables,
+            GenerationOptions(
+                require_feature="predicate_extensions",
+                invalid_sql_ratio=0.0,
+                null_compare_ratio=0.0,
+                risky_expr_ratio=0.0,
+            ),
+        )
+        for _ in range(240)
+    ]
+    combined = "\n".join(sqls).upper()
+
+    assert " NOT IN " in combined
+    assert " NOT EXISTS " in combined
+    assert " NOT BETWEEN " in combined
+    assert " NOT LIKE " in combined
+    assert " NOT REGEXP " in combined
+    assert " RLIKE " in combined
+    assert " ESCAPE " in combined
+    assert re.search(r"\bIS\s+(?:NOT\s+)?(?:TRUE|FALSE|UNKNOWN)\b", combined)
+
+    modifier_generator = SQLGenerator(random_seed=808, max_sql_length=8000)
+    for _ in range(240):
+        modifier_generator.generate(tables, GenerationOptions(require_feature="select_modifiers"))
+
+    for name in [
+        "SELECT DISTINCTROW",
+        "HIGH_PRIORITY",
+        "SQL_SMALL_RESULT",
+        "SQL_BIG_RESULT",
+        "SQL_BUFFER_RESULT",
+        "SQL_CALC_FOUND_ROWS",
+    ]:
+        assert name in modifier_generator.coverage_counts
+
+
+def test_mysql_8022_聚合窗口_json_字符集和函数扩展能被强制覆盖() -> None:
+    tables = _base_tables()
+    generator = SQLGenerator(random_seed=809, max_sql_length=8000)
+    for feature in [
+        "aggregate_extensions",
+        "window_extensions",
+        "json_table",
+        "json_functions",
+        "collation_binary",
+        "math_datetime_functions",
+    ]:
+        for _ in range(220):
+            generator.generate(
+                tables,
+                GenerationOptions(
+                    require_feature=feature,
+                    invalid_sql_ratio=0.0,
+                    null_compare_ratio=0.0,
+                    risky_expr_ratio=0.0,
+                ),
+            )
+
+    for name in [
+        "COUNT DISTINCT",
+        "BIT_AND",
+        "BIT_OR",
+        "BIT_XOR",
+        "GROUP_CONCAT ORDER",
+        "LAG",
+        "LEAD",
+        "NTILE",
+        "FIRST_VALUE",
+        "LAST_VALUE",
+        "WINDOW FRAME",
+        "JSON_TABLE",
+        "JSON_CONTAINS",
+        "JSON_KEYS",
+        "JSON_LENGTH",
+        "COLLATE",
+        "BINARY",
+        "ABS",
+        "ROUND",
+        "FLOOR",
+        "CEILING",
+        "CRC32",
+        "TIMESTAMPDIFF",
+        "DATE_FORMAT",
+        "MONTH",
+        "DAYOFWEEK",
+    ]:
+        assert name in generator.coverage_counts
+
+
+def test_mysql_8022_新增扩展不生成当前版本不支持语法() -> None:
+    tables = _base_tables()
+    unsupported_patterns = [
+        r"\bINTERSECT\b",
+        r"\bEXCEPT\b",
+        r"\bMINUS\b",
+        r"\bSQL_CACHE\b",
+        r"\bSQL_NO_CACHE\b",
+    ]
+
+    for feature in [
+        "constant_select",
+        "constant_derived_table",
+        "values_statement",
+        "table_statement",
+        "parenthesized_query",
+        "partition_source",
+        "predicate_extensions",
+        "select_modifiers",
+        "aggregate_extensions",
+        "window_extensions",
+        "json_table",
+        "json_functions",
+        "collation_binary",
+        "math_datetime_functions",
+    ]:
+        generator = SQLGenerator(random_seed=810, max_sql_length=8000)
+        for _ in range(80):
+            sql = generator.generate(
+                tables,
+                GenerationOptions(
+                    require_feature=feature,
+                    invalid_sql_ratio=0.0,
+                    null_compare_ratio=0.0,
+                    risky_expr_ratio=0.0,
+                ),
+            )
+            upper = sql.upper()
+            for pattern in unsupported_patterns:
+                assert re.search(pattern, upper) is None, sql
+
+
+def test_mysql_8022_新增扩展语法会进入默认随机流量() -> None:
+    tables = _base_tables()
+    generator = SQLGenerator(random_seed=811, max_sql_length=8000)
+
+    for _ in range(5000):
+        sql = generator.generate(
+            tables,
+            GenerationOptions(invalid_sql_ratio=0.0, null_compare_ratio=0.0, risky_expr_ratio=0.0),
+        )
+        upper = sql.upper()
+        assert "INTERSECT" not in upper
+        assert "EXCEPT" not in upper
+        assert "MINUS" not in upper
+        assert "SQL_CACHE" not in upper
+        assert "SQL_NO_CACHE" not in upper
+
+    for name in [
+        "SELECT CONSTANT",
+        "TABLE",
+        "EXPLICIT PARTITION",
+        "NOT IN",
+        "NOT LIKE",
+        "COUNT DISTINCT",
+        "LAG",
+        "JSON_TABLE",
+        "COLLATE",
+        "ABS",
+    ]:
+        assert name in generator.coverage_counts
 
 
 def test_生成_sql_只引用已知表并包含_cte_join_向量距离() -> None:
@@ -273,7 +520,7 @@ def test_随机递归深度和长度保护稳定() -> None:
 
     for _ in range(120):
         sql = generator.generate(tables)
-        assert sql.startswith(("SELECT", "WITH", "("))
+        assert sql.startswith(("SELECT", "WITH", "(", "TABLE", "VALUES"))
         assert len(sql) <= 2500
 
 

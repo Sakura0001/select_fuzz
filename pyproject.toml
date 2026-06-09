@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "select-fuzz"
 version = "0.1.0"
-description = "面向 MySQL 8.0.41 和 PolarDB 向量扩展的 SQL 模糊测试工具"
+description = "面向 MySQL 8.0.22 和 PolarDB 向量扩展的 SQL 模糊测试工具"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [

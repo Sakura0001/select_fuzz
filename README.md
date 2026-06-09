@@ -1,6 +1,6 @@
 # sql_fuzz
 
-`sql_fuzz` 是面向 MySQL 8.0.41 和 PolarDB MySQL 兼容向量扩展的 SQL 模糊测试工具。
+`sql_fuzz` 是面向 MySQL 8.0.22 和 PolarDB MySQL 兼容向量扩展的 SQL 模糊测试工具。
 
 项目默认使用中文文档、中文配置说明和中文界面文案。SQL、MySQL、PolarDB、函数名、错误码和数据类型保留官方英文写法。
 
@@ -65,7 +65,19 @@ npm run dev -- --port 5173
 
 向量查询按当前内网环境能力生成：`VEC_FROMTEXT`、`VEC_TOTEXT`、`VEC_DISTANCE_COSINE(v1, v2)`、`VEC_DISTANCE_EUCLIDEAN(v1, v2)`。生成器不会使用 `STRING_TO_VECTOR`、`VECTOR_TO_STRING`、`DISTANCE(..., metric)` 或 `DOT` 距离，也不会把向量列用于主键、外键、唯一键、分区键、普通跨类型比较、通用分组或普通排序表达式。运行时默认不强制每条查询包含向量表达式，向量只作为小比例随机覆盖；测试可以通过 `GenerationOptions(require_vector=True)` 强制覆盖向量生成分支。
 
-查询生成器按 MySQL 8.0.22 兼容范围生成集合运算，只生成 `UNION` 和 `UNION ALL`，不生成 `INTERSECT`、`INTERSECT ALL`、`EXCEPT` 或 `EXCEPT ALL`。
+查询生成器按 MySQL 8.0.22 兼容范围生成查询表达式。集合运算只生成 `UNION` 和 `UNION ALL`，不生成 MySQL 8.0.31 才支持的 `INTERSECT`、`INTERSECT ALL`、`EXCEPT`、`EXCEPT ALL`，也不生成 MySQL 不支持的 `MINUS`。`SQL_CACHE` 已在 MySQL 8.0 移除，`SQL_NO_CACHE` 在 MySQL 8.0 中已废弃且无实际效果，因此也不会生成。
+
+当前随机生成会覆盖以下 MySQL 8.0.22 支持的扩展点：
+
+- 无 `FROM` 常量查询，例如 `SELECT 1`、`SELECT NULL`。
+- 常量派生表、括号查询表达式、`TABLE` 查询表达式和独立 `VALUES` 查询表达式。
+- 分区表显式 `PARTITION (p0)` 访问。
+- `DISTINCTROW`、`HIGH_PRIORITY`、`SQL_SMALL_RESULT`、`SQL_BIG_RESULT`、`SQL_BUFFER_RESULT`、`SQL_CALC_FOUND_ROWS`。
+- `NOT IN`、`NOT EXISTS`、`NOT BETWEEN`、`NOT LIKE`、`NOT REGEXP`、`RLIKE`、`LIKE ... ESCAPE` 和 `IS TRUE/FALSE/UNKNOWN`。
+- `COUNT(DISTINCT)`、`BIT_AND()`、`BIT_OR()`、`BIT_XOR()`、带 `ORDER BY` 和 `SEPARATOR` 的 `GROUP_CONCAT()`。
+- `LAG()`、`LEAD()`、`NTILE()`、`FIRST_VALUE()`、`LAST_VALUE()` 和 `ROWS BETWEEN ...` 窗口 frame。
+- `JSON_TABLE()`、`JSON_CONTAINS()`、`JSON_KEYS()`、`JSON_LENGTH()`。
+- `COLLATE`、`BINARY expr`、`ABS()`、`ROUND()`、`FLOOR()`、`CEILING()`、`CRC32()`、`TIMESTAMPDIFF()`、`DATE_FORMAT()`、`MONTH()`、`DAYOFWEEK()`。
 
 SQL 生成策略全部由后台默认配置控制，前端不提供语法比例配置入口。默认按 MySQL 8.0.22 生成合法 SQL，同时保留小比例探索错误：`invalid_sql_ratio=0.03` 用于生成故意不合法或参数错误 SQL，`null_compare_ratio=0.08` 用于强化 `NULL` 比较覆盖，`risky_expr_ratio=0.08` 用于跨类型风险表达式。后台 SQL JSONL 日志会写入 `sql_validity`、`risk_tags` 和 `expected_error`，用于区分合法 SQL、风险 SQL 和故意不合法 SQL。
 

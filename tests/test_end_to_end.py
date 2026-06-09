@@ -19,6 +19,10 @@ class EndToEndClock:
         self.value += timedelta(seconds=seconds)
 
 
+def _is_query_expression(sql: str) -> bool:
+    return sql.strip().upper().startswith(("SELECT", "WITH", "(", "TABLE", "VALUES"))
+
+
 class EndToEndDatabase(DatabaseClient):
     def __init__(self) -> None:
         self.executed: list[str] = []
@@ -29,8 +33,7 @@ class EndToEndDatabase(DatabaseClient):
         self.connected = True
 
     def execute(self, sql: str) -> None:
-        normalized = sql.strip().upper()
-        if normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("("):
+        if _is_query_expression(sql):
             self.query_attempts += 1
             if self.query_attempts in {2, 3}:
                 raise LostConnectionError("Lost connection to MySQL server during query")

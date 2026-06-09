@@ -31,6 +31,9 @@ class TaskStatus(str, Enum):
     STOPPED = "已停止"
 
 
+PASSIVE_CONNECTION_CLOSE_REASON = "worker 连接已被外部关闭或驱动标记不可用，准备重连"
+
+
 @dataclass
 class TaskWorker:
     worker_id: int
@@ -452,8 +455,10 @@ class FuzzTask:
     def _worker_state_dicts_locked(self) -> list[dict]:
         rows: list[dict] = []
         for worker, state in zip(self._workers, self._worker_states):
+            diagnostics = self._connection_diagnostics(worker.db)
+            self._mark_passive_connection_closed_locked(state, diagnostics)
             row = state.to_dict()
-            row.update(self._connection_diagnostics(worker.db))
+            row.update(diagnostics)
             rows.append(row)
         return rows
 
@@ -464,6 +469,23 @@ class FuzzTask:
         if hasattr(db, "connected"):
             return {"connection_open": bool(getattr(db, "connected"))}
         return {}
+
+    def _mark_passive_connection_closed_locked(self, state: WorkerRuntimeState, diagnostics: dict) -> None:
+        if self.status in {TaskStatus.NEW, TaskStatus.CONNECTING, TaskStatus.SEEDING, TaskStatus.FAILED, TaskStatus.STOPPED}:
+            return
+        if state.state == "执行 SQL" or state.needs_reconnect:
+            return
+        if diagnostics.get("connection_open") is not False:
+            return
+        connect_count = diagnostics.get("connection_connect_count")
+        close_count = diagnostics.get("connection_close_count", 0)
+        if connect_count is not None and int(connect_count or 0) <= int(close_count or 0):
+            return
+        state.needs_reconnect = True
+        state.last_connection_close_reason = PASSIVE_CONNECTION_CLOSE_REASON
+        state.last_heartbeat = self.clock()
+        if state.state != "已暂停":
+            state.state = "等待重连"
 
     def _close_worker_connections(self, reason: str = "关闭 worker 连接") -> None:
         with self._lock:
@@ -497,6 +519,9 @@ class FuzzTask:
     def _ensure_worker_session(self, worker_id: int, worker: TaskWorker) -> bool:
         with self._lock:
             state = self._worker_state(worker_id)
+            diagnostics = self._connection_diagnostics(worker.db)
+            if state is not None:
+                self._mark_passive_connection_closed_locked(state, diagnostics)
             needs_reconnect = bool(state and state.needs_reconnect)
         if not needs_reconnect:
             return True

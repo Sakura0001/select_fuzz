@@ -830,6 +830,92 @@ def test_看门狗中断后下一轮会重连并重建临时表(tmp_path: Path) 
     assert task.failed_query_total == 1
 
 
+def test_worker_被动断开后下一轮会重连并重建临时表(tmp_path: Path) -> None:
+    class PassiveClosedTemporaryDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_count = 0
+            self.close_count = 0
+            self.connection_id = 8100
+            self.temporary_t2_created = False
+            self.temporary_t2_execute_checks = 0
+
+        def connect(self) -> None:
+            super().connect()
+            self.connect_count += 1
+            self.connection_id += 1
+            self.temporary_t2_created = False
+
+        def close(self) -> None:
+            super().close()
+            self.close_count += 1
+            self.temporary_t2_created = False
+
+        def execute(self, sql: str) -> None:
+            normalized = sql.strip().upper()
+            if not self.connected:
+                raise RuntimeError("worker 连接未恢复")
+            if normalized.startswith("CREATE TEMPORARY TABLE `T2`"):
+                self.temporary_t2_created = True
+            if (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")) and "`T2`" in normalized:
+                if not self.temporary_t2_created:
+                    raise RuntimeError("worker 临时表会话未恢复")
+                self.temporary_t2_execute_checks += 1
+            super().execute(sql)
+
+        def query_scalar(self, sql: str) -> int:
+            if "`t2`" in sql and not self.temporary_t2_created:
+                raise RuntimeError("worker 临时表会话未恢复")
+            return super().query_scalar(sql)
+
+        def connection_diagnostics(self) -> dict:
+            return {
+                "connection_open": self.connected,
+                "connection_id": self.connection_id if self.connected else None,
+                "connection_connect_count": self.connect_count,
+                "connection_close_count": self.close_count,
+            }
+
+    class FixedTemporaryTableGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+
+        def generate(self, *_args, **_kwargs) -> str:
+            return "SELECT COUNT(*) FROM `t2`"
+
+    clock = FakeClock()
+    db = PassiveClosedTemporaryDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir_with_temporary_table(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    task._workers[0].generator = FixedTemporaryTableGenerator()
+    db.connected = False
+    db.temporary_t2_created = False
+
+    disconnected_state = task.worker_states[0]
+    task.step()
+
+    assert disconnected_state["needs_reconnect"] is True
+    assert disconnected_state["connection_open"] is False
+    assert "外部关闭" in disconnected_state["last_connection_close_reason"]
+    assert db.connected is True
+    assert db.connect_count == 2
+    assert db.close_count == 1
+    assert db.executed.count("USE `select_fuzz`") == 2
+    assert len([sql for sql in db.executed if sql.startswith("CREATE TEMPORARY TABLE `t2`")]) == 2
+    assert db.executed.count("INSERT INTO `t2` (`id`) VALUES (2)") == 2
+    assert db.temporary_t2_execute_checks == 1
+    assert task.success_query_total == 1
+    assert task.failed_query_total == 0
+
+
 def test_暂停不会清空正在执行_sql_的_worker_状态(tmp_path: Path) -> None:
     clock = FakeClock()
     db = FakeDatabase()

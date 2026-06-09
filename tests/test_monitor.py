@@ -10,6 +10,10 @@ from select_fuzz.monitor.logs import SqlLogRecord, append_jsonl, read_jsonl
 from select_fuzz.monitor.store import MetricStore
 
 
+class InterfaceError(Exception):
+    pass
+
+
 def test_sql_日志按_jsonl_写入并保留中文状态(tmp_path: Path) -> None:
     path = tmp_path / "sql.jsonl"
     record = SqlLogRecord(
@@ -53,6 +57,7 @@ def test_lost_connection_错误识别() -> None:
     assert is_lost_connection_error(Exception("Lost connection to MySQL server during query"))
     assert is_lost_connection_error(Exception("MySQL server has gone away"))
     assert is_lost_connection_error(EOFError("socket closed"))
+    assert is_lost_connection_error(InterfaceError(0, ""))
     assert not is_lost_connection_error(Exception("Duplicate entry"))
 
 

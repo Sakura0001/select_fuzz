@@ -42,6 +42,9 @@ class LostConnectionDeduplicator:
 
 def is_lost_connection_error(error: BaseException) -> bool:
     message = str(error).lower()
+    error_name = error.__class__.__name__
+    if error_name in {"InterfaceError", "OperationalError"} and getattr(error, "args", None) == (0, ""):
+        return True
     signals = [
         "lost connection to mysql server",
         "mysql server has gone away",

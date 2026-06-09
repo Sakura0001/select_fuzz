@@ -65,6 +65,7 @@ class RuntimeService:
         self._real_tasks: Dict[str, FuzzTask] = {}
         self._task_tunnels: Dict[str, JumpTunnel] = {}
         self._background_stop_events: Dict[str, threading.Event] = {}
+        self._background_worker_threads: Dict[str, Dict[int, threading.Thread]] = {}
         self._jump_hosts: List[dict] = []
         self._counter = itertools.count(1)
 
@@ -237,6 +238,7 @@ class RuntimeService:
     def _start_background_loop(self, task: FuzzTask) -> None:
         stop_event = threading.Event()
         self._background_stop_events[task.task_id] = stop_event
+        self._background_worker_threads[task.task_id] = {}
 
         def run(worker_id: int) -> None:
             while not stop_event.is_set() and not task.is_terminal:
@@ -257,6 +259,7 @@ class RuntimeService:
 
         for worker_id in range(task.thread_count):
             thread = threading.Thread(target=run, args=(worker_id,), name=f"sql_fuzz-{task.task_id}-{worker_id}", daemon=True)
+            self._background_worker_threads[task.task_id][worker_id] = thread
             thread.start()
         watcher = threading.Thread(target=watchdog, name=f"sql_fuzz-{task.task_id}-watchdog", daemon=True)
         watcher.start()
@@ -279,7 +282,18 @@ class RuntimeService:
         snapshot.failed_query_total = state["failed_query_total"]
         snapshot.ordinary_error_total = state["ordinary_error_total"]
         snapshot.lost_connection_total = state["lost_connection_total"]
-        snapshot.worker_states = state["worker_states"]
+        snapshot.worker_states = self._worker_states_with_thread_diagnostics(task.task_id, state["worker_states"])
+
+    def _worker_states_with_thread_diagnostics(self, task_id: str, worker_states: list[dict]) -> list[dict]:
+        threads = self._background_worker_threads.get(task_id, {})
+        rows: list[dict] = []
+        for state in worker_states:
+            row = dict(state)
+            thread = threads.get(row.get("worker_id"))
+            row["thread_alive"] = thread.is_alive() if thread is not None else None
+            row["thread_name"] = getattr(thread, "name", None) if thread is not None else None
+            rows.append(row)
+        return rows
 
     def _start_jump_tunnel(self, task_id: str, node: TargetNodeConfig) -> JumpTunnel | None:
         if not node.jump_host:

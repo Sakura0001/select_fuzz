@@ -50,6 +50,7 @@ class WorkerRuntimeState:
     sql_total: int = 0
     stalled_total: int = 0
     needs_reconnect: bool = False
+    last_connection_close_reason: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -64,6 +65,7 @@ class WorkerRuntimeState:
             "sql_total": self.sql_total,
             "stalled_total": self.stalled_total,
             "needs_reconnect": self.needs_reconnect,
+            "last_connection_close_reason": self.last_connection_close_reason,
         }
 
 
@@ -222,7 +224,7 @@ class FuzzTask:
             self._write_metrics()
 
     def stop(self) -> None:
-        self._close_worker_connections()
+        self._close_worker_connections("停止任务")
         with self._lock:
             self._set_status_locked(TaskStatus.STOPPED)
             self._set_all_worker_states_locked("已停止")
@@ -250,7 +252,7 @@ class FuzzTask:
 
     def fail(self, exc: Exception, phase: Optional[str] = None) -> None:
         self._mark_failed(exc, phase)
-        self._close_worker_connections()
+        self._close_worker_connections("任务失败")
 
     @property
     def is_terminal(self) -> bool:
@@ -260,7 +262,7 @@ class FuzzTask:
     @property
     def worker_states(self) -> list[dict]:
         with self._lock:
-            return [state.to_dict() for state in self._worker_states]
+            return self._worker_state_dicts_locked()
 
     def snapshot_counts(self) -> dict:
         with self._lock:
@@ -273,7 +275,7 @@ class FuzzTask:
                 "failed_query_total": self.failed_query_total,
                 "ordinary_error_total": self.ordinary_error_total,
                 "lost_connection_total": self.lost_connection_total,
-                "worker_states": [state.to_dict() for state in self._worker_states],
+                "worker_states": self._worker_state_dicts_locked(),
             }
 
     def record_worker_sql_start(
@@ -313,6 +315,7 @@ class FuzzTask:
                 state.last_error = message
                 state.stalled_total += 1
                 state.needs_reconnect = True
+                state.last_connection_close_reason = message
                 self.failed_query_total += 1
                 self.last_error = message
                 if state.current_sql is not None:
@@ -446,7 +449,26 @@ class FuzzTask:
             return None
         return self._worker_states[worker_id]
 
-    def _close_worker_connections(self) -> None:
+    def _worker_state_dicts_locked(self) -> list[dict]:
+        rows: list[dict] = []
+        for worker, state in zip(self._workers, self._worker_states):
+            row = state.to_dict()
+            row.update(self._connection_diagnostics(worker.db))
+            rows.append(row)
+        return rows
+
+    def _connection_diagnostics(self, db: DatabaseClient) -> dict:
+        diagnostics = getattr(db, "connection_diagnostics", None)
+        if callable(diagnostics):
+            return diagnostics()
+        if hasattr(db, "connected"):
+            return {"connection_open": bool(getattr(db, "connected"))}
+        return {}
+
+    def _close_worker_connections(self, reason: str = "关闭 worker 连接") -> None:
+        with self._lock:
+            for state in self._worker_states:
+                state.last_connection_close_reason = reason
         for worker in list(self._workers):
             worker.db.close()
 

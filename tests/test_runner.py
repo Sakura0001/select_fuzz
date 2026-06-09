@@ -706,6 +706,60 @@ def test_看门狗中断长_sql_会记录失败日志和任务告警(tmp_path: P
     assert "SELECT SLEEP(999)" in failed_sql
 
 
+def test_worker_状态包含连接诊断和关闭原因(tmp_path: Path) -> None:
+    class DiagnosticDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_count = 0
+            self.close_count = 0
+            self.connection_id = 4101
+
+        def connect(self) -> None:
+            super().connect()
+            self.connect_count += 1
+
+        def close(self) -> None:
+            super().close()
+            self.close_count += 1
+
+        def connection_diagnostics(self) -> dict:
+            return {
+                "connection_open": self.connected,
+                "connection_id": self.connection_id if self.connected else None,
+                "connection_connect_count": self.connect_count,
+                "connection_close_count": self.close_count,
+            }
+
+    clock = FakeClock()
+    db = DiagnosticDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+
+    running_state = task.worker_states[0]
+    assert running_state["connection_open"] is True
+    assert running_state["connection_id"] == 4101
+    assert running_state["connection_connect_count"] == 1
+    assert running_state["connection_close_count"] == 0
+    assert running_state["last_connection_close_reason"] is None
+
+    task.record_worker_sql_start(0, "SELECT SLEEP(999)", clock())
+    clock.advance(31)
+    task.interrupt_stalled_workers(timeout_seconds=30)
+    stalled_state = task.worker_states[0]
+
+    assert stalled_state["connection_open"] is False
+    assert stalled_state["connection_close_count"] == 1
+    assert "已中断并准备重连" in stalled_state["last_connection_close_reason"]
+
+
 def test_看门狗中断后下一轮会重连并重建临时表(tmp_path: Path) -> None:
     class ReconnectTemporaryDatabase(FakeDatabase):
         def __init__(self) -> None:

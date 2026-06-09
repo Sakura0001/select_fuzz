@@ -410,6 +410,50 @@ def test_创建真实任务支持自定义线程数并为每个_worker_准备临
         assert len([sql for sql in db.executed if sql.startswith("CREATE TEMPORARY TABLE `t2`")]) == 1
 
 
+def test_任务快照展示后台_worker_线程存活状态(tmp_path: Path) -> None:
+    class FakeThread:
+        name = "sql_fuzz-task-1-0"
+
+        def __init__(self, alive: bool) -> None:
+            self.alive = alive
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    base_dir = tmp_path / "sql_base_tables"
+    base_dir.mkdir()
+    (base_dir / "001_base.sql").write_text(
+        "CREATE TABLE base_api (id BIGINT NOT NULL, PRIMARY KEY (id));",
+        encoding="utf-8",
+    )
+    fake_db = ApiFakeDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: fake_db,
+        run_background=False,
+    )
+    client = TestClient(create_app(service))
+    response = client.post(
+        "/api/tasks",
+        json={
+            "node_name": "node-real",
+            "host": "172.18.4.12",
+            "port": 3306,
+            "username": "fuzz",
+            "password": "secret",
+        },
+    )
+    task_id = response.json()["task_id"]
+    service._background_worker_threads[task_id] = {0: FakeThread(alive=False)}
+
+    loaded = client.get(f"/api/tasks/{task_id}").json()
+
+    assert loaded["worker_states"][0]["thread_alive"] is False
+    assert loaded["worker_states"][0]["thread_name"] == "sql_fuzz-task-1-0"
+
+
 def test_真实任务执行后_覆盖接口返回命中次数(tmp_path: Path) -> None:
     base_dir = tmp_path / "sql_base_tables"
     base_dir.mkdir()

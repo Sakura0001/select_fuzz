@@ -184,7 +184,7 @@ body {
 
 .worker-row {
   display: grid;
-  grid-template-columns: 78px 82px 56px 1fr;
+  grid-template-columns: 78px 86px 84px 84px 56px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
   padding: 8px;
@@ -194,7 +194,16 @@ body {
   font-size: 12px;
 }
 
-.worker-row code {
+.worker-diagnostics {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: #b9c6d8;
+}
+
+.worker-message {
+  grid-column: 1 / -1;
   overflow: hidden;
   color: #fca5a5;
   text-overflow: ellipsis;

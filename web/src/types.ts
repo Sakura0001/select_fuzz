@@ -52,6 +52,15 @@ export interface WorkerState {
   last_error?: string | null;
   sql_total: number;
   stalled_total: number;
+  needs_reconnect?: boolean | null;
+  thread_alive?: boolean | null;
+  thread_name?: string | null;
+  connection_open?: boolean | null;
+  connection_id?: number | null;
+  connection_connect_count?: number | null;
+  connection_close_count?: number | null;
+  connection_ping_reconnect_count?: number | null;
+  last_connection_close_reason?: string | null;
 }
 
 export interface CreateTaskPayload {

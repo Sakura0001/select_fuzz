@@ -102,6 +102,36 @@ function stepDescription(task: FuzzTask, phase: string, runningDescription: stri
   return runningDescription;
 }
 
+function workerStateColor(state: string) {
+  if (state === "疑似卡住") {
+    return "error";
+  }
+  if (state === "已暂停" || state === "恢复 worker 会话" || state === "恢复检测") {
+    return "warning";
+  }
+  return "processing";
+}
+
+function threadTag(worker: FuzzTask["worker_states"][number]) {
+  if (worker.thread_alive === true) {
+    return <Tag color="success">线程存活</Tag>;
+  }
+  if (worker.thread_alive === false) {
+    return <Tag color="error">线程退出</Tag>;
+  }
+  return <Tag>线程未知</Tag>;
+}
+
+function connectionTag(worker: FuzzTask["worker_states"][number]) {
+  if (worker.connection_open === true) {
+    return <Tag color="success">连接打开</Tag>;
+  }
+  if (worker.connection_open === false) {
+    return <Tag color="error">连接关闭</Tag>;
+  }
+  return <Tag>连接未知</Tag>;
+}
+
 function TaskCard({
   task,
   onPause,
@@ -118,10 +148,12 @@ function TaskCard({
   const canPause = task.status === "执行 SQL" || task.status === "恢复检测";
   const canResume = task.status === "已暂停";
   const canStop = task.status !== "已停止" && task.status !== "失败";
+  const [activeDetailKeys, setActiveDetailKeys] = useState<string[]>([]);
+  const detailOpen = activeDetailKeys.includes("detail");
   const items = [
     {
-      key: `${task.task_id}-detail`,
-      label: "展开详情",
+      key: "detail",
+      label: detailOpen ? "收起详情" : "展开详情",
       children: (
         <Row gutter={12}>
           <Col span={9}>
@@ -149,9 +181,20 @@ function TaskCard({
                   task.worker_states.map((worker) => (
                     <div className="worker-row" key={worker.worker_id}>
                       <span>worker {worker.worker_id}</span>
-                      <Tag color={worker.state === "疑似卡住" ? "error" : worker.state === "已暂停" ? "warning" : "processing"}>{worker.state}</Tag>
+                      <Tag color={workerStateColor(worker.state)}>{worker.state}</Tag>
+                      {threadTag(worker)}
+                      {connectionTag(worker)}
                       <b>{worker.sql_total} 条</b>
-                      {worker.last_error && <code>{worker.last_error}</code>}
+                      <div className="worker-diagnostics">
+                        <span>连接 ID {worker.connection_id ?? "-"}</span>
+                        <span>连接 {worker.connection_connect_count ?? "-"}</span>
+                        <span>关闭 {worker.connection_close_count ?? "-"}</span>
+                        <span>ping 重连 {worker.connection_ping_reconnect_count ?? "-"}</span>
+                        {worker.needs_reconnect && <Tag color="warning">待重连</Tag>}
+                      </div>
+                      {(worker.last_error || worker.last_connection_close_reason) && (
+                        <code className="worker-message">{worker.last_error ?? worker.last_connection_close_reason}</code>
+                      )}
                     </div>
                   ))
                 )}
@@ -231,7 +274,15 @@ function TaskCard({
           </div>
         </Col>
       </Row>
-      <Collapse ghost items={items} />
+      <Collapse
+        ghost
+        activeKey={activeDetailKeys}
+        onChange={(keys) => {
+          const nextKeys = Array.isArray(keys) ? keys : keys ? [keys] : [];
+          setActiveDetailKeys(nextKeys.map(String));
+        }}
+        items={items}
+      />
     </Card>
   );
 }

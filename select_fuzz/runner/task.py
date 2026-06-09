@@ -45,9 +45,11 @@ class WorkerRuntimeState:
     last_heartbeat: Optional[datetime] = None
     current_sql: Optional[str] = None
     current_sql_started_at: Optional[datetime] = None
+    current_sql_metadata: Optional[dict] = None
     last_error: Optional[str] = None
     sql_total: int = 0
     stalled_total: int = 0
+    needs_reconnect: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -61,6 +63,7 @@ class WorkerRuntimeState:
             "last_error": self.last_error,
             "sql_total": self.sql_total,
             "stalled_total": self.stalled_total,
+            "needs_reconnect": self.needs_reconnect,
         }
 
 
@@ -150,6 +153,8 @@ class FuzzTask:
         if current_status is not TaskStatus.RUNNING:
             return
 
+        if not self._ensure_worker_session(worker_id, worker):
+            return
         self._set_worker_state(worker_id, "生成 SQL")
         try:
             sql = worker.generator.generate(
@@ -162,7 +167,7 @@ class FuzzTask:
         except Exception as exc:
             self.fail(exc, phase=TaskStatus.RUNNING.value)
             return
-        self.record_worker_sql_start(worker_id, sql)
+        self.record_worker_sql_start(worker_id, sql, sql_metadata=sql_metadata)
         try:
             worker.db.execute(sql)
         except Exception as exc:
@@ -271,7 +276,13 @@ class FuzzTask:
                 "worker_states": [state.to_dict() for state in self._worker_states],
             }
 
-    def record_worker_sql_start(self, worker_id: int, sql: str, started_at: Optional[datetime] = None) -> None:
+    def record_worker_sql_start(
+        self,
+        worker_id: int,
+        sql: str,
+        started_at: Optional[datetime] = None,
+        sql_metadata: Optional[dict] = None,
+    ) -> None:
         with self._lock:
             state = self._worker_state(worker_id)
             if state is None:
@@ -280,6 +291,7 @@ class FuzzTask:
             state.state = "执行 SQL"
             state.current_sql = sql
             state.current_sql_started_at = now
+            state.current_sql_metadata = dict(sql_metadata or {})
             state.last_heartbeat = now
             state.last_error = None
 
@@ -288,17 +300,27 @@ class FuzzTask:
             return []
         now = self.clock()
         stalled_workers: list[TaskWorker] = []
+        stalled_records: list[tuple[str, str, dict]] = []
         with self._lock:
             for worker, state in zip(self._workers, self._worker_states):
                 if state.state != "执行 SQL" or state.current_sql_started_at is None:
                     continue
                 if now - state.current_sql_started_at <= timedelta(seconds=timeout_seconds):
                     continue
+                message = f"worker {worker.worker_id} 执行 SQL 超过 {timeout_seconds} 秒，已中断并准备重连"
                 state.state = "疑似卡住"
                 state.last_heartbeat = now
-                state.last_error = f"worker {worker.worker_id} 执行 SQL 超过 {timeout_seconds} 秒，已关闭连接"
+                state.last_error = message
                 state.stalled_total += 1
+                state.needs_reconnect = True
+                self.failed_query_total += 1
+                self.last_error = message
+                if state.current_sql is not None:
+                    stalled_records.append((state.current_sql, message, dict(state.current_sql_metadata or {})))
                 stalled_workers.append(worker)
+            for sql, message, sql_metadata in stalled_records:
+                self._write_sql_log("疑似卡住", sql, message, **sql_metadata)
+                self._write_failed_sql(sql)
         for worker in stalled_workers:
             worker.db.close()
         if stalled_workers:
@@ -363,6 +385,7 @@ class FuzzTask:
             if state != "执行 SQL":
                 worker_state.current_sql = None
                 worker_state.current_sql_started_at = None
+                worker_state.current_sql_metadata = None
 
     def _set_non_executing_worker_states_locked(self, state: str, error: Optional[str] = None) -> None:
         now = self.clock()
@@ -374,6 +397,7 @@ class FuzzTask:
             worker_state.last_error = error
             worker_state.current_sql = None
             worker_state.current_sql_started_at = None
+            worker_state.current_sql_metadata = None
 
     def _set_worker_state(self, worker_id: int, state: str, error: Optional[str] = None) -> None:
         with self._lock:
@@ -386,6 +410,7 @@ class FuzzTask:
             if state != "执行 SQL":
                 worker_state.current_sql = None
                 worker_state.current_sql_started_at = None
+                worker_state.current_sql_metadata = None
 
     def _finish_worker_sql(
         self,
@@ -411,6 +436,7 @@ class FuzzTask:
         worker_state.last_heartbeat = self.clock()
         worker_state.current_sql = None
         worker_state.current_sql_started_at = None
+        worker_state.current_sql_metadata = None
         worker_state.last_error = error
         if increment_sql_total:
             worker_state.sql_total += 1
@@ -445,6 +471,35 @@ class FuzzTask:
             expected_error=expected_error,
         )
         append_jsonl(self._sql_log_path(), record.to_dict())
+
+    def _ensure_worker_session(self, worker_id: int, worker: TaskWorker) -> bool:
+        with self._lock:
+            state = self._worker_state(worker_id)
+            needs_reconnect = bool(state and state.needs_reconnect)
+        if not needs_reconnect:
+            return True
+
+        self._set_worker_state(worker_id, "恢复 worker 会话")
+        try:
+            worker.db.close()
+            worker.db.connect()
+            self._prepare_worker_session(worker.db, load_base_sql_files(self.base_sql_dir))
+        except Exception as exc:
+            self.fail(exc, phase="恢复 worker 会话")
+            return False
+
+        with self._lock:
+            state = self._worker_state(worker_id)
+            if state is not None:
+                state.needs_reconnect = False
+                state.state = "空闲"
+                state.current_sql = None
+                state.current_sql_started_at = None
+                state.current_sql_metadata = None
+                state.last_error = None
+                state.last_heartbeat = self.clock()
+            self._write_metrics()
+        return True
 
     def _generator_sql_metadata(self, generator: SQLGenerator) -> dict:
         return {

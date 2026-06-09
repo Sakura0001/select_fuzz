@@ -675,6 +675,107 @@ def test_看门狗会关闭长时间执行_sql_的_worker_连接(tmp_path: Path)
     assert worker_state["stalled_total"] == 1
 
 
+def test_看门狗中断长_sql_会记录失败日志和任务告警(tmp_path: Path) -> None:
+    clock = FakeClock()
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    task.record_worker_sql_start(0, "SELECT SLEEP(999)", clock())
+    clock.advance(31)
+
+    interrupted = task.interrupt_stalled_workers(timeout_seconds=30)
+
+    log_rows = read_jsonl(tmp_path / "logs" / "2026-06-04" / "task-1.sql.jsonl")
+    failed_sql = (tmp_path / "logs" / "failed_sql" / "2026-06-04" / "task-1.sql").read_text(encoding="utf-8")
+    assert interrupted == [0]
+    assert task.failed_query_total == 1
+    assert task.status is TaskStatus.RUNNING
+    assert task.last_error is not None
+    assert "worker 0 执行 SQL 超过 30 秒" in task.last_error
+    assert log_rows[0]["status"] == "疑似卡住"
+    assert log_rows[0]["sql"] == "SELECT SLEEP(999)"
+    assert "已中断并准备重连" in log_rows[0]["error_message"]
+    assert "SELECT SLEEP(999)" in failed_sql
+
+
+def test_看门狗中断后下一轮会重连并重建临时表(tmp_path: Path) -> None:
+    class ReconnectTemporaryDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_count = 0
+            self.temporary_t2_created = False
+            self.temporary_t2_execute_checks = 0
+
+        def connect(self) -> None:
+            super().connect()
+            self.connect_count += 1
+            self.temporary_t2_created = False
+
+        def close(self) -> None:
+            super().close()
+            self.temporary_t2_created = False
+
+        def execute(self, sql: str) -> None:
+            normalized = sql.strip().upper()
+            if not self.connected:
+                raise RuntimeError("worker 连接未恢复")
+            if normalized.startswith("CREATE TEMPORARY TABLE `T2`"):
+                self.temporary_t2_created = True
+            if (normalized.startswith("SELECT") or normalized.startswith("WITH") or normalized.startswith("(")) and "`T2`" in normalized:
+                if not self.temporary_t2_created:
+                    raise RuntimeError("worker 临时表会话未恢复")
+                self.temporary_t2_execute_checks += 1
+            super().execute(sql)
+
+        def query_scalar(self, sql: str) -> int:
+            if "`t2`" in sql and not self.temporary_t2_created:
+                raise RuntimeError("worker 临时表会话未恢复")
+            return super().query_scalar(sql)
+
+    class FixedTemporaryTableGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+
+        def generate(self, *_args, **_kwargs) -> str:
+            return "SELECT COUNT(*) FROM `t2`"
+
+    clock = FakeClock()
+    db = ReconnectTemporaryDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir_with_temporary_table(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    task._workers[0].generator = FixedTemporaryTableGenerator()
+    task.record_worker_sql_start(0, "SELECT SLEEP(999)", clock())
+    clock.advance(31)
+    task.interrupt_stalled_workers(timeout_seconds=30)
+
+    task.step()
+
+    assert db.connected is True
+    assert db.connect_count == 2
+    assert db.executed.count("USE `select_fuzz`") == 2
+    assert len([sql for sql in db.executed if sql.startswith("CREATE TEMPORARY TABLE `t2`")]) == 2
+    assert db.executed.count("INSERT INTO `t2` (`id`) VALUES (2)") == 2
+    assert db.temporary_t2_execute_checks == 1
+    assert task.success_query_total == 1
+    assert task.failed_query_total == 1
+
+
 def test_暂停不会清空正在执行_sql_的_worker_状态(tmp_path: Path) -> None:
     clock = FakeClock()
     db = FakeDatabase()

@@ -125,6 +125,7 @@ def build_operator_registry() -> OperatorRegistry:
         "DENSE_RANK",
         "JSON_EXTRACT",
         "JSON_OBJECT",
+        "JSON_ARRAY",
         "JSON_ARRAYAGG",
         "HEX",
         "UNHEX",

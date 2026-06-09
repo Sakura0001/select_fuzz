@@ -3,7 +3,7 @@ from pathlib import Path
 
 from select_fuzz.metadata.base_sql import load_base_sql_files
 from select_fuzz.metadata.ddl_parser import parse_create_table
-from select_fuzz.sqlgen.generator import GenerationOptions, SQLGenerator
+from select_fuzz.sqlgen.generator import GenerationOptions, SQLGenerator, TableRef
 from select_fuzz.sqlgen.operators import build_operator_registry
 
 
@@ -107,6 +107,94 @@ def test_mysql_8022_集合运算只生成_union() -> None:
         assert "UNION" in upper
         assert "INTERSECT" not in upper
         assert "EXCEPT" not in upper
+
+
+def test_null_比较会进入普通谓词覆盖() -> None:
+    tables = _base_tables()
+    generator = SQLGenerator(random_seed=202, max_sql_length=8000)
+    null_compare_sql = []
+
+    for _ in range(80):
+        sql = generator.generate(tables, GenerationOptions(null_compare_ratio=1.0, invalid_sql_ratio=0.0))
+        upper = sql.upper()
+        if any(pattern in upper for pattern in ["<=> NULL", "NULL <=>", " = NULL", " <> NULL", " != NULL", " BETWEEN NULL", " IN (NULL"]):
+            null_compare_sql.append(sql)
+
+    assert null_compare_sql
+    assert any("<=> NULL" in sql.upper() or "NULL <=>" in sql.upper() for sql in null_compare_sql)
+
+
+def test_故意不合法_sql_会标记风险分类() -> None:
+    generator = SQLGenerator(random_seed=303, max_sql_length=8000)
+
+    sql = generator.generate(
+        _base_tables(),
+        GenerationOptions(invalid_sql_ratio=1.0, null_compare_ratio=0.0, risky_expr_ratio=0.0),
+    )
+
+    assert sql
+    assert generator.last_sql_validity == "故意不合法"
+    assert generator.last_expected_error is True
+    assert "invalid_function_arity" in generator.last_risk_tags
+
+
+def test_null_风险比较不会标记为预期错误() -> None:
+    tables = _base_tables()
+    generator = SQLGenerator(random_seed=505, max_sql_length=8000)
+
+    for _ in range(80):
+        generator.generate(
+            tables,
+            GenerationOptions(null_compare_ratio=1.0, invalid_sql_ratio=0.0, risky_expr_ratio=0.0),
+        )
+        if "null_compare" in generator.last_risk_tags:
+            assert generator.last_sql_validity == "风险"
+            assert generator.last_expected_error is False
+            return
+
+    raise AssertionError("未生成 NULL 风险比较")
+
+
+def test_风险表达式比例为_1_时不会递归失败() -> None:
+    generator = SQLGenerator(random_seed=606, max_sql_length=8000)
+
+    for _ in range(20):
+        sql = generator.generate(
+            _base_tables(),
+            GenerationOptions(invalid_sql_ratio=0.0, null_compare_ratio=0.0, risky_expr_ratio=1.0),
+        )
+        assert sql
+
+
+def test_抽中故意不合法_sql_时不会被空_where_吞掉() -> None:
+    tables = _base_tables()
+    generator = SQLGenerator(random_seed=707, max_sql_length=8000)
+    generator._active_options = GenerationOptions(invalid_sql_ratio=0.03, null_compare_ratio=0.0)
+    generator._reset_attempt()
+    generator._attempt_should_generate_invalid = True
+    generator.random.random = lambda: 0.0
+
+    where_clause = generator._where_clause([TableRef(table=tables[0], alias="t0")], tables, depth=1, require_subquery=False)
+
+    assert "JSON_EXTRACT(JSON_OBJECT('k', 'v'))" in where_clause
+    assert generator._attempt_should_generate_invalid is False
+
+
+def test_mysql_8022_扩展语法会被随机覆盖() -> None:
+    tables = _base_tables()
+    generator = SQLGenerator(random_seed=404, max_sql_length=8000)
+
+    for _ in range(1200):
+        generator.generate(tables)
+
+    assert "RANK" in generator.coverage_counts
+    assert "DENSE_RANK" in generator.coverage_counts
+    assert "DERIVED_TABLE" in generator.coverage_counts
+    assert "VALUES" in generator.coverage_counts
+    assert "MEMBER OF" in generator.coverage_counts
+    assert "JSON_ARRAYAGG" in generator.coverage_counts
+    assert "IF" in generator.coverage_counts
+    assert "~" in generator.coverage_counts
 
 
 def test_sql_长度保护会回退到简单查询() -> None:

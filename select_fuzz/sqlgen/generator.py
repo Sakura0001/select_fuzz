@@ -9,6 +9,11 @@ from select_fuzz.metadata.models import ColumnMetadata, ColumnTypeFamily, Foreig
 from .operators import build_operator_registry
 
 
+SQL_VALIDITY_VALID = "合法"
+SQL_VALIDITY_RISKY = "风险"
+SQL_VALIDITY_INTENTIONALLY_INVALID = "故意不合法"
+
+
 @dataclass(frozen=True)
 class GenerationOptions:
     require_cte: bool = False
@@ -18,6 +23,9 @@ class GenerationOptions:
     require_subquery: bool = False
     require_window: bool = False
     require_locking: bool = False
+    invalid_sql_ratio: float = 0.03
+    null_compare_ratio: float = 0.08
+    risky_expr_ratio: float = 0.08
 
 
 @dataclass(frozen=True)
@@ -41,18 +49,25 @@ class SQLGenerator:
         self.coverage_counts: Dict[str, int] = {}
         self.recent_hits: List[str] = []
         self._attempt_hits: Set[str] = set()
+        self._attempt_risk_tags: Set[str] = set()
+        self._attempt_sql_validity = SQL_VALIDITY_VALID
+        self._attempt_should_generate_invalid = False
+        self.last_sql_validity = SQL_VALIDITY_VALID
+        self.last_risk_tags: List[str] = []
+        self.last_expected_error = False
+        self._active_options = GenerationOptions()
         self._query_depth_limit = 3
         self._expr_depth_limit = 3
-        self._risk_probability = 0.08
 
     def generate(self, tables: Sequence[TableMetadata], options: GenerationOptions | None = None) -> str:
         if not tables:
             raise ValueError("至少需要一张表元数据才能生成 SQL")
         options = options or GenerationOptions()
+        self._active_options = options
         table_list = list(tables)
 
         for _ in range(8):
-            self._attempt_hits = set()
+            self._reset_attempt()
             self._query_depth_limit = self.random.randint(2, 7)
             self._expr_depth_limit = self.random.randint(2, 6)
             sql = self._generate_query_expression(table_list, options, self._query_depth_limit)
@@ -60,7 +75,7 @@ class SQLGenerator:
                 self._commit_hits()
                 return sql
 
-        self._attempt_hits = set()
+        self._reset_attempt()
         sql = self._fallback_query(table_list[0])
         self._commit_hits()
         return sql
@@ -72,7 +87,16 @@ class SQLGenerator:
         if use_set_operation:
             op = self.random.choice(["UNION", "UNION ALL"])
             self._hit(op.split()[0])
-            right = self._select_block(tables, GenerationOptions(), max(0, depth - 1), projection_count=projection_count, allow_locking=False)
+            if self.random.random() < 0.12:
+                right = self._values_query(projection_count or 2)
+            else:
+                right = self._select_block(
+                    tables,
+                    GenerationOptions(),
+                    max(0, depth - 1),
+                    projection_count=projection_count,
+                    allow_locking=False,
+                )
             body = f"({body}) {op} ({right})"
 
         if options.require_cte or (depth > 1 and self.random.random() < 0.22):
@@ -150,7 +174,7 @@ class SQLGenerator:
             if vector_tables and not self._first_column(chosen[0], ColumnTypeFamily.VECTOR):
                 chosen[0] = self.random.choice(vector_tables)
         refs = [TableRef(table=chosen[0], alias="t0")]
-        sql = f"FROM {_q(chosen[0].name)} AS t0"
+        sql = f"FROM {self._table_source(chosen[0], 't0')}"
 
         for index, table in enumerate(chosen[1:], start=1):
             ref = TableRef(table=table, alias=f"t{index}")
@@ -168,24 +192,24 @@ class SQLGenerator:
         join_kind = join_kind[0]
         if join_kind == "CROSS JOIN":
             self._hit("CROSS JOIN")
-            return f"CROSS JOIN {_q(new_ref.table.name)} AS {new_ref.alias}"
+            return f"CROSS JOIN {self._table_source(new_ref.table, new_ref.alias)}"
         if join_kind == "NATURAL JOIN":
             self._hit("NATURAL JOIN")
-            return f"NATURAL JOIN {_q(new_ref.table.name)} AS {new_ref.alias}"
+            return f"NATURAL JOIN {self._table_source(new_ref.table, new_ref.alias)}"
         if join_kind == "STRAIGHT_JOIN":
             self._hit("STRAIGHT_JOIN")
-            return f"STRAIGHT_JOIN {_q(new_ref.table.name)} AS {new_ref.alias} ON {self._join_condition(existing, new_ref)}"
+            return f"STRAIGHT_JOIN {self._table_source(new_ref.table, new_ref.alias)} ON {self._join_condition(existing, new_ref)}"
         if join_kind == "JOIN ... USING":
             common = self._common_columns(existing[-1].table, new_ref.table)
             if common:
                 self._hit("JOIN ... USING")
                 columns = ", ".join(_q(name) for name in self.random.sample(common, min(len(common), self.random.randint(1, 3))))
-                return f"JOIN {_q(new_ref.table.name)} AS {new_ref.alias} USING ({columns})"
+                return f"JOIN {self._table_source(new_ref.table, new_ref.alias)} USING ({columns})"
         if join_kind in {"INNER JOIN", "LEFT JOIN", "RIGHT JOIN"}:
             self._hit(join_kind)
-            return f"{join_kind} {_q(new_ref.table.name)} AS {new_ref.alias} ON {self._join_condition(existing, new_ref)}"
+            return f"{join_kind} {self._table_source(new_ref.table, new_ref.alias)} ON {self._join_condition(existing, new_ref)}"
         self._hit("JOIN ... ON")
-        return f"JOIN {_q(new_ref.table.name)} AS {new_ref.alias} ON {self._join_condition(existing, new_ref)}"
+        return f"JOIN {self._table_source(new_ref.table, new_ref.alias)} ON {self._join_condition(existing, new_ref)}"
 
     def _join_condition(self, existing: List[TableRef], new_ref: TableRef) -> str:
         fk_condition = self._foreign_key_condition(existing, new_ref)
@@ -257,8 +281,9 @@ class SQLGenerator:
                 orderable_aliases.append(f"c{index}")
 
         if window_enabled:
-            self._hit("ROW_NUMBER")
-            items.append("ROW_NUMBER() OVER w AS rn")
+            function = self.random.choice(["ROW_NUMBER", "RANK", "DENSE_RANK"])
+            self._hit(function)
+            items.append(f"{function}() OVER w AS rn")
             orderable_aliases.append("rn")
 
         if require_vector:
@@ -278,7 +303,13 @@ class SQLGenerator:
         return ", ".join(items), group_columns, orderable_aliases
 
     def _where_clause(self, refs: List[TableRef], tables: List[TableMetadata], depth: int, require_subquery: bool) -> str:
-        if not require_subquery and self.random.random() < 0.18:
+        force_predicate = (
+            require_subquery
+            or self._attempt_should_generate_invalid
+            or self._active_options.invalid_sql_ratio >= 1.0
+            or self._active_options.null_compare_ratio >= 1.0
+        )
+        if not force_predicate and self.random.random() < 0.18:
             return ""
         predicate = self._predicate_expr(refs, tables, max(1, depth - 1), require_subquery)
         self._hit("WHERE")
@@ -355,6 +386,11 @@ class SQLGenerator:
         return f"WITH cte_1 AS ({cte_query}) {body}"
 
     def _predicate_expr(self, refs: List[TableRef], tables: List[TableMetadata], depth: int, require_subquery: bool = False) -> str:
+        if self._attempt_should_generate_invalid:
+            self._attempt_should_generate_invalid = False
+            return self._intentionally_invalid_predicate_expr()
+        if self._chance(self._active_options.null_compare_ratio):
+            return self._null_compare_predicate_expr(refs)
         if depth > 0 and (require_subquery or self.random.random() < 0.18):
             require_subquery = False
             kind = self.random.choice(["EXISTS", "IN", "SCALAR"])
@@ -399,6 +435,8 @@ class SQLGenerator:
                 rhs = "'[a-z0-9_]+'"
             return f"{column.sql} {op} {rhs}"
         if column.family is ColumnTypeFamily.JSON:
+            if self.random.random() < 0.2:
+                return self._json_member_predicate_expr(column)
             self._hit("JSON_EXTRACT")
             return f"JSON_EXTRACT({column.sql}, '$.k') IS NOT NULL"
         if column.family is ColumnTypeFamily.SPATIAL:
@@ -407,8 +445,61 @@ class SQLGenerator:
         self._hit("IS NULL")
         return f"{column.sql} IS NOT NULL"
 
+    def _null_compare_predicate_expr(self, refs: List[TableRef]) -> str:
+        column = self._column_expr(
+            refs,
+            preferred={
+                ColumnTypeFamily.INTEGER,
+                ColumnTypeFamily.DECIMAL,
+                ColumnTypeFamily.FLOAT,
+                ColumnTypeFamily.BIT,
+                ColumnTypeFamily.STRING,
+                ColumnTypeFamily.ENUM,
+                ColumnTypeFamily.SET,
+                ColumnTypeFamily.DATETIME,
+            },
+        )
+        choice = self.random.choice(["IS NULL", "IS NOT NULL", "<=> NULL", "NULL <=>", "= NULL", "<> NULL", "BETWEEN NULL", "IN NULL"])
+        if choice == "IS NULL":
+            self._hit("IS NULL")
+            return f"{column.sql} IS NULL"
+        if choice == "IS NOT NULL":
+            self._hit("IS NULL")
+            return f"{column.sql} IS NOT NULL"
+        if choice == "<=> NULL":
+            self._hit("<=>")
+            return f"{column.sql} <=> NULL"
+        if choice == "NULL <=>":
+            self._hit("<=>")
+            return f"NULL <=> {column.sql}"
+        self._mark_risk("null_compare")
+        if choice == "= NULL":
+            self._hit("=")
+            return f"{column.sql} = NULL"
+        if choice == "<> NULL":
+            self._hit("<>")
+            return f"{column.sql} <> NULL"
+        if choice == "BETWEEN NULL":
+            self._hit("BETWEEN")
+            return f"{column.sql} BETWEEN NULL AND {self._literal_expr(column.family).sql}"
+        self._hit("IN")
+        return f"{column.sql} IN (NULL, {self._literal_expr(column.family).sql})"
+
+    def _intentionally_invalid_predicate_expr(self) -> str:
+        self._mark_risk("invalid_function_arity", intentionally_invalid=True)
+        self._hit("JSON_EXTRACT")
+        self._hit("JSON_OBJECT")
+        return "JSON_EXTRACT(JSON_OBJECT('k', 'v')) IS NULL"
+
+    def _json_member_predicate_expr(self, column: Expr) -> str:
+        self._hit("MEMBER OF")
+        self._hit("JSON_OBJECT")
+        self._hit("JSON_ARRAY")
+        return f"JSON_OBJECT('k', 'member') MEMBER OF(JSON_ARRAY({column.sql}, JSON_OBJECT('k', 'member')))"
+
     def _random_expr(self, refs: List[TableRef], depth: int) -> Expr:
-        if self.random.random() < self._risk_probability:
+        if depth > 0 and self._chance(self._active_options.risky_expr_ratio):
+            self._mark_risk("type_mismatch")
             return self._risky_expr(refs, depth)
         families = [
             ColumnTypeFamily.INTEGER,
@@ -440,6 +531,9 @@ class SQLGenerator:
     def _numeric_expr(self, refs: List[TableRef], depth: int) -> Expr:
         if depth <= 0 or self.random.random() < 0.45:
             return self._column_or_literal(refs, {ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT, ColumnTypeFamily.BIT})
+        if self.random.random() < 0.08:
+            self._hit("~")
+            return Expr(f"(~{self._numeric_expr(refs, depth - 1).sql})", ColumnTypeFamily.INTEGER)
         op = self.random.choice(["+", "-", "*", "/", "DIV", "MOD", "&", "|", "^", "<<", ">>"])
         self._hit(op)
         left = self._numeric_expr(refs, depth - 1).sql
@@ -454,7 +548,7 @@ class SQLGenerator:
     def _string_expr(self, refs: List[TableRef], depth: int) -> Expr:
         if depth <= 0 or self.random.random() < 0.42:
             return self._column_or_literal(refs, {ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET})
-        choice = self.random.choice(["CONCAT", "SUBSTRING", "LOWER", "CAST", "CASE WHEN", "IFNULL"])
+        choice = self.random.choice(["CONCAT", "SUBSTRING", "LOWER", "CAST", "CASE WHEN", "IF", "IFNULL"])
         self._hit(choice)
         if choice == "CONCAT":
             return Expr(f"CONCAT({self._string_expr(refs, depth - 1).sql}, {self._string_literal()})", ColumnTypeFamily.STRING)
@@ -464,6 +558,11 @@ class SQLGenerator:
             return Expr(f"LOWER({self._string_expr(refs, depth - 1).sql})", ColumnTypeFamily.STRING)
         if choice == "IFNULL":
             return Expr(f"IFNULL({self._string_expr(refs, depth - 1).sql}, {self._string_literal()})", ColumnTypeFamily.STRING)
+        if choice == "IF":
+            return Expr(
+                f"IF({self._numeric_expr(refs, 1).sql} > 0, {self._string_literal()}, {self._string_literal()})",
+                ColumnTypeFamily.STRING,
+            )
         if choice == "CASE WHEN":
             return Expr(f"CASE WHEN {self._numeric_expr(refs, 1).sql} > 0 THEN {self._string_literal()} ELSE {self._string_literal()} END", ColumnTypeFamily.STRING)
         self._hit("CAST")
@@ -560,13 +659,15 @@ class SQLGenerator:
 
     def _aggregate_expr(self, refs: List[TableRef]) -> str:
         column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT})
-        function = self.random.choice(["COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT"])
+        function = self.random.choice(["COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT", "JSON_ARRAYAGG"])
         self._hit(function)
         if function == "COUNT":
             return "COUNT(*)"
         if function == "GROUP_CONCAT":
             text = self._column_expr(refs, preferred={ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET}).sql
             return f"GROUP_CONCAT({text})"
+        if function == "JSON_ARRAYAGG":
+            return f"JSON_ARRAYAGG({self._column_expr(refs).sql})"
         return f"{function}({column.sql})"
 
     def _aggregate_expr_from_name(self) -> str:
@@ -632,6 +733,19 @@ class SQLGenerator:
         column = self._first_column(table, ColumnTypeFamily.INTEGER) or next(iter(table.columns.values()))
         return f"SELECT COALESCE(MAX(sq.{_q(column.name)}), 0) FROM {_q(table.name)} AS sq"
 
+    def _values_query(self, projection_count: int) -> str:
+        self._hit("VALUES")
+        rows: List[str] = []
+        for row_index in range(self.random_int(1, 3)):
+            values = []
+            for column_index in range(projection_count):
+                if column_index % 2 == 0:
+                    values.append(str(row_index + column_index + 1))
+                else:
+                    values.append(self._string_literal())
+            rows.append("ROW(" + ", ".join(values) + ")")
+        return "VALUES " + ", ".join(rows)
+
     def _fallback_query(self, table: TableMetadata) -> str:
         self._hit("SELECT ALL")
         self._hit("FROM")
@@ -655,6 +769,12 @@ class SQLGenerator:
     def _permanent_tables(self, tables: List[TableMetadata]) -> List[TableMetadata]:
         permanent = [table for table in tables if not table.is_temporary]
         return permanent or tables
+
+    def _table_source(self, table: TableMetadata, alias: str) -> str:
+        if not table.is_temporary and self.random.random() < 0.08:
+            self._hit("DERIVED_TABLE")
+            return f"(SELECT * FROM {_q(table.name)} LIMIT {self.random_int(1, 50)}) AS {alias}"
+        return f"{_q(table.name)} AS {alias}"
 
     def _first_column(self, table: TableMetadata, family: ColumnTypeFamily) -> ColumnMetadata | None:
         for column in table.columns.values():
@@ -704,6 +824,22 @@ class SQLGenerator:
     def random_int(self, start: int, end: int) -> int:
         return self.random.randint(start, end)
 
+    def _chance(self, ratio: float) -> bool:
+        return self.random.random() < max(0.0, min(1.0, ratio))
+
+    def _mark_risk(self, tag: str, intentionally_invalid: bool = False) -> None:
+        self._attempt_risk_tags.add(tag)
+        if intentionally_invalid:
+            self._attempt_sql_validity = SQL_VALIDITY_INTENTIONALLY_INVALID
+        elif self._attempt_sql_validity == SQL_VALIDITY_VALID:
+            self._attempt_sql_validity = SQL_VALIDITY_RISKY
+
+    def _reset_attempt(self) -> None:
+        self._attempt_hits = set()
+        self._attempt_risk_tags = set()
+        self._attempt_sql_validity = SQL_VALIDITY_VALID
+        self._attempt_should_generate_invalid = self._chance(self._active_options.invalid_sql_ratio)
+
     def _hit(self, name: str) -> None:
         if self.registry.has(name):
             self._attempt_hits.add(name)
@@ -711,6 +847,9 @@ class SQLGenerator:
     def _commit_hits(self) -> None:
         self.coverage_hits = set(self._attempt_hits)
         self.recent_hits = sorted(self._attempt_hits)
+        self.last_sql_validity = self._attempt_sql_validity
+        self.last_risk_tags = sorted(self._attempt_risk_tags)
+        self.last_expected_error = self.last_sql_validity == SQL_VALIDITY_INTENTIONALLY_INVALID
         for name in self._attempt_hits:
             self.coverage_counts[name] = self.coverage_counts.get(name, 0) + 1
 

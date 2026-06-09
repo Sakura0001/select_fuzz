@@ -27,6 +27,28 @@ def test_sql_日志按_jsonl_写入并保留中文状态(tmp_path: Path) -> None
     assert rows[0]["sql"] == "SELECT 1"
 
 
+def test_sql_日志可写入生成合法性和风险标签(tmp_path: Path) -> None:
+    path = tmp_path / "sql.jsonl"
+    record = SqlLogRecord(
+        timestamp=datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc),
+        task_id="task-1",
+        node_name="node-a",
+        status="普通错误",
+        sql="SELECT JSON_EXTRACT('{}')",
+        error_message="参数数量错误",
+        sql_validity="故意不合法",
+        risk_tags=["invalid_function_arity"],
+        expected_error=True,
+    )
+
+    append_jsonl(path, record.to_dict())
+
+    rows = read_jsonl(path)
+    assert rows[0]["sql_validity"] == "故意不合法"
+    assert rows[0]["risk_tags"] == ["invalid_function_arity"]
+    assert rows[0]["expected_error"] is True
+
+
 def test_lost_connection_错误识别() -> None:
     assert is_lost_connection_error(Exception("Lost connection to MySQL server during query"))
     assert is_lost_connection_error(Exception("MySQL server has gone away"))

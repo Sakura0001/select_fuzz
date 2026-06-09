@@ -15,6 +15,9 @@ class SqlLogRecord:
     status: str
     sql: str
     error_message: Optional[str] = None
+    sql_validity: Optional[str] = None
+    risk_tags: Optional[List[str]] = None
+    expected_error: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, Any]:
         row = {
@@ -26,6 +29,12 @@ class SqlLogRecord:
         }
         if self.error_message is not None:
             row["error_message"] = self.error_message
+        if self.sql_validity is not None:
+            row["sql_validity"] = self.sql_validity
+        if self.risk_tags is not None:
+            row["risk_tags"] = self.risk_tags
+        if self.expected_error is not None:
+            row["expected_error"] = self.expected_error
         return row
 
 

@@ -59,6 +59,8 @@ npm run dev -- --port 5173
 
 查询生成器按 MySQL 8.0.22 兼容范围生成集合运算，只生成 `UNION` 和 `UNION ALL`，不生成 `INTERSECT`、`INTERSECT ALL`、`EXCEPT` 或 `EXCEPT ALL`。
 
+SQL 生成策略全部由后台默认配置控制，前端不提供语法比例配置入口。默认按 MySQL 8.0.22 生成合法 SQL，同时保留小比例探索错误：`invalid_sql_ratio=0.03` 用于生成故意不合法或参数错误 SQL，`null_compare_ratio=0.08` 用于强化 `NULL` 比较覆盖，`risky_expr_ratio=0.08` 用于跨类型风险表达式。后台 SQL JSONL 日志会写入 `sql_validity`、`risk_tags` 和 `expected_error`，用于区分合法 SQL、风险 SQL 和故意不合法 SQL。
+
 ## lost connection 规则
 
 - 同一节点 10 分钟内只记录第一次 lost connection 事件。

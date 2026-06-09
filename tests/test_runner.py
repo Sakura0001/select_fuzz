@@ -396,6 +396,40 @@ def test_普通执行失败会把原始_sql_写入失败目录(tmp_path: Path) -
     assert "\"status\"" not in content
 
 
+def test_sql_日志记录生成风险分类和预期错误(tmp_path: Path) -> None:
+    class IntentionallyInvalidGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+        last_sql_validity = "故意不合法"
+        last_risk_tags = ["invalid_function_arity"]
+        last_expected_error = True
+
+        def generate(self, *_args, **_kwargs) -> str:
+            return "SELECT JSON_EXTRACT('{}')"
+
+    db = FakeDatabase()
+    db.fail_next_ordinary_error = True
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    task._workers[0].generator = IntentionallyInvalidGenerator()
+
+    task.step()
+
+    log_rows = read_jsonl(tmp_path / "logs" / "2026-06-04" / "task-1.sql.jsonl")
+    assert log_rows[0]["status"] == "普通错误"
+    assert log_rows[0]["sql_validity"] == "故意不合法"
+    assert log_rows[0]["risk_tags"] == ["invalid_function_arity"]
+    assert log_rows[0]["expected_error"] is True
+
+
 def test_lost_connection_后每分钟检测恢复且不重建永久表(tmp_path: Path) -> None:
     clock = FakeClock()
     db = FakeDatabase()

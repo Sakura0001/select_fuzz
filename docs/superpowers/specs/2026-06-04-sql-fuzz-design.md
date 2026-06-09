@@ -278,6 +278,7 @@ SQL 生成器采用类型感知递归 AST。
 6. 随机注入集合操作、子查询、派生表和窗口函数。
 7. 渲染为 SQL 字符串。
 8. 记录本条 SQL 命中的算子覆盖项。
+9. 按后台默认比例标记 SQL 合法性：默认 `invalid_sql_ratio=0.03`、`null_compare_ratio=0.08`、`risky_expr_ratio=0.08`，生成结果写入 `sql_validity`、`risk_tags` 和 `expected_error`，前端不负责配置这些比例。
 
 ### 随机深度策略
 

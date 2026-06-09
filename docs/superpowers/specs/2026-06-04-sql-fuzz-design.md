@@ -129,10 +129,7 @@ PolarDB 向量列遵守向量扩展限制：向量列不作为主键、外键、
 - `LOCK IN SHARE MODE`
 - `UNION`
 - `UNION ALL`
-- `INTERSECT`
-- `INTERSECT ALL`
-- `EXCEPT`
-- `EXCEPT ALL`
+- 当前按 MySQL 8.0.22 兼容范围不生成 `INTERSECT`、`INTERSECT ALL`、`EXCEPT`、`EXCEPT ALL`
 - 子查询
 - 相关子查询
 - 派生表

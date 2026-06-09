@@ -70,7 +70,7 @@ class SQLGenerator:
         projection_count = 3 if use_set_operation and options.require_window else 2 if use_set_operation else None
         body = self._select_block(tables, options, depth, projection_count=projection_count)
         if use_set_operation:
-            op = self.random.choice(["UNION", "UNION ALL", "INTERSECT", "EXCEPT"])
+            op = self.random.choice(["UNION", "UNION ALL"])
             self._hit(op.split()[0])
             right = self._select_block(tables, GenerationOptions(), max(0, depth - 1), projection_count=projection_count, allow_locking=False)
             body = f"({body}) {op} ({right})"

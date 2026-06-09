@@ -57,6 +57,8 @@ npm run dev -- --port 5173
 
 向量查询按当前内网环境能力生成：`VEC_FROMTEXT`、`VEC_TOTEXT`、`VEC_DISTANCE_COSINE(v1, v2)`、`VEC_DISTANCE_EUCLIDEAN(v1, v2)`。生成器不会使用 `STRING_TO_VECTOR`、`VECTOR_TO_STRING`、`DISTANCE(..., metric)` 或 `DOT` 距离，也不会把向量列用于主键、外键、唯一键、分区键、普通跨类型比较、通用分组或普通排序表达式。运行时默认不强制每条查询包含向量表达式，向量只作为小比例随机覆盖；测试可以通过 `GenerationOptions(require_vector=True)` 强制覆盖向量生成分支。
 
+查询生成器按 MySQL 8.0.22 兼容范围生成集合运算，只生成 `UNION` 和 `UNION ALL`，不生成 `INTERSECT`、`INTERSECT ALL`、`EXCEPT` 或 `EXCEPT ALL`。
+
 ## lost connection 规则
 
 - 同一节点 10 分钟内只记录第一次 lost connection 事件。

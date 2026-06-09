@@ -53,6 +53,8 @@ def test_算子覆盖矩阵包含_select_核心结构和向量算子() -> None:
     assert registry.has("JOIN ... ON")
     assert registry.has("LEFT JOIN")
     assert registry.has("UNION")
+    assert not registry.has("INTERSECT")
+    assert not registry.has("EXCEPT")
     assert registry.has("WINDOW")
     assert registry.has("FOR UPDATE")
     assert registry.has("CASE WHEN")
@@ -84,9 +86,27 @@ def test_生成器记录命中的覆盖项() -> None:
 
     sql = generator.generate(_tables(), GenerationOptions(require_set_operation=True))
 
-    assert "UNION" in sql or "INTERSECT" in sql or "EXCEPT" in sql
+    assert "UNION" in sql
+    assert "INTERSECT" not in sql
+    assert "EXCEPT" not in sql
     assert generator.coverage_hits
-    assert any(hit in generator.coverage_hits for hit in {"UNION", "INTERSECT", "EXCEPT"})
+    assert "UNION" in generator.coverage_hits
+    assert "INTERSECT" not in generator.coverage_hits
+    assert "EXCEPT" not in generator.coverage_hits
+
+
+def test_mysql_8022_集合运算只生成_union() -> None:
+    tables = _base_tables()
+
+    for seed in range(40):
+        generator = SQLGenerator(random_seed=seed, max_sql_length=8000)
+
+        sql = generator.generate(tables, GenerationOptions(require_set_operation=True))
+        upper = sql.upper()
+
+        assert "UNION" in upper
+        assert "INTERSECT" not in upper
+        assert "EXCEPT" not in upper
 
 
 def test_sql_长度保护会回退到简单查询() -> None:
@@ -149,7 +169,9 @@ def test_强制生成_select_核心结构() -> None:
     upper = sql.upper()
     assert "WITH" in upper
     assert "JOIN" in upper
-    assert any(operator in upper for operator in ["UNION", "INTERSECT", "EXCEPT"])
+    assert "UNION" in upper
+    assert "INTERSECT" not in upper
+    assert "EXCEPT" not in upper
     assert " OVER " in upper
     assert " WINDOW " in upper
     assert any(lock in upper for lock in ["FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE"])

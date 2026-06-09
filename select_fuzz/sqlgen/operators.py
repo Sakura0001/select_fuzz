@@ -46,8 +46,6 @@ def build_operator_registry() -> OperatorRegistry:
         "FOR UPDATE",
         "FOR SHARE",
         "UNION",
-        "INTERSECT",
-        "EXCEPT",
         "SUBQUERY",
         "SCALAR SUBQUERY",
         "EXISTS SUBQUERY",

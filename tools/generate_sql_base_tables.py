@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import argparse
+import random
 from pathlib import Path
 
 
@@ -11,6 +13,10 @@ OUT_DIR = ROOT / "sql_base_tables"
 TOP_PARTITION_VALUES = list(range(1, 9))
 SUBPARTITION_VALUES = [1, 2]
 TARGET_TOTAL_INDEX_COUNT = 61
+MIN_SEED_ROWS = 1000
+MAX_SEED_ROWS = 2000
+SEED_ROW_RANDOM_SEED = 20260609
+SEED_NUMBER_TABLE = "_select_fuzz_seed_numbers"
 
 
 def table_kind(index: int) -> str:
@@ -43,7 +49,7 @@ def list_partitions() -> str:
     )
 
 
-def partition_clause(index: int) -> str:
+def partition_clause(index: int, include_subpartition: bool = True) -> str:
     if index == 7:
         return f"""PARTITION BY RANGE (`tenant_id`) (
 {range_partitions()}
@@ -59,6 +65,10 @@ def partition_clause(index: int) -> str:
     if index == 10:
         return f"""PARTITION BY LIST COLUMNS (`tenant_id`) (
 {list_partitions()}
+)"""
+    if not include_subpartition:
+        return f"""PARTITION BY RANGE (`tenant_id`) (
+{range_partitions()}
 )"""
 
     subpartition_patterns = [
@@ -93,46 +103,115 @@ SUBPARTITION BY {inner} (`subpart_id`) SUBPARTITIONS 2 (
 )"""
 
 
-def supplemental_index_lines(index: int, target_sql_index_count: int) -> list[str]:
+NORMAL_OR_TEMPORARY_UNIQUE_INDEXES = {
+    "idx_int_col",
+    "idx_bigint_desc",
+    "idx_year_char",
+    "idx_tiny_small_medium",
+    "idx_decimal_float_double",
+    "idx_date_time_mix",
+    "idx_varchar_prefix",
+    "idx_binary_combo",
+    "idx_blob_prefix",
+    "idx_text_prefix",
+    "idx_unsigned_desc",
+    "idx_lower_varchar",
+    "idx_arith_expr",
+    "idx_json_expr",
+    "idx_extra_tenant_int",
+    "idx_extra_subpart_big",
+    "idx_extra_tenant_year_date",
+    "idx_extra_char_varchar",
+    "idx_extra_small_medium_desc",
+    "idx_extra_decimal_desc",
+    "idx_extra_float_double_desc",
+    "idx_extra_datetime_date_desc",
+    "idx_extra_time_timestamp",
+    "idx_extra_varbinary_binary",
+    "idx_extra_tinyblob",
+    "idx_extra_blob_tenant",
+    "idx_extra_mediumblob",
+    "idx_extra_longblob",
+    "idx_extra_tinytext_enum",
+    "idx_extra_text_set",
+    "idx_extra_mediumtext_bit",
+    "idx_extra_longtext_unsigned",
+    "idx_extra_set_unsigned",
+    "idx_extra_bit_decimal",
+    "idx_extra_json_n",
+    "idx_extra_json_k_lower",
+    "idx_extra_time_to_sec",
+    "idx_extra_abs_smallint",
+    "idx_extra_unsigned_coalesce",
+    "idx_extra_concat_code",
+    "idx_extra_date_days",
+    "idx_extra_decimal_round",
+    "idx_extra_float_floor",
+    "idx_extra_double_ceiling",
+}
+
+PARTITION_UNIQUE_INDEXES = {
+    "idx_extra_tenant_int",
+    "idx_extra_tenant_year_date",
+    "idx_extra_blob_tenant",
+}
+
+
+def can_use_unique_index(index: int, index_name: str, include_subpartition: bool = True) -> bool:
+    kind = table_kind(index)
+    short_name = f"idx_{index_name.removeprefix(f'idx_t{index}_')}"
+    if kind in {"normal", "temporary"}:
+        return short_name in NORMAL_OR_TEMPORARY_UNIQUE_INDEXES
+    if kind == "partition" or (kind == "subpartition" and not include_subpartition):
+        return short_name in PARTITION_UNIQUE_INDEXES
+    return False
+
+
+def key_line(index: int, index_name: str, body: str, include_subpartition: bool = True, suffix: str = "") -> str:
+    prefix = "UNIQUE KEY" if can_use_unique_index(index, index_name, include_subpartition) else "KEY"
+    return f"  {prefix} `{index_name}` {body}{suffix}"
+
+
+def supplemental_index_lines(index: int, target_sql_index_count: int, include_subpartition: bool = True) -> list[str]:
     index_lines = [
-        f"  KEY `idx_t{index}_extra_tenant_int` (`tenant_id`,`int_col`)",
-        f"  KEY `idx_t{index}_extra_subpart_big` (`subpart_id`,`bigint_col`)",
-        f"  KEY `idx_t{index}_extra_tenant_year_date` (`tenant_id`,`year_col`,`date_col`)",
-        f"  KEY `idx_t{index}_extra_char_varchar` (`char_col`,`varchar_col`(32))",
-        f"  KEY `idx_t{index}_extra_tiny_bool` (`tinyint_col`,`bool_col`)",
-        f"  KEY `idx_t{index}_extra_small_medium_desc` (`smallint_col` DESC,`mediumint_col`)",
-        f"  KEY `idx_t{index}_extra_decimal_desc` (`decimal_col` DESC)",
-        f"  KEY `idx_t{index}_extra_float_double_desc` (`float_col`,`double_col` DESC)",
-        f"  KEY `idx_t{index}_extra_datetime_date_desc` (`datetime_col`,`date_col` DESC)",
-        f"  KEY `idx_t{index}_extra_time_timestamp` (`time_col`,`timestamp_col`)",
-        f"  KEY `idx_t{index}_extra_varbinary_binary` (`varbinary_col`(32),`binary_col`)",
-        f"  KEY `idx_t{index}_extra_tinyblob` (`tinyblob_col`(8))",
-        f"  KEY `idx_t{index}_extra_blob_tenant` (`blob_col`(16),`tenant_id`)",
-        f"  KEY `idx_t{index}_extra_mediumblob` (`mediumblob_col`(16))",
-        f"  KEY `idx_t{index}_extra_longblob` (`longblob_col`(16))",
-        f"  KEY `idx_t{index}_extra_tinytext_enum` (`tinytext_col`(12),`enum_col`)",
-        f"  KEY `idx_t{index}_extra_text_set` (`text_col`(12),`set_col`)",
-        f"  KEY `idx_t{index}_extra_mediumtext_bit` (`mediumtext_col`(12),`bit_col`)",
-        f"  KEY `idx_t{index}_extra_longtext_unsigned` (`longtext_col`(12),`unsigned_int_col`)",
-        f"  KEY `idx_t{index}_extra_enum_scope` (`enum_col`,`tenant_id`,`subpart_id`)",
-        f"  KEY `idx_t{index}_extra_set_unsigned` (`set_col`,`unsigned_int_col`)",
-        f"  KEY `idx_t{index}_extra_bit_decimal` (`bit_col`,`unsigned_decimal_col`)",
-        f"  KEY `idx_t{index}_extra_parent_chain` (`parent_id_col`,`parent_int_col`,`parent_bigint_col`)",
-        f"  KEY `idx_t{index}_extra_metric_parent_desc` (`metric_parent_tenant_id`,`parent_bigint_col` DESC)",
-        f"  KEY `idx_t{index}_extra_json_n` ((cast(json_extract(`json_col`,_utf8mb4'$.n') as unsigned)))",
-        f"  KEY `idx_t{index}_extra_json_k_lower` ((lower(cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32)))))",
-        f"  KEY `idx_t{index}_extra_dayofweek` ((dayofweek(`date_col`)))",
-        f"  KEY `idx_t{index}_extra_month_datetime` ((month(`datetime_col`)))",
-        f"  KEY `idx_t{index}_extra_time_to_sec` ((time_to_sec(`time_col`)))",
-        f"  KEY `idx_t{index}_extra_abs_smallint` ((abs(`smallint_col`)))",
-        f"  KEY `idx_t{index}_extra_unsigned_coalesce` ((coalesce(`unsigned_int_col`,0)))",
-        f"  KEY `idx_t{index}_extra_concat_code` ((cast(left(concat(`char_col`,`varchar_col`),32) as char(32))))",
-        f"  KEY `idx_t{index}_extra_crc32_varchar` ((crc32(`varchar_col`)))",
-        f"  KEY `idx_t{index}_extra_date_days` ((to_days(`date_col`)))",
-        f"  KEY `idx_t{index}_extra_timestamp_seconds` ((timestampdiff(second,`datetime_col`,`timestamp_col`)))",
-        f"  KEY `idx_t{index}_extra_decimal_round` ((round(`decimal_col`,2)))",
-        f"  KEY `idx_t{index}_extra_float_floor` ((floor(`float_col`)))",
-        f"  KEY `idx_t{index}_extra_double_ceiling` ((ceiling(`double_col`)))",
+        key_line(index, f"idx_t{index}_extra_tenant_int", "(`tenant_id`,`int_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_subpart_big", "(`subpart_id`,`bigint_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_tenant_year_date", "(`tenant_id`,`year_col`,`date_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_char_varchar", "(`char_col`,`varchar_col`(32))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_tiny_bool", "(`tinyint_col`,`bool_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_small_medium_desc", "(`smallint_col` DESC,`mediumint_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_decimal_desc", "(`decimal_col` DESC)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_float_double_desc", "(`float_col`,`double_col` DESC)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_datetime_date_desc", "(`datetime_col`,`date_col` DESC)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_time_timestamp", "(`time_col`,`timestamp_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_varbinary_binary", "(`varbinary_col`(32),`binary_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_tinyblob", "(`tinyblob_col`(8))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_blob_tenant", "(`blob_col`(16),`tenant_id`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_mediumblob", "(`mediumblob_col`(16))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_longblob", "(`longblob_col`(16))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_tinytext_enum", "(`tinytext_col`(12),`enum_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_text_set", "(`text_col`(12),`set_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_mediumtext_bit", "(`mediumtext_col`(12),`bit_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_longtext_unsigned", "(`longtext_col`(12),`unsigned_int_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_enum_scope", "(`enum_col`,`tenant_id`,`subpart_id`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_set_unsigned", "(`set_col`,`unsigned_int_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_bit_decimal", "(`bit_col`,`unsigned_decimal_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_parent_chain", "(`parent_id_col`,`parent_int_col`,`parent_bigint_col`)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_metric_parent_desc", "(`metric_parent_tenant_id`,`parent_bigint_col` DESC)", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_json_n", "((cast(json_extract(`json_col`,_utf8mb4'$.n') as unsigned)))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_json_k_lower", "((lower(cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32)))))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_dayofweek", "((dayofweek(`date_col`)))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_month_datetime", "((month(`datetime_col`)))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_time_to_sec", "((time_to_sec(`time_col`)))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_abs_smallint", "((abs(`smallint_col`)))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_unsigned_coalesce", "((coalesce(`unsigned_int_col`,0)))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_concat_code", "((cast(left(concat(`char_col`,`varchar_col`),32) as char(32))))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_crc32_varchar", "((crc32(`varchar_col`)))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_date_days", "((to_days(`date_col`)))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_timestamp_seconds", "((timestampdiff(second,`datetime_col`,`timestamp_col`)))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_decimal_round", "((round(`decimal_col`,2)))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_float_floor", "((floor(`float_col`)))", include_subpartition),
+        key_line(index, f"idx_t{index}_extra_double_ceiling", "((ceiling(`double_col`)))", include_subpartition),
     ]
     existing_sql_index_count = 23
     missing_count = target_sql_index_count - existing_sql_index_count
@@ -141,13 +220,19 @@ def supplemental_index_lines(index: int, target_sql_index_count: int) -> list[st
     return index_lines[:missing_count]
 
 
-def create_table_sql(index: int) -> str:
+def create_table_sql(index: int, include_vector: bool = True, include_subpartition: bool = True) -> str:
     kind = table_kind(index)
     create_keyword = "CREATE TEMPORARY TABLE" if kind == "temporary" else "CREATE TABLE"
     drop_keyword = "DROP TEMPORARY TABLE" if kind == "temporary" else "DROP TABLE"
-    vector_col_suffix = f" COMMENT '{vector_index_comment(index)}'" if index <= 1 else ""
-    target_sql_index_count = TARGET_TOTAL_INDEX_COUNT - (1 if index <= 1 else 0)
-    supplemental_indexes = supplemental_index_lines(index, target_sql_index_count)
+    vector_col_suffix = f" COMMENT '{vector_index_comment(index)}'" if include_vector and index <= 1 else ""
+    target_sql_index_count = TARGET_TOTAL_INDEX_COUNT - (1 if include_vector and index <= 1 else 0)
+    supplemental_indexes = supplemental_index_lines(index, target_sql_index_count, include_subpartition)
+    vector_lines = []
+    if include_vector:
+        vector_lines = [
+            f"  `vector_col` vector(4){vector_col_suffix},",
+            "  `vector_aux_col` vector(8),",
+        ]
     lines = [
         "SET transaction_isolation = 'READ-COMMITTED';",
         "SET FOREIGN_KEY_CHECKS=0;",
@@ -195,31 +280,30 @@ def create_table_sql(index: int) -> str:
         "  `unsigned_int_col` int unsigned DEFAULT NULL,",
         "  `unsigned_decimal_col` decimal(10,0) unsigned DEFAULT NULL,",
         "  `json_col` json DEFAULT NULL,",
-        f"  `vector_col` vector(4){vector_col_suffix},",
-        "  `vector_aux_col` vector(8),",
+        *vector_lines,
         "  PRIMARY KEY (`id_col`,`tenant_id`,`subpart_id`),",
         f"  UNIQUE KEY `uk_t{index}_ref_id` (`tenant_id`,`subpart_id`,`id_col`),",
         f"  UNIQUE KEY `uk_t{index}_metric_ref` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`),",
         f"  UNIQUE KEY `uk_t{index}_char_scope` (`tenant_id`,`subpart_id`,`char_col`),",
-        f"  KEY `idx_t{index}_parent_id` (`parent_tenant_id`,`parent_subpart_id`,`parent_id_col`),",
-        f"  KEY `idx_t{index}_parent_metric` (`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`),",
-        f"  KEY `idx_t{index}_int_col` (`int_col`),",
-        f"  KEY `idx_t{index}_bigint_desc` (`bigint_col` DESC),",
-        f"  KEY `idx_t{index}_year_char` (`year_col`,`char_col`),",
-        f"  KEY `idx_t{index}_tiny_small_medium` (`tinyint_col`,`smallint_col`,`mediumint_col`),",
-        f"  KEY `idx_t{index}_decimal_float_double` (`decimal_col`,`float_col`,`double_col`),",
-        f"  KEY `idx_t{index}_date_time_mix` (`date_col`,`datetime_col` DESC,`timestamp_col`,`time_col`),",
-        f"  KEY `idx_t{index}_varchar_prefix` (`varchar_col`(64)),",
-        f"  KEY `idx_t{index}_binary_combo` (`binary_col`,`varbinary_col`),",
-        f"  KEY `idx_t{index}_blob_prefix` (`tinyblob_col`(16),`blob_col`(32),`mediumblob_col`(32),`longblob_col`(32)),",
-        f"  KEY `idx_t{index}_text_prefix` (`tinytext_col`(16),`text_col`(16),`mediumtext_col`(16),`longtext_col`(16)),",
-        f"  KEY `idx_t{index}_enum_set_bit` (`enum_col`,`set_col`,`bit_col`),",
-        f"  KEY `idx_t{index}_unsigned_desc` (`unsigned_int_col` DESC,`unsigned_decimal_col`),",
+        key_line(index, f"idx_t{index}_parent_id", "(`parent_tenant_id`,`parent_subpart_id`,`parent_id_col`)", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_parent_metric", "(`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`)", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_int_col", "(`int_col`)", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_bigint_desc", "(`bigint_col` DESC)", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_year_char", "(`year_col`,`char_col`)", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_tiny_small_medium", "(`tinyint_col`,`smallint_col`,`mediumint_col`)", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_decimal_float_double", "(`decimal_col`,`float_col`,`double_col`)", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_date_time_mix", "(`date_col`,`datetime_col` DESC,`timestamp_col`,`time_col`)", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_varchar_prefix", "(`varchar_col`(64))", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_binary_combo", "(`binary_col`,`varbinary_col`)", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_blob_prefix", "(`tinyblob_col`(16),`blob_col`(32),`mediumblob_col`(32),`longblob_col`(32))", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_text_prefix", "(`tinytext_col`(16),`text_col`(16),`mediumtext_col`(16),`longtext_col`(16))", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_enum_set_bit", "(`enum_col`,`set_col`,`bit_col`)", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_unsigned_desc", "(`unsigned_int_col` DESC,`unsigned_decimal_col`)", include_subpartition) + ",",
         f"  KEY `idx_t{index}_bool_invisible` (`bool_col`) INVISIBLE,",
-        f"  KEY `idx_t{index}_lower_varchar` ((lower(`varchar_col`))),",
-        f"  KEY `idx_t{index}_year_func` ((year(`datetime_col`))),",
-        f"  KEY `idx_t{index}_arith_expr` (((`unsigned_int_col` + `smallint_col`))),",
-        f"  KEY `idx_t{index}_json_expr` ((cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32)))),",
+        key_line(index, f"idx_t{index}_lower_varchar", "((lower(`varchar_col`)))", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_year_func", "((year(`datetime_col`)))", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_arith_expr", "(((`unsigned_int_col` + `smallint_col`)))", include_subpartition) + ",",
+        key_line(index, f"idx_t{index}_json_expr", "((cast(json_unquote(json_extract(`json_col`,_utf8mb4'$.k')) as char(32))))", include_subpartition) + ",",
         *[f"{index_line}," for index_line in supplemental_indexes],
         f"  KEY `idx_t{index}_extra_text_length` ((char_length(`text_col`)))",
     ]
@@ -233,13 +317,13 @@ def create_table_sql(index: int) -> str:
             ]
         )
     table_options = ") ENGINE=InnoDB AUTO_INCREMENT=89671 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
-    if index <= 1:
+    if include_vector and index <= 1:
         table_options += " COMMENT='COLUMNAR=1'"
     lines.append(table_options)
     if kind == "partition":
-        lines[-1] += "\n" + partition_clause(index)
+        lines[-1] += "\n" + partition_clause(index, include_subpartition)
     elif kind == "subpartition":
-        lines[-1] += "\n" + partition_clause(index)
+        lines[-1] += "\n" + partition_clause(index, include_subpartition)
     lines[-1] += ";"
     lines.append("SET FOREIGN_KEY_CHECKS=1;")
     return "\n".join(lines) + "\n"
@@ -250,29 +334,52 @@ def vector_literal(index: int, row_id: int, dims: int) -> str:
     return "[" + ",".join(values) + "]"
 
 
-def seed_rows_for_table(index: int) -> list[tuple[int, int]]:
-    if index <= 6:
-        return [(1, 1)]
-    if index <= 10:
-        return [(tenant_id, 1) for tenant_id in TOP_PARTITION_VALUES]
-    return [
-        (tenant_id, subpart_id)
-        for tenant_id in TOP_PARTITION_VALUES
-        for subpart_id in SUBPARTITION_VALUES
-    ]
+def seed_row_count(index: int) -> int:
+    return random.Random(SEED_ROW_RANDOM_SEED + index).randint(MIN_SEED_ROWS, MAX_SEED_ROWS)
 
 
-def insert_sql(index: int, tenant_id: int, subpart_id: int, row_id: int) -> str:
+def max_seed_row_count() -> int:
+    return max(seed_row_count(index) for index in range(27))
+
+
+def tenant_expr(index: int) -> str:
+    if index >= 7:
+        return f"((`n` - 1) % {len(TOP_PARTITION_VALUES)}) + 1"
+    return "1"
+
+
+def subpart_expr(index: int) -> str:
+    if index >= 11:
+        return f"((`n` - 1) % {len(SUBPARTITION_VALUES)}) + 1"
+    return "1"
+
+
+def parent_table_index(index: int) -> int:
+    return 0 if index == 1 or index % 2 == 0 else 1
+
+
+def parent_row_expr(index: int) -> str:
+    parent = parent_table_index(index)
+    return f"((`n` - 1) % {seed_row_count(parent)}) + 1"
+
+
+def parent_value_expr(index: int, column: str) -> str:
+    if index == 0:
+        return "NULL"
     parent = 0 if index == 1 or index % 2 == 0 else 1
-    parent_columns = {
-        "parent_id_col": "NULL" if index == 0 else "1",
-        "parent_tenant_id": "NULL" if index == 0 else "1",
-        "parent_subpart_id": "NULL" if index == 0 else "1",
-        "metric_parent_tenant_id": "NULL" if index == 0 else "1",
-        "metric_parent_subpart_id": "NULL" if index == 0 else "1",
-        "parent_int_col": "NULL" if index == 0 else str(100 + parent * 1000 + 1),
-        "parent_bigint_col": "NULL" if index == 0 else str(100000 + parent * 1000 + 1),
-    }
+    row_expr = parent_row_expr(index)
+    if column in {"parent_id_col"}:
+        return row_expr
+    if column in {"parent_tenant_id", "parent_subpart_id", "metric_parent_tenant_id", "metric_parent_subpart_id"}:
+        return "1"
+    if column == "parent_int_col":
+        return f"100 + {parent} * 100000 + {row_expr}"
+    if column == "parent_bigint_col":
+        return f"100000000 + {parent} * 100000 + {row_expr}"
+    raise ValueError(f"未知父列: {column}")
+
+
+def seed_columns(include_vector: bool = True) -> list[str]:
     columns = [
         "id_col",
         "tenant_id",
@@ -316,68 +423,111 @@ def insert_sql(index: int, tenant_id: int, subpart_id: int, row_id: int) -> str:
         "unsigned_int_col",
         "unsigned_decimal_col",
         "json_col",
-        "vector_col",
-        "vector_aux_col",
     ]
+    if include_vector:
+        columns.extend(["vector_col", "vector_aux_col"])
+    return columns
+
+
+def unique_binary_expr(index: int, multiplier: int = 100000) -> str:
+    return f"UNHEX(CONCAT(LPAD(HEX({index} * {multiplier} + `n`), 8, '0'), REPEAT('00', 28)))"
+
+
+def unique_text_expr(index: int, label: str) -> str:
+    return f"CONCAT('r', LPAD(`n`, 6, '0'), '_{label}_{index}')"
+
+
+def vector_expr(index: int, dims: int) -> str:
+    parts = [
+        f"CAST(ROUND({(index + 1) * 0.1 + offset * 0.01:.3f} + `n` * 0.001, 3) AS CHAR)"
+        for offset in range(dims)
+    ]
+    concat_parts = ", ',', ".join(parts)
+    return f"VEC_FROMTEXT(CONCAT('[', {concat_parts}, ']'))"
+
+
+def seed_value_exprs(index: int, include_vector: bool = True) -> list[str]:
     values = [
-        str(row_id),
-        str(tenant_id),
-        str(subpart_id),
-        parent_columns["parent_id_col"],
-        parent_columns["parent_tenant_id"],
-        parent_columns["parent_subpart_id"],
-        parent_columns["metric_parent_tenant_id"],
-        parent_columns["metric_parent_subpart_id"],
-        parent_columns["parent_int_col"],
-        parent_columns["parent_bigint_col"],
-        str(100 + index * 1000 + row_id),
-        str(100000 + index * 1000 + row_id),
-        str(2020 + (index % 10)),
-        f"'c{row_id % 100:02d}'",
-        str((index + row_id) % 255),
-        "1" if row_id % 2 else "0",
-        str(index + row_id),
-        str(1000 + index + row_id),
-        f"{index + row_id}.12345",
-        f"{index + row_id}.5",
-        f"{index + row_id}.75",
-        f"'2026-01-{(row_id % 27) + 1:02d}'",
-        f"'2026-01-{(row_id % 27) + 1:02d} 10:11:12.123456'",
-        f"'2026-01-{(row_id % 27) + 1:02d} 10:11:12'",
-        f"'0{row_id % 10}:01:02'",
-        f"'varchar_{index}_{row_id}'",
-        "0x41",
-        f"UNHEX('{index * 1000 + row_id:064x}')",
-        f"UNHEX('{(index + row_id) % 256:02x}')",
-        f"UNHEX('{index * 1000 + row_id:04x}')",
-        f"UNHEX('{index * 1000 + row_id:08x}')",
-        f"UNHEX('{index * 1000 + row_id:016x}')",
-        f"'tinytext_{index}_{row_id}'",
-        f"'text_{index}_{row_id}'",
-        f"'mediumtext_{index}_{row_id}'",
-        f"'longtext_{index}_{row_id}'",
-        "'aaa'",
-        "'111,222'",
+        "`n`",
+        tenant_expr(index),
+        subpart_expr(index),
+        parent_value_expr(index, "parent_id_col"),
+        parent_value_expr(index, "parent_tenant_id"),
+        parent_value_expr(index, "parent_subpart_id"),
+        parent_value_expr(index, "metric_parent_tenant_id"),
+        parent_value_expr(index, "metric_parent_subpart_id"),
+        parent_value_expr(index, "parent_int_col"),
+        parent_value_expr(index, "parent_bigint_col"),
+        f"100 + {index} * 100000 + `n`",
+        f"100000000 + {index} * 100000 + `n`",
+        "2020 + MOD(`n`, 30)",
+        "CAST(CONCAT('c', LPAD(CONV(`n`, 10, 36), 3, '0')) AS CHAR(4))",
+        f"MOD({index} + `n`, 255)",
+        "MOD(`n`, 2)",
+        f"{index} + `n`",
+        f"100000 + {index} * 1000 + `n`",
+        f"{index} * 100000 + `n` + 0.12345",
+        f"{index} * 100000 + `n` + 0.5",
+        f"{index} * 100000 + `n` + 0.75",
+        "DATE_ADD('2026-01-01', INTERVAL `n` DAY)",
+        "TIMESTAMPADD(SECOND, `n`, '2026-01-01 10:11:12.123456')",
+        "TIMESTAMPADD(SECOND, `n`, '2026-01-01 10:11:12')",
+        "SEC_TO_TIME(MOD(`n`, 86400))",
+        f"CONCAT('v', LPAD(`n`, 6, '0'), '_t{index}')",
+        "UNHEX(LPAD(HEX(MOD(`n`, 256)), 2, '0'))",
+        unique_binary_expr(index),
+        unique_binary_expr(index, 1000000),
+        unique_binary_expr(index, 1000001),
+        unique_binary_expr(index, 1000002),
+        unique_binary_expr(index, 1000003),
+        unique_text_expr(index, "tinytext"),
+        unique_text_expr(index, "text"),
+        unique_text_expr(index, "mediumtext"),
+        unique_text_expr(index, "longtext"),
+        "ELT(MOD(`n`, 3) + 1, 'aaa', 'bbb', 'ccc')",
+        "IF(MOD(`n`, 3) = 0, '111', IF(MOD(`n`, 3) = 1, '111,222', '222,333'))",
         "b'10011001'",
-        str(10000 + index * 1000 + row_id),
-        str(20000 + index * 1000 + row_id),
-        f"JSON_OBJECT('k','json_{index}_{row_id}','n',{row_id})",
-        f"VEC_FROMTEXT('{vector_literal(index, row_id, 4)}')",
-        f"VEC_FROMTEXT('{vector_literal(index, row_id, 8)}')",
+        f"1000000 + {index} * 100000 + `n`",
+        f"2000000 + {index} * 100000 + `n`",
+        f"JSON_OBJECT('k', CONCAT('json_{index}_', `n`), 'n', `n`)",
     ]
-    col_sql = ",".join(f"`{column}`" for column in columns)
-    val_sql = ", ".join(values)
-    return f"/* t{index}:tenant={tenant_id},subpart={subpart_id} */\nINSERT INTO `t{index}` ({col_sql}) VALUES ({val_sql});"
+    if include_vector:
+        values.extend([vector_expr(index, 4), vector_expr(index, 8)])
+    return values
 
 
-def seed_sql() -> str:
-    inserts: list[str] = []
-    for index in range(27):
-        for row_id, (tenant_id, subpart_id) in enumerate(seed_rows_for_table(index), start=1):
-            inserts.append(insert_sql(index, tenant_id, subpart_id, row_id))
+def seed_number_table_sql() -> str:
+    digit_select = " UNION ALL ".join(f"SELECT {value} AS n" if value == 0 else f"SELECT {value}" for value in range(10))
+    return f"""DROP TABLE IF EXISTS `{SEED_NUMBER_TABLE}`;
+CREATE TABLE `{SEED_NUMBER_TABLE}` (`n` int NOT NULL PRIMARY KEY) ENGINE=InnoDB;
+INSERT INTO `{SEED_NUMBER_TABLE}` (`n`)
+SELECT ones.n + tens.n * 10 + hundreds.n * 100 + thousands.n * 1000 + 1 AS `n`
+FROM ({digit_select}) AS ones
+CROSS JOIN ({digit_select}) AS tens
+CROSS JOIN ({digit_select}) AS hundreds
+CROSS JOIN ({digit_select}) AS thousands
+WHERE ones.n + tens.n * 10 + hundreds.n * 100 + thousands.n * 1000 + 1 BETWEEN 1 AND {max_seed_row_count()}
+ORDER BY `n`;"""
+
+
+def insert_sql(index: int, include_vector: bool = True) -> str:
+    col_sql = ",".join(f"`{column}`" for column in seed_columns(include_vector))
+    select_sql = ",\n  ".join(seed_value_exprs(index, include_vector))
+    row_count = seed_row_count(index)
+    return f"""/* t{index}:rows={row_count} */
+INSERT INTO `t{index}` ({col_sql})
+SELECT
+  {select_sql}
+FROM `{SEED_NUMBER_TABLE}`
+WHERE `n` <= {row_count};"""
+
+
+def seed_sql(include_vector: bool = True) -> str:
+    inserts = [insert_sql(index, include_vector) for index in range(27)]
     lines = [
         "SET transaction_isolation = 'READ-COMMITTED';",
         "SET FOREIGN_KEY_CHECKS=0;",
+        seed_number_table_sql(),
         *[f"DELETE FROM `t{index}`;" for index in range(26, -1, -1)],
         "SET FOREIGN_KEY_CHECKS=1;",
         *inserts,
@@ -385,28 +535,54 @@ def seed_sql() -> str:
     return "\n".join(lines) + "\n"
 
 
-def execution_doc() -> str:
+def execution_doc(include_vector: bool = True, include_subpartition: bool = True) -> str:
     table_files = [f"t{index}.sql" for index in range(27)]
+    vector_note = (
+        "本目录下的 SQL 文件面向支持 PolarDB MySQL 向量类型和内部二级分区表能力的 InnoDB 内核。标准 MySQL 客户端或普通 MySQL 8.0 内核不一定支持 `VECTOR(N)`、向量索引列备注和内部二级分区语法。"
+        if include_vector
+        else "本目录是本地 MySQL 兼容输出，已移除 `VECTOR(N)` 列、向量索引列备注和 `VEC_FROMTEXT` 种子表达式。"
+    )
+    subpartition_note = (
+        "4. 执行二级分区表：`t11.sql` 到 `t26.sql`。"
+        if include_subpartition
+        else "4. 执行由二级分区降级为一级分区的兼容表：`t11.sql` 到 `t26.sql`。"
+    )
     lines = [
         "# SQL 基表执行顺序说明",
         "",
-        "本目录下的 SQL 文件面向支持 PolarDB MySQL 向量类型和内部二级分区表能力的 InnoDB 内核。标准 MySQL 客户端或普通 MySQL 8.0 内核不一定支持 `VECTOR(N)`、向量索引列备注和内部二级分区语法。",
+        vector_note,
         "",
         "## 执行前提",
         "",
         "- 所有文件需要在同一个数据库中执行，不在文件内创建或切换数据库。",
         "- 所有建表文件和种子数据文件都会设置 `SET transaction_isolation = 'READ-COMMITTED';`。",
-        "- 向量索引功能默认禁用时，需要具备 SUPER 权限后按环境要求开启，例如 `SET GLOBAL vidx_disabled=OFF;`。",
-        "- 单个向量索引缓存默认按 `vidx_hnsw_cache_size` 控制；缓存超限后的清理和重载行为由内核实现负责。",
+        *(
+            [
+                "- 向量索引功能默认禁用时，需要具备 SUPER 权限后按环境要求开启，例如 `SET GLOBAL vidx_disabled=OFF;`。",
+                "- 单个向量索引缓存默认按 `vidx_hnsw_cache_size` 控制；缓存超限后的清理和重载行为由内核实现负责。",
+            ]
+            if include_vector
+            else ["- 当前兼容输出不包含向量列，可用于普通 MySQL 8.0 本地建表和插入验证。"]
+        ),
         "- `t2.sql` 到 `t6.sql` 是临时表，必须和 `zz_seed_fk_data.sql` 在同一个 session 内执行。",
         "- `t2.sql` 到 `t6.sql` 是临时表，只保留父表引用列和种子数据关系，不声明 `FOREIGN KEY`，避免 InnoDB 在建临时表时报 1215。",
-        "- `t7.sql` 到 `t26.sql` 是分区表，只保留父表引用列、关联索引和种子数据关系，不声明 `FOREIGN KEY`，避免 InnoDB 在建分区表时报 1506。",
+        (
+            "- `t7.sql` 到 `t26.sql` 是分区表，只保留父表引用列、关联索引和种子数据关系，不声明 `FOREIGN KEY`，避免 InnoDB 在建分区表时报 1506。"
+            if include_subpartition
+            else "- `t7.sql` 到 `t26.sql` 是一级分区兼容表；`t11.sql` 到 `t26.sql` 不生成 `SUBPARTITION BY`，仍不声明 `FOREIGN KEY`，避免 InnoDB 在建分区表时报 1506。"
+        ),
         "- 每个建表文件都会短暂执行 `SET FOREIGN_KEY_CHECKS=0;`，建表完成后恢复为 `SET FOREIGN_KEY_CHECKS=1;`。",
-        "- `zz_seed_fk_data.sql` 会先按依赖反序清理数据，再恢复外键检查并插入种子数据。",
-        "- 向量索引查询需要使用 `VEC_DISTANCE_COSINE(vector_col, VEC_FROMTEXT('[...]'))` 或 `VEC_DISTANCE_EUCLIDEAN(vector_col, VEC_FROMTEXT('[...]'))`，排序方向使用 ASC，并带 LIMIT；当前环境不生成 DOT 距离。",
-        "- 查询距离函数需要和向量索引 DISTANCE 设置一致；DESC 排序不触发向量索引。",
-        "- 向量索引 ADD、DROP、RENAME 不应和其他 DDL 组合在同一条 `ALTER TABLE` 中。",
-        "- 向量索引不支持 `PACK_KEYS` 等紧凑索引存储选项，`ALTER INDEX ... VISIBLE/INVISIBLE` 对向量索引无效。",
+        f"- `zz_seed_fk_data.sql` 会创建 `{SEED_NUMBER_TABLE}` 辅助数字表，先按依赖反序清理数据，再恢复外键检查并为每张表插入 {MIN_SEED_ROWS} 到 {MAX_SEED_ROWS} 行可复现随机数据。",
+        *(
+            [
+                "- 向量索引查询需要使用 `VEC_DISTANCE_COSINE(vector_col, VEC_FROMTEXT('[...]'))` 或 `VEC_DISTANCE_EUCLIDEAN(vector_col, VEC_FROMTEXT('[...]'))`，排序方向使用 ASC，并带 LIMIT；当前环境不生成 DOT 距离。",
+                "- 查询距离函数需要和向量索引 DISTANCE 设置一致；DESC 排序不触发向量索引。",
+                "- 向量索引 ADD、DROP、RENAME 不应和其他 DDL 组合在同一条 `ALTER TABLE` 中。",
+                "- 向量索引不支持 `PACK_KEYS` 等紧凑索引存储选项，`ALTER INDEX ... VISIBLE/INVISIBLE` 对向量索引无效。",
+            ]
+            if include_vector
+            else []
+        ),
         "- 当前基表不生成空间类型列、空间索引和空间构造函数，避免目标 InnoDB 内核报 1178。",
         "",
         "## 推荐执行顺序",
@@ -414,7 +590,7 @@ def execution_doc() -> str:
         "1. 执行普通父表：`t0.sql`、`t1.sql`。",
         "2. 在同一个 session 中执行临时表：`t2.sql`、`t3.sql`、`t4.sql`、`t5.sql`、`t6.sql`。",
         "3. 执行一级分区表：`t7.sql`、`t8.sql`、`t9.sql`、`t10.sql`。",
-        "4. 执行二级分区表：`t11.sql` 到 `t26.sql`。",
+        subpartition_note,
         "5. 执行种子数据脚本：`zz_seed_fk_data.sql`。",
         "",
         "## 完整文件顺序",
@@ -427,26 +603,72 @@ def execution_doc() -> str:
             "",
             "## 分区数据覆盖",
             "",
-            "- `t7.sql` 到 `t10.sql` 每张一级分区表有 8 个一级分区，种子数据使用 `tenant_id` 1 到 8，保证每个一级分区至少一行。",
-            "- `t11.sql` 到 `t26.sql` 每张二级分区表有 8 个一级分区，每个一级分区下种子数据写入 `subpart_id` 1 和 2 两行，用于覆盖一级分区和子分区路由。",
+            f"- 每张表通过固定 seed 决定插入 {MIN_SEED_ROWS} 到 {MAX_SEED_ROWS} 行，生成结果可复现。",
+            "- 可安全唯一化的普通索引会生成 `UNIQUE KEY`；二级分区表默认只保留已有唯一键，避免违反 MySQL 分区唯一键必须包含全部分区列的限制。",
+            "- `t7.sql` 到 `t10.sql` 每张一级分区表有 8 个一级分区，种子数据使用 `tenant_id` 1 到 8，保证每个一级分区都有数据。",
+            (
+                "- `t11.sql` 到 `t26.sql` 每张二级分区表有 8 个一级分区，每个一级分区下种子数据写入 `subpart_id` 1 和 2，用于覆盖一级分区和子分区路由。"
+                if include_subpartition
+                else "- `t11.sql` 到 `t26.sql` 在兼容输出中降级为一级分区表，种子数据仍保留 `subpart_id` 1 和 2 取值。"
+            ),
             "- 父表引用数据固定指向 `t0` 或 `t1`，避免永久表引用临时表造成生命周期不稳定。",
-            "- `t0.sql` 和 `t1.sql` 是普通 InnoDB 表，每张表有且仅有一个向量索引；其中 `t1.sql` 声明实际 `FOREIGN KEY` 约束。",
-            "- `t2.sql` 到 `t6.sql` 是临时表，保留向量列但不创建向量索引，也不声明实际外键。",
-            "- `t7.sql` 到 `t26.sql` 是分区表，保留向量列但不创建向量索引，也不声明实际外键。",
+            (
+                "- `t0.sql` 和 `t1.sql` 是普通 InnoDB 表，每张表有且仅有一个向量索引；其中 `t1.sql` 声明实际 `FOREIGN KEY` 约束。"
+                if include_vector
+                else "- `t0.sql` 和 `t1.sql` 是普通 InnoDB 表，兼容输出不创建向量索引；其中 `t1.sql` 声明实际 `FOREIGN KEY` 约束。"
+            ),
+            (
+                "- `t2.sql` 到 `t6.sql` 是临时表，保留向量列但不创建向量索引，也不声明实际外键。"
+                if include_vector
+                else "- `t2.sql` 到 `t6.sql` 是临时表，兼容输出不包含向量列，也不声明实际外键。"
+            ),
+            (
+                "- `t7.sql` 到 `t26.sql` 是分区表，保留向量列但不创建向量索引，也不声明实际外键。"
+                if include_vector
+                else "- `t7.sql` 到 `t26.sql` 是分区表，兼容输出不包含向量列，也不声明实际外键。"
+            ),
             "- 按 InnoDB 每表最多 64 个二级索引计算，每张表补齐到索引上限数减 3，即 61 个索引；`PRIMARY KEY` 不计入该数量。",
-            "- `t0.sql` 和 `t1.sql` 的 61 个索引包含 1 个向量索引和 60 个常规二级索引，其余表为 61 个常规二级索引。",
+            (
+                "- `t0.sql` 和 `t1.sql` 的 61 个索引包含 1 个向量索引和 60 个常规二级索引，其余表为 61 个常规二级索引。"
+                if include_vector
+                else "- 兼容输出不包含向量索引，每张表均为 61 个常规二级索引。"
+            ),
         ]
     )
     return "\n".join(lines) + "\n"
 
-def main() -> None:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    for path in OUT_DIR.glob("*.sql"):
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="生成 MySQL/PolarDB 基表 DDL 与种子数据")
+    parser.add_argument("--output-dir", type=Path, default=OUT_DIR, help="输出目录，默认写入 sql_base_tables")
+    parser.add_argument("--without-vector", action="store_true", help="生成不包含 VECTOR 列和 VEC_FROMTEXT 的兼容 SQL")
+    parser.add_argument("--without-subpartition", action="store_true", help="将二级分区表降级为一级分区表")
+    return parser.parse_args()
+
+
+def generate_files(output_dir: Path, include_vector: bool = True, include_subpartition: bool = True) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for path in output_dir.glob("*.sql"):
         path.unlink()
     for index in range(27):
-        (OUT_DIR / f"t{index}.sql").write_text(create_table_sql(index), encoding="utf-8")
-    (OUT_DIR / "zz_seed_fk_data.sql").write_text(seed_sql(), encoding="utf-8")
-    (OUT_DIR / "执行顺序说明.md").write_text(execution_doc(), encoding="utf-8")
+        (output_dir / f"t{index}.sql").write_text(
+            create_table_sql(index, include_vector=include_vector, include_subpartition=include_subpartition),
+            encoding="utf-8",
+        )
+    (output_dir / "zz_seed_fk_data.sql").write_text(seed_sql(include_vector=include_vector), encoding="utf-8")
+    (output_dir / "执行顺序说明.md").write_text(
+        execution_doc(include_vector=include_vector, include_subpartition=include_subpartition),
+        encoding="utf-8",
+    )
+
+
+def main() -> None:
+    args = parse_args()
+    generate_files(
+        args.output_dir,
+        include_vector=not args.without_vector,
+        include_subpartition=not args.without_subpartition,
+    )
 
 
 if __name__ == "__main__":

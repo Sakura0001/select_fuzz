@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from select_fuzz.config import TargetNodeConfig
-from select_fuzz.metadata.base_sql import load_base_sql_files, split_sql_statements
+from select_fuzz.metadata.base_sql import is_base_table_definition_file, load_base_sql_files, split_sql_statements
 from select_fuzz.metadata.ddl_parser import parse_create_table
 from select_fuzz.metadata.models import BaseSqlFile, TableMetadata
 from select_fuzz.monitor.events import LostConnectionDeduplicator, LostConnectionEvent, is_lost_connection_error
@@ -125,6 +125,8 @@ class FuzzTask:
             self.tables.clear()
             sql_files = load_base_sql_files(self.base_sql_dir)
             for sql_file in sql_files:
+                if not is_base_table_definition_file(sql_file.path):
+                    continue
                 try:
                     self.tables.append(parse_create_table(sql_file.sql))
                 except ValueError:

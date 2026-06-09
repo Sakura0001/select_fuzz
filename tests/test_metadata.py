@@ -1,7 +1,7 @@
 from pathlib import Path
 import re
 
-from select_fuzz.metadata.base_sql import load_base_sql_files
+from select_fuzz.metadata.base_sql import is_base_table_definition_file, load_base_sql_files
 from select_fuzz.metadata.ddl_parser import parse_create_table
 from select_fuzz.metadata.models import ColumnTypeFamily
 
@@ -26,6 +26,20 @@ def test_基表_sql_按数字自然顺序读取(tmp_path: Path) -> None:
     assert [item.path.name for item in files] == ["t1.sql", "t2.sql", "t10.sql", "zz_seed_fk_data.sql"]
 
 
+def test_自定义同名_seed_建表文件仍作为基表(tmp_path: Path) -> None:
+    path = tmp_path / "zz_seed_fk_data.sql"
+    path.write_text("CREATE TABLE custom_table (id BIGINT NOT NULL, PRIMARY KEY (id));", encoding="utf-8")
+
+    assert is_base_table_definition_file(path) is True
+    assert parse_create_table(path.read_text(encoding="utf-8")).name == "custom_table"
+
+
+def test_生成器种子脚本不作为基表解析() -> None:
+    path = Path("sql_base_tables", "zz_seed_fk_data.sql")
+
+    assert is_base_table_definition_file(path) is False
+
+
 def test_解析_create_temporary_table() -> None:
     table = parse_create_table(
         """
@@ -47,6 +61,8 @@ def test_完整基表目录能解析全部表_列族_向量和分区() -> None:
     base_dir = Path("sql_base_tables")
     tables = []
     for sql_file in load_base_sql_files(base_dir):
+        if not is_base_table_definition_file(sql_file.path):
+            continue
         try:
             tables.append(parse_create_table(sql_file.sql))
         except ValueError:

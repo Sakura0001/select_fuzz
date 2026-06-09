@@ -20,6 +20,23 @@ def load_base_sql_files(base_dir: Path | str) -> List[BaseSqlFile]:
     return files
 
 
+def is_base_table_definition_file(path: Path) -> bool:
+    if path.suffix.lower() != ".sql":
+        return False
+    try:
+        sql = path.read_text(encoding="utf-8")
+    except OSError:
+        return True
+    return not is_generated_seed_sql(sql)
+
+
+def is_generated_seed_sql(sql: str) -> bool:
+    return (
+        "CREATE TABLE `_select_fuzz_seed_numbers`" in sql
+        and re.search(r"/\* t\d+:rows=\d+ \*/", sql) is not None
+    )
+
+
 def split_sql_statements(sql: str) -> List[str]:
     statements: List[str] = []
     current: List[str] = []

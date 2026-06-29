@@ -19,10 +19,10 @@ def test_种子数据每张表生成可复现一到两千行() -> None:
     assert seed_sql.upper().count("INSERT INTO") == 28
 
 
-def test_兼容输出可以关闭向量和二级分区() -> None:
-    normal_sql = generator.create_table_sql(0, include_vector=False, include_subpartition=False)
-    subpartition_sql = generator.create_table_sql(11, include_vector=False, include_subpartition=False)
-    seed_sql = generator.seed_sql(include_vector=False)
+def test_默认输出不包含向量并可关闭二级分区() -> None:
+    normal_sql = generator.create_table_sql(0, include_subpartition=False)
+    subpartition_sql = generator.create_table_sql(11, include_subpartition=False)
+    seed_sql = generator.seed_sql()
 
     assert "VECTOR(" not in normal_sql.upper()
     assert "imci_vector_index=" not in normal_sql

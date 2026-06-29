@@ -113,13 +113,11 @@ def _parse_column(definition: str) -> ColumnMetadata:
     name = pieces[0].strip("`")
     sql_type = _extract_sql_type(definition)
     upper = definition.upper()
-    vector_match = re.search(r"\bVECTOR\s*\(\s*(\d+)\s*\)", upper)
     return ColumnMetadata(
         name=name,
         sql_type=sql_type,
         type_family=_type_family(sql_type),
         nullable="NOT NULL" not in upper,
-        vector_dimensions=int(vector_match.group(1)) if vector_match else None,
         invisible="INVISIBLE" in upper,
         generated="GENERATED" in upper or " AS " in upper,
     )
@@ -175,8 +173,6 @@ def _type_family(sql_type: str) -> ColumnTypeFamily:
         return ColumnTypeFamily.JSON
     if upper.startswith(("POINT", "LINESTRING", "POLYGON", "GEOMETRY", "MULTI")):
         return ColumnTypeFamily.SPATIAL
-    if upper.startswith("VECTOR"):
-        return ColumnTypeFamily.VECTOR
     return ColumnTypeFamily.UNKNOWN
 
 
@@ -216,7 +212,6 @@ def _parse_index(definition: str) -> IndexMetadata:
         primary=primary,
         fulltext=fulltext,
         spatial=spatial,
-        is_vector="IMCI_VECTOR_INDEX" in upper or "VECTOR" in name.upper(),
     )
 
 

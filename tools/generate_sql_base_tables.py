@@ -29,13 +29,6 @@ def table_kind(index: int) -> str:
     return "subpartition"
 
 
-def vector_index_comment(index: int) -> str:
-    return [
-        "imci_vector_index=HNSW(metric=COSINE,max_degree=16,ef_construction=300)",
-        "imci_vector_index=FAISS_HNSW_FLAT(metric=COSINE,max_degree=32,ef_construction=300)",
-    ][index % 2]
-
-
 def range_partitions() -> str:
     parts = [f"  PARTITION p{idx} VALUES LESS THAN ({value + 1})" for idx, value in enumerate(TOP_PARTITION_VALUES[:-1])]
     parts.append(f"  PARTITION p{len(TOP_PARTITION_VALUES) - 1} VALUES LESS THAN MAXVALUE")
@@ -220,19 +213,11 @@ def supplemental_index_lines(index: int, target_sql_index_count: int, include_su
     return index_lines[:missing_count]
 
 
-def create_table_sql(index: int, include_vector: bool = True, include_subpartition: bool = True) -> str:
+def create_table_sql(index: int, include_subpartition: bool = True) -> str:
     kind = table_kind(index)
     create_keyword = "CREATE TEMPORARY TABLE" if kind == "temporary" else "CREATE TABLE"
     drop_keyword = "DROP TEMPORARY TABLE" if kind == "temporary" else "DROP TABLE"
-    vector_col_suffix = f" COMMENT '{vector_index_comment(index)}'" if include_vector and index <= 1 else ""
-    target_sql_index_count = TARGET_TOTAL_INDEX_COUNT - (1 if include_vector and index <= 1 else 0)
-    supplemental_indexes = supplemental_index_lines(index, target_sql_index_count, include_subpartition)
-    vector_lines = []
-    if include_vector:
-        vector_lines = [
-            f"  `vector_col` vector(4){vector_col_suffix},",
-            "  `vector_aux_col` vector(8),",
-        ]
+    supplemental_indexes = supplemental_index_lines(index, TARGET_TOTAL_INDEX_COUNT, include_subpartition)
     lines = [
         "SET transaction_isolation = 'READ-COMMITTED';",
         "SET FOREIGN_KEY_CHECKS=0;",
@@ -280,7 +265,6 @@ def create_table_sql(index: int, include_vector: bool = True, include_subpartiti
         "  `unsigned_int_col` int unsigned DEFAULT NULL,",
         "  `unsigned_decimal_col` decimal(10,0) unsigned DEFAULT NULL,",
         "  `json_col` json DEFAULT NULL,",
-        *vector_lines,
         "  PRIMARY KEY (`id_col`,`tenant_id`,`subpart_id`),",
         f"  UNIQUE KEY `uk_t{index}_ref_id` (`tenant_id`,`subpart_id`,`id_col`),",
         f"  UNIQUE KEY `uk_t{index}_metric_ref` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`),",
@@ -317,8 +301,6 @@ def create_table_sql(index: int, include_vector: bool = True, include_subpartiti
             ]
         )
     table_options = ") ENGINE=InnoDB AUTO_INCREMENT=89671 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
-    if include_vector and index <= 1:
-        table_options += " COMMENT='COLUMNAR=1'"
     lines.append(table_options)
     if kind == "partition":
         lines[-1] += "\n" + partition_clause(index, include_subpartition)
@@ -327,11 +309,6 @@ def create_table_sql(index: int, include_vector: bool = True, include_subpartiti
     lines[-1] += ";"
     lines.append("SET FOREIGN_KEY_CHECKS=1;")
     return "\n".join(lines) + "\n"
-
-
-def vector_literal(index: int, row_id: int, dims: int) -> str:
-    values = [f"{(index + 1) * 0.1 + row_id * 0.001 + offset * 0.01:.3f}" for offset in range(dims)]
-    return "[" + ",".join(values) + "]"
 
 
 def seed_row_count(index: int) -> int:
@@ -379,8 +356,8 @@ def parent_value_expr(index: int, column: str) -> str:
     raise ValueError(f"未知父列: {column}")
 
 
-def seed_columns(include_vector: bool = True) -> list[str]:
-    columns = [
+def seed_columns() -> list[str]:
+    return [
         "id_col",
         "tenant_id",
         "subpart_id",
@@ -424,9 +401,6 @@ def seed_columns(include_vector: bool = True) -> list[str]:
         "unsigned_decimal_col",
         "json_col",
     ]
-    if include_vector:
-        columns.extend(["vector_col", "vector_aux_col"])
-    return columns
 
 
 def unique_binary_expr(index: int, multiplier: int = 100000) -> str:
@@ -437,17 +411,8 @@ def unique_text_expr(index: int, label: str) -> str:
     return f"CONCAT('r', LPAD(`n`, 6, '0'), '_{label}_{index}')"
 
 
-def vector_expr(index: int, dims: int) -> str:
-    parts = [
-        f"CAST(ROUND({(index + 1) * 0.1 + offset * 0.01:.3f} + `n` * 0.001, 3) AS CHAR)"
-        for offset in range(dims)
-    ]
-    concat_parts = ", ',', ".join(parts)
-    return f"VEC_FROMTEXT(CONCAT('[', {concat_parts}, ']'))"
-
-
-def seed_value_exprs(index: int, include_vector: bool = True) -> list[str]:
-    values = [
+def seed_value_exprs(index: int) -> list[str]:
+    return [
         "`n`",
         tenant_expr(index),
         subpart_expr(index),
@@ -491,9 +456,6 @@ def seed_value_exprs(index: int, include_vector: bool = True) -> list[str]:
         f"2000000 + {index} * 100000 + `n`",
         f"JSON_OBJECT('k', CONCAT('json_{index}_', `n`), 'n', `n`)",
     ]
-    if include_vector:
-        values.extend([vector_expr(index, 4), vector_expr(index, 8)])
-    return values
 
 
 def seed_number_table_sql() -> str:
@@ -510,9 +472,9 @@ WHERE ones.n + tens.n * 10 + hundreds.n * 100 + thousands.n * 1000 + 1 BETWEEN 1
 ORDER BY `n`;"""
 
 
-def insert_sql(index: int, include_vector: bool = True) -> str:
-    col_sql = ",".join(f"`{column}`" for column in seed_columns(include_vector))
-    select_sql = ",\n  ".join(seed_value_exprs(index, include_vector))
+def insert_sql(index: int) -> str:
+    col_sql = ",".join(f"`{column}`" for column in seed_columns())
+    select_sql = ",\n  ".join(seed_value_exprs(index))
     row_count = seed_row_count(index)
     return f"""/* t{index}:rows={row_count} */
 INSERT INTO `t{index}` ({col_sql})
@@ -522,8 +484,8 @@ FROM `{SEED_NUMBER_TABLE}`
 WHERE `n` <= {row_count};"""
 
 
-def seed_sql(include_vector: bool = True) -> str:
-    inserts = [insert_sql(index, include_vector) for index in range(27)]
+def seed_sql() -> str:
+    inserts = [insert_sql(index) for index in range(27)]
     lines = [
         "SET transaction_isolation = 'READ-COMMITTED';",
         "SET FOREIGN_KEY_CHECKS=0;",
@@ -535,13 +497,9 @@ def seed_sql(include_vector: bool = True) -> str:
     return "\n".join(lines) + "\n"
 
 
-def execution_doc(include_vector: bool = True, include_subpartition: bool = True) -> str:
+def execution_doc(include_subpartition: bool = True) -> str:
     table_files = [f"t{index}.sql" for index in range(27)]
-    vector_note = (
-        "本目录下的 SQL 文件面向支持 PolarDB MySQL 向量类型和内部二级分区表能力的 InnoDB 内核。标准 MySQL 客户端或普通 MySQL 8.0 内核不一定支持 `VECTOR(N)`、向量索引列备注和内部二级分区语法。"
-        if include_vector
-        else "本目录是本地 MySQL 兼容输出，已移除 `VECTOR(N)` 列、向量索引列备注和 `VEC_FROMTEXT` 种子表达式。"
-    )
+    compatibility_note = "本目录下的 SQL 文件面向 MySQL 8.0.22 兼容能力生成，不包含向量类型、向量索引列备注或向量种子表达式。"
     subpartition_note = (
         "4. 执行二级分区表：`t11.sql` 到 `t26.sql`。"
         if include_subpartition
@@ -550,20 +508,13 @@ def execution_doc(include_vector: bool = True, include_subpartition: bool = True
     lines = [
         "# SQL 基表执行顺序说明",
         "",
-        vector_note,
+        compatibility_note,
         "",
         "## 执行前提",
         "",
         "- 所有文件需要在同一个数据库中执行，不在文件内创建或切换数据库。",
         "- 所有建表文件和种子数据文件都会设置 `SET transaction_isolation = 'READ-COMMITTED';`。",
-        *(
-            [
-                "- 向量索引功能默认禁用时，需要具备 SUPER 权限后按环境要求开启，例如 `SET GLOBAL vidx_disabled=OFF;`。",
-                "- 单个向量索引缓存默认按 `vidx_hnsw_cache_size` 控制；缓存超限后的清理和重载行为由内核实现负责。",
-            ]
-            if include_vector
-            else ["- 当前兼容输出不包含向量列，可用于普通 MySQL 8.0 本地建表和插入验证。"]
-        ),
+        "- 当前输出不包含向量列，可用于普通 MySQL 8.0 本地建表和插入验证。",
         "- `t2.sql` 到 `t6.sql` 是临时表，必须和 `zz_seed_fk_data.sql` 在同一个 session 内执行。",
         "- `t2.sql` 到 `t6.sql` 是临时表，只保留父表引用列和种子数据关系，不声明 `FOREIGN KEY`，避免 InnoDB 在建临时表时报 1215。",
         (
@@ -573,16 +524,6 @@ def execution_doc(include_vector: bool = True, include_subpartition: bool = True
         ),
         "- 每个建表文件都会短暂执行 `SET FOREIGN_KEY_CHECKS=0;`，建表完成后恢复为 `SET FOREIGN_KEY_CHECKS=1;`。",
         f"- `zz_seed_fk_data.sql` 会创建 `{SEED_NUMBER_TABLE}` 辅助数字表，先按依赖反序清理数据，再恢复外键检查并为每张表插入 {MIN_SEED_ROWS} 到 {MAX_SEED_ROWS} 行可复现随机数据。",
-        *(
-            [
-                "- 向量索引查询需要使用 `VEC_DISTANCE_COSINE(vector_col, VEC_FROMTEXT('[...]'))` 或 `VEC_DISTANCE_EUCLIDEAN(vector_col, VEC_FROMTEXT('[...]'))`，排序方向使用 ASC，并带 LIMIT；当前环境不生成 DOT 距离。",
-                "- 查询距离函数需要和向量索引 DISTANCE 设置一致；DESC 排序不触发向量索引。",
-                "- 向量索引 ADD、DROP、RENAME 不应和其他 DDL 组合在同一条 `ALTER TABLE` 中。",
-                "- 向量索引不支持 `PACK_KEYS` 等紧凑索引存储选项，`ALTER INDEX ... VISIBLE/INVISIBLE` 对向量索引无效。",
-            ]
-            if include_vector
-            else []
-        ),
         "- 当前基表不生成空间类型列、空间索引和空间构造函数，避免目标 InnoDB 内核报 1178。",
         "",
         "## 推荐执行顺序",
@@ -612,27 +553,11 @@ def execution_doc(include_vector: bool = True, include_subpartition: bool = True
                 else "- `t11.sql` 到 `t26.sql` 在兼容输出中降级为一级分区表，种子数据仍保留 `subpart_id` 1 和 2 取值。"
             ),
             "- 父表引用数据固定指向 `t0` 或 `t1`，避免永久表引用临时表造成生命周期不稳定。",
-            (
-                "- `t0.sql` 和 `t1.sql` 是普通 InnoDB 表，每张表有且仅有一个向量索引；其中 `t1.sql` 声明实际 `FOREIGN KEY` 约束。"
-                if include_vector
-                else "- `t0.sql` 和 `t1.sql` 是普通 InnoDB 表，兼容输出不创建向量索引；其中 `t1.sql` 声明实际 `FOREIGN KEY` 约束。"
-            ),
-            (
-                "- `t2.sql` 到 `t6.sql` 是临时表，保留向量列但不创建向量索引，也不声明实际外键。"
-                if include_vector
-                else "- `t2.sql` 到 `t6.sql` 是临时表，兼容输出不包含向量列，也不声明实际外键。"
-            ),
-            (
-                "- `t7.sql` 到 `t26.sql` 是分区表，保留向量列但不创建向量索引，也不声明实际外键。"
-                if include_vector
-                else "- `t7.sql` 到 `t26.sql` 是分区表，兼容输出不包含向量列，也不声明实际外键。"
-            ),
+            "- `t0.sql` 和 `t1.sql` 是普通 InnoDB 表，不创建向量索引；其中 `t1.sql` 声明实际 `FOREIGN KEY` 约束。",
+            "- `t2.sql` 到 `t6.sql` 是临时表，不包含向量列，也不声明实际外键。",
+            "- `t7.sql` 到 `t26.sql` 是分区表，不包含向量列，也不声明实际外键。",
             "- 按 InnoDB 每表最多 64 个二级索引计算，每张表补齐到索引上限数减 3，即 61 个索引；`PRIMARY KEY` 不计入该数量。",
-            (
-                "- `t0.sql` 和 `t1.sql` 的 61 个索引包含 1 个向量索引和 60 个常规二级索引，其余表为 61 个常规二级索引。"
-                if include_vector
-                else "- 兼容输出不包含向量索引，每张表均为 61 个常规二级索引。"
-            ),
+            "- 输出不包含向量索引，每张表均为 61 个常规二级索引。",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -641,23 +566,22 @@ def execution_doc(include_vector: bool = True, include_subpartition: bool = True
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="生成 MySQL/PolarDB 基表 DDL 与种子数据")
     parser.add_argument("--output-dir", type=Path, default=OUT_DIR, help="输出目录，默认写入 sql_base_tables")
-    parser.add_argument("--without-vector", action="store_true", help="生成不包含 VECTOR 列和 VEC_FROMTEXT 的兼容 SQL")
     parser.add_argument("--without-subpartition", action="store_true", help="将二级分区表降级为一级分区表")
     return parser.parse_args()
 
 
-def generate_files(output_dir: Path, include_vector: bool = True, include_subpartition: bool = True) -> None:
+def generate_files(output_dir: Path, include_subpartition: bool = True) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     for path in output_dir.glob("*.sql"):
         path.unlink()
     for index in range(27):
         (output_dir / f"t{index}.sql").write_text(
-            create_table_sql(index, include_vector=include_vector, include_subpartition=include_subpartition),
+            create_table_sql(index, include_subpartition=include_subpartition),
             encoding="utf-8",
         )
-    (output_dir / "zz_seed_fk_data.sql").write_text(seed_sql(include_vector=include_vector), encoding="utf-8")
+    (output_dir / "zz_seed_fk_data.sql").write_text(seed_sql(), encoding="utf-8")
     (output_dir / "执行顺序说明.md").write_text(
-        execution_doc(include_vector=include_vector, include_subpartition=include_subpartition),
+        execution_doc(include_subpartition=include_subpartition),
         encoding="utf-8",
     )
 
@@ -666,7 +590,6 @@ def main() -> None:
     args = parse_args()
     generate_files(
         args.output_dir,
-        include_vector=not args.without_vector,
         include_subpartition=not args.without_subpartition,
     )
 

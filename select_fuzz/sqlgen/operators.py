@@ -217,10 +217,6 @@ def build_operator_registry() -> OperatorRegistry:
         "ST_X",
         "ST_Y",
         "MATCH_AGAINST",
-        "VEC_DISTANCE_COSINE",
-        "VEC_DISTANCE_EUCLIDEAN",
-        "VEC_FROMTEXT",
-        "VEC_TOTEXT",
     ]:
         registry.register(name, "函数")
     for name in [

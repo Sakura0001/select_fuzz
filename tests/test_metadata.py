@@ -46,7 +46,7 @@ def test_解析_create_temporary_table() -> None:
         SET FOREIGN_KEY_CHECKS=0;
         CREATE TEMPORARY TABLE `temp_base` (
           `id` BIGINT NOT NULL,
-          `embedding` VECTOR(4),
+          `name` VARCHAR(64),
           PRIMARY KEY (`id`)
         );
         """
@@ -54,10 +54,10 @@ def test_解析_create_temporary_table() -> None:
 
     assert table.name == "temp_base"
     assert table.is_temporary is True
-    assert table.columns["embedding"].type_family is ColumnTypeFamily.VECTOR
+    assert table.columns["name"].type_family is ColumnTypeFamily.STRING
 
 
-def test_完整基表目录能解析全部表_列族_向量和分区() -> None:
+def test_完整基表目录能解析全部表_列族和分区() -> None:
     base_dir = Path("sql_base_tables")
     tables = []
     for sql_file in load_base_sql_files(base_dir):
@@ -70,7 +70,7 @@ def test_完整基表目录能解析全部表_列族_向量和分区() -> None:
 
     assert [table.name for table in tables] == [f"t{index}" for index in range(27)]
     assert {table.name for table in tables if table.is_temporary} == {f"t{index}" for index in range(2, 7)}
-    assert {table.name: len(table.columns) for table in tables} == {f"t{index}": 44 for index in range(27)}
+    assert {table.name: len(table.columns) for table in tables} == {f"t{index}": 42 for index in range(27)}
     families = {column.type_family for table in tables for column in table.columns.values()}
     assert {
         ColumnTypeFamily.INTEGER,
@@ -84,14 +84,12 @@ def test_完整基表目录能解析全部表_列族_向量和分区() -> None:
         ColumnTypeFamily.SET,
         ColumnTypeFamily.BIT,
         ColumnTypeFamily.JSON,
-        ColumnTypeFamily.VECTOR,
     }.issubset(families)
+    assert "VECTOR" not in ColumnTypeFamily.__members__
     assert {table.name for table in tables if table.partition is not None} == {f"t{index}" for index in range(7, 27)}
     assert {table.name for table in tables if table.partition and table.partition.subpartition_type} == {
         f"t{index}" for index in range(11, 27)
     }
-    assert tables[0].columns["vector_col"].vector_dimensions == 4
-    assert tables[0].columns["vector_aux_col"].vector_dimensions == 8
 
 
 def test_完整基表_不生成全文索引() -> None:
@@ -141,27 +139,25 @@ def test_完整基表_分区表不定义外键_普通永久表保留外键覆盖
     assert "FOREIGN KEY" not in partitioned_sql
 
 
-def test_完整基表_种子数据包含向量并覆盖每张表() -> None:
+def test_完整基表_种子数据不包含向量并覆盖每张表() -> None:
     seed_sql = Path("sql_base_tables", "zz_seed_fk_data.sql").read_text(encoding="utf-8")
 
     for index in range(27):
         assert f"INSERT INTO `t{index}` " in seed_sql
-    assert "VEC_FROMTEXT" in seed_sql
+    assert "VEC_FROMTEXT" not in seed_sql
     assert "STRING_TO_VECTOR" not in seed_sql
 
 
-def test_解析普通表列索引外键分区和向量列() -> None:
+def test_解析普通表列索引外键和分区() -> None:
     sql = """
-    CREATE TABLE IF NOT EXISTS vector_child (
+    CREATE TABLE IF NOT EXISTS normal_child (
       id BIGINT UNSIGNED NOT NULL,
       parent_id BIGINT UNSIGNED NOT NULL,
       score DECIMAL(10,2) NULL,
       payload JSON NULL,
-      embedding VECTOR(4) NOT NULL COMMENT '向量列',
       created_at DATETIME(6) NOT NULL,
       PRIMARY KEY (id),
       KEY idx_parent (parent_id),
-      KEY idx_vector (embedding) COMMENT 'imci_vector_index=HNSW(metric=cosine)',
       CONSTRAINT fk_child_parent FOREIGN KEY (parent_id) REFERENCES parent_table(id)
     ) ENGINE=InnoDB
     PARTITION BY RANGE (id)
@@ -174,14 +170,11 @@ def test_解析普通表列索引外键分区和向量列() -> None:
 
     table = parse_create_table(sql)
 
-    assert table.name == "vector_child"
+    assert table.name == "normal_child"
     assert table.columns["id"].type_family is ColumnTypeFamily.INTEGER
     assert table.columns["score"].type_family is ColumnTypeFamily.DECIMAL
     assert table.columns["payload"].type_family is ColumnTypeFamily.JSON
-    assert table.columns["embedding"].type_family is ColumnTypeFamily.VECTOR
-    assert table.columns["embedding"].vector_dimensions == 4
     assert table.indexes["idx_parent"].columns == ["parent_id"]
-    assert table.indexes["idx_vector"].is_vector is True
     assert table.foreign_keys[0].name == "fk_child_parent"
     assert table.foreign_keys[0].parent_table == "parent_table"
     assert table.partition is not None

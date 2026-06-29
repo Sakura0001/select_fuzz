@@ -18,7 +18,6 @@ SQL_VALIDITY_INTENTIONALLY_INVALID = "故意不合法"
 class GenerationOptions:
     require_cte: bool = False
     require_join: bool = False
-    require_vector: bool = False
     require_set_operation: bool = False
     require_subquery: bool = False
     require_window: bool = False
@@ -86,7 +85,9 @@ class SQLGenerator:
         if required_query is not None:
             return required_query
 
-        use_set_operation = options.require_set_operation or (depth > 1 and self.random.random() < 0.18)
+        use_set_operation = options.require_set_operation or (
+            options.require_feature is None and depth > 1 and self.random.random() < 0.18
+        )
         projection_count = 3 if use_set_operation and options.require_window else 2 if use_set_operation else None
         body = self._select_block(tables, options, depth, projection_count=projection_count)
         if use_set_operation:
@@ -116,7 +117,6 @@ class SQLGenerator:
             and not any(
                 [
                     options.require_cte,
-                    options.require_vector,
                     options.require_set_operation,
                     options.require_subquery,
                     options.require_window,
@@ -272,8 +272,6 @@ class SQLGenerator:
             window_enabled = True
         if options.require_feature == "order_expression_extensions":
             group_enabled = False
-        if options.require_vector:
-            group_enabled = False
         if projection_count is not None:
             group_enabled = False
             window_enabled = options.require_window
@@ -286,7 +284,6 @@ class SQLGenerator:
             group_enabled,
             window_enabled,
             projection_count,
-            options.require_vector,
             options.require_feature,
         )
         optimizer_hint = self._optimizer_hint(refs, force=options.require_feature == "optimizer_hints")
@@ -294,7 +291,7 @@ class SQLGenerator:
         group_clause = self._group_clause(group_columns)
         having_clause = self._having_clause(group_enabled)
         window_clause = self._window_clause(refs, window_enabled, group_columns if group_enabled else None)
-        order_clause = self._vector_order_clause(refs, options.require_vector, group_enabled) or self._order_clause(
+        order_clause = self._order_clause(
             refs,
             orderable_aliases,
             modifier.strip() in {"DISTINCT", "DISTINCTROW"} or group_enabled,
@@ -343,10 +340,6 @@ class SQLGenerator:
                 chosen[0] = self.random.choice(partitioned_tables)
             else:
                 force_partition = False
-        if options.require_vector:
-            vector_tables = [table for table in tables if self._first_column(table, ColumnTypeFamily.VECTOR)]
-            if vector_tables and not self._first_column(chosen[0], ColumnTypeFamily.VECTOR):
-                chosen[0] = self.random.choice(vector_tables)
         refs = [TableRef(table=chosen[0], alias="t0")]
         sql = (
             "FROM "
@@ -481,7 +474,6 @@ class SQLGenerator:
         group_enabled: bool,
         window_enabled: bool,
         projection_count: Optional[int],
-        require_vector: bool,
         required_feature: Optional[str],
     ) -> tuple[str, List[str], List[str]]:
         count = projection_count or self.random.randint(1, 6)
@@ -514,16 +506,6 @@ class SQLGenerator:
                 self._hit(function)
                 items.append(f"{function}() OVER w AS rn")
                 orderable_aliases.append("rn")
-
-        if require_vector:
-            vector = self._vector_distance_expr(refs)
-            if vector:
-                items.append(f"{vector} AS vector_distance")
-                orderable_aliases.append("vector_distance")
-            vector_text = self._vector_to_string_expr(refs)
-            if vector_text and projection_count is None:
-                items.append(f"{vector_text} AS vector_text")
-                orderable_aliases.append("vector_text")
 
         if projection_count is None and not group_enabled and self.random.random() < 0.08:
             ref = self.random.choice(refs)
@@ -870,7 +852,7 @@ class SQLGenerator:
             if len(columns) >= 2:
                 return ref, self.random.sample(columns, 2)
         ref = refs[0]
-        columns = [column for column in ref.table.columns.values() if column.type_family is not ColumnTypeFamily.VECTOR]
+        columns = list(ref.table.columns.values())
         if len(columns) >= 2:
             return ref, self.random.sample(columns, 2)
         column = next(iter(ref.table.columns.values()))
@@ -987,42 +969,6 @@ class SQLGenerator:
             return Expr(f"LENGTH({column.sql})", ColumnTypeFamily.INTEGER)
         return Expr(f"HEX({column.sql})", ColumnTypeFamily.STRING)
 
-    def _vector_order_clause(self, refs: List[TableRef], require_vector: bool, group_enabled: bool) -> str:
-        if group_enabled or (not require_vector and self.random.random() >= 0.08):
-            return ""
-        distance = self._vector_distance_expr(refs)
-        if not distance:
-            return ""
-        self._hit("ORDER BY ASC")
-        self._hit("LIMIT")
-        return f"ORDER BY {distance} ASC"
-
-    def _vector_distance_expr(self, refs: List[TableRef]) -> Optional[str]:
-        candidates: List[tuple[TableRef, ColumnMetadata]] = []
-        for ref in refs:
-            for column in ref.table.columns.values():
-                if column.type_family is ColumnTypeFamily.VECTOR:
-                    candidates.append((ref, column))
-        if not candidates:
-            return None
-        ref, column = self.random.choice(candidates)
-        metric = self.random.choice(["COSINE", "EUCLIDEAN"])
-        self._hit(f"VEC_DISTANCE_{metric}")
-        self._hit("VEC_FROMTEXT")
-        return f"VEC_DISTANCE_{metric}({ref.alias}.{_q(column.name)}, VEC_FROMTEXT('{self._vector_literal(column)}'))"
-
-    def _vector_to_string_expr(self, refs: List[TableRef]) -> Optional[str]:
-        candidates: List[tuple[TableRef, ColumnMetadata]] = []
-        for ref in refs:
-            for column in ref.table.columns.values():
-                if column.type_family is ColumnTypeFamily.VECTOR:
-                    candidates.append((ref, column))
-        if not candidates:
-            return None
-        ref, column = self.random.choice(candidates)
-        self._hit("VEC_TOTEXT")
-        return f"VEC_TOTEXT({ref.alias}.{_q(column.name)})"
-
     def _window_extension_expr(self, refs: List[TableRef]) -> str:
         column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT})
         choice = self.random.choice(["LAG", "LEAD", "NTILE", "FIRST_VALUE", "LAST_VALUE"])
@@ -1098,8 +1044,6 @@ class SQLGenerator:
         candidates: List[tuple[TableRef, ColumnMetadata]] = []
         for ref in refs:
             for column in ref.table.columns.values():
-                if column.type_family is ColumnTypeFamily.VECTOR and preferred is None:
-                    continue
                 if preferred is None or column.type_family in preferred:
                     candidates.append((ref, column))
         if not candidates:
@@ -1225,7 +1169,7 @@ class SQLGenerator:
         return [
             index
             for index in table.indexes.values()
-            if index.columns and not index.primary and not index.fulltext and not index.spatial and not index.is_vector
+            if index.columns and not index.primary and not index.fulltext and not index.spatial
         ]
 
     def _indexed_refs(self, refs: List[TableRef]) -> List[tuple[TableRef, IndexMetadata]]:
@@ -1261,11 +1205,6 @@ class SQLGenerator:
             if column:
                 return column
         return next(iter(table.columns.values()))
-
-    def _vector_literal(self, column: ColumnMetadata) -> str:
-        dimensions = column.vector_dimensions or 4
-        values = [f"{self.random.random():.3f}" for _ in range(dimensions)]
-        return "[" + ",".join(values) + "]"
 
     def _string_literal(self) -> str:
         value = "".join(self.random.choice("abcxyz0123456789_") for _ in range(self.random_int(1, 10)))

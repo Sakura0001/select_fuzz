@@ -44,8 +44,6 @@ CREATE TABLE `t13` (
   `unsigned_int_col` int unsigned DEFAULT NULL,
   `unsigned_decimal_col` decimal(10,0) unsigned DEFAULT NULL,
   `json_col` json DEFAULT NULL,
-  `vector_col` vector(4),
-  `vector_aux_col` vector(8),
   PRIMARY KEY (`id_col`,`tenant_id`,`subpart_id`),
   UNIQUE KEY `uk_t13_ref_id` (`tenant_id`,`subpart_id`,`id_col`),
   UNIQUE KEY `uk_t13_metric_ref` (`tenant_id`,`subpart_id`,`int_col`,`bigint_col`),

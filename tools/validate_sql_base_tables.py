@@ -48,10 +48,6 @@ def first_level_partition_count(sql: str) -> int:
     return len(re.findall(r"^\s{2}PARTITION p\d+ ", sql, flags=re.I | re.M))
 
 
-def vector_dimensions(sql: str) -> list[int]:
-    return [int(value) for value in re.findall(r"\bvector\((\d+)\)", sql, flags=re.I)]
-
-
 def sql_secondary_index_count(sql: str) -> int:
     return len(re.findall(r"^\s+(?:UNIQUE\s+KEY|KEY|SPATIAL\s+KEY)\s+`", sql, flags=re.I | re.M))
 
@@ -107,7 +103,7 @@ def assert_seed_partition_coverage(seed_sql: str, errors: list[str]) -> None:
             fail(f"t{index} 种子数据 subpart_id 未覆盖 {SUBPARTITION_VALUES}", errors)
 
 
-def main(sql_dir: Path = SQL_DIR, include_vector: bool = True, include_subpartition: bool = True) -> int:
+def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
     errors: list[str] = []
     files = sorted(path.name for path in sql_dir.glob("t*.sql"))
     if len(files) != 27:
@@ -123,37 +119,17 @@ def main(sql_dir: Path = SQL_DIR, include_vector: bool = True, include_subpartit
         create_pattern = rf"^CREATE\s+(?:TEMPORARY\s+)?TABLE\s+`t{index}`"
         if len(re.findall(create_pattern, sql, flags=re.I | re.M)) != 1:
             fail(f"t{index}.sql 没有且仅有一个匹配表名的 CREATE TABLE", errors)
-        if include_vector:
-            if sql.upper().count("VECTOR(") < 2:
-                fail(f"t{index}.sql 向量列少于 2 个", errors)
-            for dimension in vector_dimensions(sql):
-                if dimension > 16383:
-                    fail(f"t{index}.sql 向量维度超过 16383：{dimension}", errors)
-        else:
-            if re.search(r"\bVECTOR\s*\(|imci_vector_index=", sql, flags=re.I):
-                fail(f"t{index}.sql 兼容输出不应包含向量列或向量索引备注", errors)
-        vector_index_count = sql.count("imci_vector_index=")
-        effective_index_count = sql_secondary_index_count(sql) + vector_index_count
+        if re.search(r"\bVECTOR\s*\(|imci_vector_index=|\bVEC_", sql, flags=re.I):
+            fail(f"t{index}.sql 不应包含向量列、向量索引备注或向量函数", errors)
+        effective_index_count = sql_secondary_index_count(sql)
         if effective_index_count != TARGET_TOTAL_INDEX_COUNT:
             fail(f"t{index}.sql 索引数量应为 {TARGET_TOTAL_INDEX_COUNT}，实际 {effective_index_count}", errors)
-        if include_vector and index <= 1:
-            if vector_index_count != 1:
-                fail(f"t{index}.sql 普通表应有且仅有 1 个向量索引，实际 {vector_index_count} 个", errors)
-            if "COMMENT='COLUMNAR=1'" not in sql:
-                fail(f"t{index}.sql 普通表向量索引需要表级 COLUMNAR=1", errors)
-        else:
-            if vector_index_count != 0:
-                fail(f"t{index}.sql 临时表或分区表不应创建向量索引，实际 {vector_index_count} 个", errors)
-            if "COMMENT='COLUMNAR=1'" in sql:
-                fail(f"t{index}.sql 临时表或分区表不应带表级 COLUMNAR=1", errors)
+        if "COMMENT='COLUMNAR=1'" in sql:
+            fail(f"t{index}.sql 不应带向量索引所需的表级 COLUMNAR=1", errors)
         if "SET FOREIGN_KEY_CHECKS=0;" not in sql or "SET FOREIGN_KEY_CHECKS=1;" not in sql:
             fail(f"t{index}.sql 缺少外键检查开关", errors)
         if "SET transaction_isolation = 'READ-COMMITTED';" not in sql:
             fail(f"t{index}.sql 缺少 READ COMMITTED 隔离级别设置", errors)
-        if re.search(r"vector_[^\n]*invisible", sql, re.I):
-            fail(f"t{index}.sql 向量列不应设置为 INVISIBLE", errors)
-        if re.search(r"(PRIMARY KEY|UNIQUE KEY|FOREIGN KEY|PARTITION BY|SUBPARTITION BY)[^\n]*vector_", sql, re.I):
-            fail(f"t{index}.sql 向量列不应进入主键、唯一键、外键或分区键", errors)
         if index in {0, 2} and "UNIQUE KEY `idx_t" not in sql:
             fail(f"t{index}.sql 普通或临时表应尽量将安全索引转换为 UNIQUE KEY", errors)
         if index == 0:
@@ -217,9 +193,9 @@ def main(sql_dir: Path = SQL_DIR, include_vector: bool = True, include_subpartit
         fail(f"表类型分布不匹配：{type_counts}", errors)
 
     all_sql = "\n".join(all_sql_parts)
-    assert_no_unsupported_geometry(all_sql, "带向量基表目录", errors)
+    assert_no_unsupported_geometry(all_sql, "基表目录", errors)
     if re.search(r"\bFULLTEXT\b", all_sql, re.I):
-        fail("带向量基表目录不应包含 FULLTEXT 索引", errors)
+        fail("基表目录不应包含 FULLTEXT 索引", errors)
     required_fragments = [
         "INVISIBLE",
         " DESC",
@@ -232,8 +208,6 @@ def main(sql_dir: Path = SQL_DIR, include_vector: bool = True, include_subpartit
         "ON DELETE CASCADE",
         "ON DELETE SET NULL",
     ]
-    if include_vector:
-        required_fragments.extend(["FAISS_HNSW_FLAT", "HNSW"])
     for fragment in required_fragments:
         if fragment not in all_sql:
             fail(f"缺少覆盖项：{fragment}", errors)
@@ -243,7 +217,7 @@ def main(sql_dir: Path = SQL_DIR, include_vector: bool = True, include_subpartit
         fail("缺少 zz_seed_fk_data.sql", errors)
     else:
         seed_sql = seed_path.read_text(encoding="utf-8")
-        assert_no_unsupported_geometry(seed_sql, "带向量基表种子数据", errors)
+        assert_no_unsupported_geometry(seed_sql, "基表种子数据", errors)
         if "SET transaction_isolation = 'READ-COMMITTED';" not in seed_sql:
             fail("种子数据脚本缺少 READ COMMITTED 隔离级别设置", errors)
         if f"CREATE TABLE `{SEED_NUMBER_TABLE}`" not in seed_sql:
@@ -259,12 +233,8 @@ def main(sql_dir: Path = SQL_DIR, include_vector: bool = True, include_subpartit
             if f"WHERE `n` <= {count}" not in seed_sql:
                 fail(f"t{index} 种子数据缺少按行数过滤的 INSERT SELECT", errors)
         assert_seed_partition_coverage(seed_sql, errors)
-        if include_vector and seed_sql.count("VEC_FROMTEXT(") != 54:
-            fail("种子数据脚本应为每张表插入 2 个向量表达式", errors)
-        if not include_vector and re.search(r"\bVEC_FROMTEXT\s*\(", seed_sql, re.I):
-            fail("兼容种子数据不应包含 VEC_FROMTEXT", errors)
-        if re.search(r"\b(?:STRING_TO_VECTOR|VECTOR_TO_STRING|DISTANCE)\s*\(|\bVEC_DISTANCE_DOT\b|'DOT'", seed_sql, re.I):
-            fail("种子数据脚本不应包含旧向量函数、DISTANCE 第三参数语法或 DOT 距离", errors)
+        if re.search(r"\b(?:VECTOR|VEC_FROMTEXT|STRING_TO_VECTOR|VECTOR_TO_STRING|DISTANCE)\s*\(|\bVEC_DISTANCE_\w+\b|'DOT'", seed_sql, re.I):
+            fail("种子数据脚本不应包含向量类型、向量函数、DISTANCE 第三参数语法或 DOT 距离", errors)
         if re.search(r"\b(?:nan|inf)\b", seed_sql, re.I):
             fail("种子数据不应包含 NaN 或 Inf", errors)
         for index in range(27):
@@ -280,8 +250,6 @@ def main(sql_dir: Path = SQL_DIR, include_vector: bool = True, include_subpartit
             if name not in doc:
                 fail(f"执行顺序说明缺少 {name}", errors)
         doc_fragments = ["READ-COMMITTED", "1000", "2000", "UNIQUE KEY"]
-        if include_vector:
-            doc_fragments.extend(["vidx_disabled", "SUPER", "vidx_hnsw_cache_size", "LIMIT", "ASC", "DISTANCE"])
         for fragment in doc_fragments:
             if fragment not in doc:
                 fail(f"执行顺序说明缺少约束说明：{fragment}", errors)
@@ -295,14 +263,13 @@ def main(sql_dir: Path = SQL_DIR, include_vector: bool = True, include_subpartit
     if errors:
         print("\n".join(errors))
         return 1
-    print("结构验证通过：27 张基表、8 个一级分区、分区种子数据、向量约束、外键、索引类型和执行顺序文档均满足要求。")
+    print("结构验证通过：27 张基表、8 个一级分区、分区种子数据、无向量约束、外键、索引类型和执行顺序文档均满足要求。")
     return 0
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="校验生成的基表 DDL 是否覆盖当前要求")
     parser.add_argument("--sql-dir", type=Path, default=SQL_DIR, help="待校验的 SQL 目录")
-    parser.add_argument("--without-vector", action="store_true", help="按不含向量的兼容输出校验")
     parser.add_argument("--without-subpartition", action="store_true", help="按不含二级分区的兼容输出校验")
     return parser.parse_args()
 
@@ -312,7 +279,6 @@ if __name__ == "__main__":
     raise SystemExit(
         main(
             sql_dir=args.sql_dir,
-            include_vector=not args.without_vector,
             include_subpartition=not args.without_subpartition,
         )
     )

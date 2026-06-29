@@ -14,7 +14,6 @@ def _tables():
           id BIGINT NOT NULL,
           name VARCHAR(64) NOT NULL,
           payload JSON NULL,
-          embedding VECTOR(4) NOT NULL,
           PRIMARY KEY (id)
         );
         """
@@ -47,7 +46,7 @@ def _base_tables():
     return tables
 
 
-def test_算子覆盖矩阵包含_select_核心结构和向量算子() -> None:
+def test_算子覆盖矩阵包含_select_核心结构且不包含向量算子() -> None:
     registry = build_operator_registry()
 
     assert registry.has("WITH")
@@ -61,10 +60,10 @@ def test_算子覆盖矩阵包含_select_核心结构和向量算子() -> None:
     assert registry.has("FOR UPDATE")
     assert registry.has("CASE WHEN")
     assert registry.has("JSON_ARROW_UNQUOTE")
-    assert registry.has("VEC_FROMTEXT")
-    assert registry.has("VEC_TOTEXT")
-    assert registry.has("VEC_DISTANCE_COSINE")
-    assert registry.has("VEC_DISTANCE_EUCLIDEAN")
+    assert not registry.has("VEC_FROMTEXT")
+    assert not registry.has("VEC_TOTEXT")
+    assert not registry.has("VEC_DISTANCE_COSINE")
+    assert not registry.has("VEC_DISTANCE_EUCLIDEAN")
     assert not registry.has("DISTANCE_DOT")
 
 
@@ -513,17 +512,16 @@ def test_mysql_8022_新增扩展语法会进入默认随机流量() -> None:
         assert name in generator.coverage_counts
 
 
-def test_生成_sql_只引用已知表并包含_cte_join_向量距离() -> None:
+def test_生成_sql_只引用已知表并包含_cte_join() -> None:
     generator = SQLGenerator(random_seed=7, max_sql_length=3000)
 
     sql = generator.generate(
         _tables(),
-        GenerationOptions(require_cte=True, require_join=True, require_vector=True),
+        GenerationOptions(require_cte=True, require_join=True),
     )
 
     assert "WITH" in sql
     assert "JOIN" in sql
-    assert "VEC_DISTANCE_" in sql
     assert "parent_table" in sql or "child_table" in sql
     assert "unknown_table" not in sql
 
@@ -662,7 +660,7 @@ def test_默认生成_sql_避免_only_full_group_by_风险() -> None:
     assert " HAVING " not in sql
 
 
-def test_完整基表生成_sql_只引用已知表列并使用当前环境向量函数白名单() -> None:
+def test_完整基表生成_sql_只引用已知表列且不生成向量函数() -> None:
     tables = _base_tables()
     known_identifiers = {table.name for table in tables}
     known_identifiers.update(column.name for table in tables for column in table.columns.values())
@@ -680,9 +678,9 @@ def test_完整基表生成_sql_只引用已知表列并使用当前环境向量
         assert "VEC_DISTANCE_DOT" not in upper
         assert "'DOT'" not in upper
         assert "VECTOR_DISTANCE" not in upper
-        if "VEC_DISTANCE_" in upper:
-            assert "VEC_FROMTEXT(" in upper
-            assert any(function in upper for function in ["VEC_DISTANCE_COSINE(", "VEC_DISTANCE_EUCLIDEAN("])
+        assert "VEC_DISTANCE_" not in upper
+        assert "VEC_FROMTEXT(" not in upper
+        assert "VEC_TOTEXT(" not in upper
         assert "ST_GEOMFROMTEXT" not in upper
         assert "ST_ASTEXT" not in upper
 
@@ -725,17 +723,12 @@ def test_随机递归深度和长度保护稳定() -> None:
         assert len(sql) <= 2500
 
 
-def test_强制生成当前环境兼容向量表达式() -> None:
+def test_generation_options_不再暴露向量强制开关() -> None:
     generator = SQLGenerator(random_seed=31, max_sql_length=8000)
 
-    sql = generator.generate(_base_tables(), GenerationOptions(require_vector=True))
+    assert not hasattr(GenerationOptions(), "require_vector")
+    sql = generator.generate(_base_tables())
     upper = sql.upper()
 
-    assert "VEC_FROMTEXT(" in upper
-    assert any(function in upper for function in ["VEC_DISTANCE_COSINE(", "VEC_DISTANCE_EUCLIDEAN("])
-    assert "VEC_TOTEXT(" in upper or "VEC_DISTANCE_" in upper
-    assert "STRING_TO_VECTOR(" not in upper
-    assert "VECTOR_TO_STRING(" not in upper
-    assert "DISTANCE(" not in upper
-    assert "VEC_DISTANCE_DOT" not in upper
-    assert "'DOT'" not in upper
+    assert "VEC_" not in upper
+    assert "VECTOR" not in upper

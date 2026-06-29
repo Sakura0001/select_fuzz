@@ -70,7 +70,7 @@ def _base_dir(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (directory / "001_parent.sql").write_text(
-        "CREATE TABLE parent_table (id BIGINT NOT NULL, name VARCHAR(64), embedding VECTOR(4), PRIMARY KEY (id));",
+        "CREATE TABLE parent_table (id BIGINT NOT NULL, name VARCHAR(64), PRIMARY KEY (id));",
         encoding="utf-8",
     )
     return directory
@@ -352,17 +352,17 @@ def test_每次执行查询前设置_session_最大执行时间为_5_秒(tmp_pat
     assert _is_query_expression(db.executed[startup_sql_count + 1])
 
 
-def test_运行时不会强制每条查询都包含向量表达式(tmp_path: Path) -> None:
+def test_运行时生成选项不包含向量强制开关(tmp_path: Path) -> None:
     class RecordingGenerator:
         coverage_counts: dict[str, int] = {}
         recent_hits: list[str] = []
 
         def __init__(self, sql: str) -> None:
             self.sql = sql
-            self.require_vector: bool | None = None
+            self.has_require_vector: bool | None = None
 
         def generate(self, _tables, options) -> str:
-            self.require_vector = options.require_vector
+            self.has_require_vector = hasattr(options, "require_vector")
             return self.sql
 
     databases = [FakeDatabase(), FakeDatabase(), FakeDatabase()]
@@ -386,7 +386,7 @@ def test_运行时不会强制每条查询都包含向量表达式(tmp_path: Pat
     for worker_id in range(3):
         task.step(worker_id)
 
-    assert [generator.require_vector for generator in generators] == [False, False, False]
+    assert [generator.has_require_vector for generator in generators] == [False, False, False]
     assert [database.executed[-1] for database in databases] == ["SELECT 0", "SELECT 1", "SELECT 2"]
 
 

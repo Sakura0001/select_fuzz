@@ -53,7 +53,7 @@ def test_端到端任务执行日志去重和_api_查询(tmp_path: Path) -> None
     base_dir = tmp_path / "sql_base_tables"
     base_dir.mkdir()
     (base_dir / "001_parent.sql").write_text(
-        "CREATE TABLE parent_table (id BIGINT NOT NULL, name VARCHAR(64), embedding VECTOR(4), PRIMARY KEY (id));",
+        "CREATE TABLE parent_table (id BIGINT NOT NULL, name VARCHAR(64), PRIMARY KEY (id));",
         encoding="utf-8",
     )
     (base_dir / "002_child.sql").write_text(

@@ -19,7 +19,6 @@ class ColumnTypeFamily(str, Enum):
     BIT = "BIT"
     JSON = "JSON"
     SPATIAL = "空间"
-    VECTOR = "向量"
     UNKNOWN = "未知"
 
 
@@ -35,7 +34,6 @@ class ColumnMetadata:
     sql_type: str
     type_family: ColumnTypeFamily
     nullable: bool = True
-    vector_dimensions: Optional[int] = None
     invisible: bool = False
     generated: bool = False
 
@@ -48,7 +46,6 @@ class IndexMetadata:
     primary: bool = False
     fulltext: bool = False
     spatial: bool = False
-    is_vector: bool = False
 
 
 @dataclass(frozen=True)

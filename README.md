@@ -1,6 +1,6 @@
 # sql_fuzz
 
-`sql_fuzz` 是面向 MySQL 8.0.22 和 PolarDB MySQL 兼容向量扩展的 SQL 模糊测试工具。
+`sql_fuzz` 是面向 MySQL 8.0.22 的 SQL 模糊测试工具。
 
 项目默认使用中文文档、中文配置说明和中文界面文案。SQL、MySQL、PolarDB、函数名、错误码和数据类型保留官方英文写法。
 
@@ -54,16 +54,14 @@ npm run dev -- --port 5173
 
 项目默认使用 `sql_base_tables/`。每个任务启动时，程序会读取配置中的 `base_sql_dir`，按文件名排序读取所有 `.sql` 文件，并在目标数据库上全部执行。启动阶段会执行 `DROP DATABASE IF EXISTS test`、`CREATE DATABASE test`、`USE test`，随后创建基表和插入种子数据，并对每张解析到的表执行 `SELECT COUNT(*)` 校验，发现 0 行会直接失败。
 
-`sql_base_tables/` 包含普通表、临时表、一级分区表、二级分区表和 `VECTOR(N)` 列。种子数据由固定随机种子生成，每张表插入 1000 到 2000 行合法数据，并尽量把可安全唯一化的索引生成为 `UNIQUE KEY`；二级分区表会保守处理唯一索引，避免违反 MySQL 分区唯一键必须包含全部分区列的限制。由于临时表是 session 级对象，多线程任务会在每个 worker 连接中单独创建临时表并插入临时表种子数据。lost connection 恢复后也只重建临时表并重新插入临时表数据，不重建永久表。
+`sql_base_tables/` 包含普通表、临时表、一级分区表和二级分区表，不包含向量类型、向量索引或向量函数。种子数据由固定随机种子生成，每张表插入 1000 到 2000 行合法数据，并尽量把可安全唯一化的索引生成为 `UNIQUE KEY`；二级分区表会保守处理唯一索引，避免违反 MySQL 分区唯一键必须包含全部分区列的限制。由于临时表是 session 级对象，多线程任务会在每个 worker 连接中单独创建临时表并插入临时表种子数据。lost connection 恢复后也只重建临时表并重新插入临时表数据，不重建永久表。
 
-可以生成不含向量和二级分区的本地 MySQL 兼容目录，用于普通 MySQL 建表和插入验证：
+可以生成不含二级分区的本地 MySQL 兼容目录，用于普通 MySQL 建表和插入验证：
 
 ```bash
-.venv/bin/python tools/generate_sql_base_tables.py --output-dir /tmp/select_fuzz_mysql_compatible --without-vector --without-subpartition
-.venv/bin/python tools/validate_sql_base_tables.py --sql-dir /tmp/select_fuzz_mysql_compatible --without-vector --without-subpartition
+.venv/bin/python tools/generate_sql_base_tables.py --output-dir /tmp/select_fuzz_mysql_compatible --without-subpartition
+.venv/bin/python tools/validate_sql_base_tables.py --sql-dir /tmp/select_fuzz_mysql_compatible --without-subpartition
 ```
-
-向量查询按当前内网环境能力生成：`VEC_FROMTEXT`、`VEC_TOTEXT`、`VEC_DISTANCE_COSINE(v1, v2)`、`VEC_DISTANCE_EUCLIDEAN(v1, v2)`。生成器不会使用 `STRING_TO_VECTOR`、`VECTOR_TO_STRING`、`DISTANCE(..., metric)` 或 `DOT` 距离，也不会把向量列用于主键、外键、唯一键、分区键、普通跨类型比较、通用分组或普通排序表达式。运行时默认不强制每条查询包含向量表达式，向量只作为小比例随机覆盖；测试可以通过 `GenerationOptions(require_vector=True)` 强制覆盖向量生成分支。
 
 查询生成器按 MySQL 8.0.22 兼容范围生成查询表达式。集合运算只生成 `UNION` 和 `UNION ALL`，不生成 MySQL 8.0.31 才支持的 `INTERSECT`、`INTERSECT ALL`、`EXCEPT`、`EXCEPT ALL`，也不生成 MySQL 不支持的 `MINUS`。`SQL_CACHE` 已在 MySQL 8.0 移除，`SQL_NO_CACHE` 在 MySQL 8.0 中已废弃且无实际效果，因此也不会生成。
 

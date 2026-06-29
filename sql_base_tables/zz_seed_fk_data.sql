@@ -39,7 +39,7 @@ DELETE FROM `t1`;
 DELETE FROM `t0`;
 SET FOREIGN_KEY_CHECKS=1;
 /* t0:rows=1278 */
-INSERT INTO `t0` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t0` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   1,
@@ -82,13 +82,11 @@ SELECT
   b'10011001',
   1000000 + 0 * 100000 + `n`,
   2000000 + 0 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_0_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.100 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.110 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.120 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.130 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.100 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.110 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.120 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.130 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.140 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.150 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.160 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.170 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_0_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1278;
 /* t1:rows=1693 */
-INSERT INTO `t1` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t1` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   1,
@@ -131,13 +129,11 @@ SELECT
   b'10011001',
   1000000 + 1 * 100000 + `n`,
   2000000 + 1 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_1_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.200 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.210 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.220 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.230 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.200 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.210 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.220 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.230 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.240 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.250 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.260 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.270 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_1_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1693;
 /* t2:rows=1870 */
-INSERT INTO `t2` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t2` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   1,
@@ -180,13 +176,11 @@ SELECT
   b'10011001',
   1000000 + 2 * 100000 + `n`,
   2000000 + 2 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_2_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.300 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.310 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.320 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.330 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.300 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.310 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.320 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.330 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.340 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.350 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.360 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.370 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_2_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1870;
 /* t3:rows=1113 */
-INSERT INTO `t3` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t3` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   1,
@@ -229,13 +223,11 @@ SELECT
   b'10011001',
   1000000 + 3 * 100000 + `n`,
   2000000 + 3 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_3_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.400 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.410 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.420 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.430 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.400 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.410 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.420 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.430 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.440 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.450 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.460 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.470 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_3_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1113;
 /* t4:rows=1779 */
-INSERT INTO `t4` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t4` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   1,
@@ -278,13 +270,11 @@ SELECT
   b'10011001',
   1000000 + 4 * 100000 + `n`,
   2000000 + 4 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_4_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.500 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.510 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.520 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.530 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.500 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.510 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.520 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.530 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.540 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.550 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.560 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.570 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_4_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1779;
 /* t5:rows=1990 */
-INSERT INTO `t5` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t5` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   1,
@@ -327,13 +317,11 @@ SELECT
   b'10011001',
   1000000 + 5 * 100000 + `n`,
   2000000 + 5 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_5_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.600 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.610 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.620 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.630 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.600 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.610 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.620 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.630 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.640 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.650 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.660 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.670 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_5_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1990;
 /* t6:rows=1471 */
-INSERT INTO `t6` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t6` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   1,
@@ -376,13 +364,11 @@ SELECT
   b'10011001',
   1000000 + 6 * 100000 + `n`,
   2000000 + 6 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_6_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.700 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.710 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.720 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.730 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.700 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.710 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.720 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.730 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.740 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.750 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.760 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.770 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_6_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1471;
 /* t7:rows=1780 */
-INSERT INTO `t7` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t7` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -425,13 +411,11 @@ SELECT
   b'10011001',
   1000000 + 7 * 100000 + `n`,
   2000000 + 7 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_7_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.800 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.810 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.820 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.830 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.800 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.810 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.820 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.830 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.840 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.850 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.860 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.870 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_7_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1780;
 /* t8:rows=1070 */
-INSERT INTO `t8` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t8` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -474,13 +458,11 @@ SELECT
   b'10011001',
   1000000 + 8 * 100000 + `n`,
   2000000 + 8 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_8_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.900 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.910 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.920 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.930 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(0.900 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.910 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.920 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.930 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.940 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.950 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.960 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(0.970 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_8_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1070;
 /* t9:rows=1848 */
-INSERT INTO `t9` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t9` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -523,13 +505,11 @@ SELECT
   b'10011001',
   1000000 + 9 * 100000 + `n`,
   2000000 + 9 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_9_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.000 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.010 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.020 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.030 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.000 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.010 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.020 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.030 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.040 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.050 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.060 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.070 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_9_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1848;
 /* t10:rows=1549 */
-INSERT INTO `t10` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t10` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -572,13 +552,11 @@ SELECT
   b'10011001',
   1000000 + 10 * 100000 + `n`,
   2000000 + 10 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_10_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.100 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.110 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.120 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.130 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.100 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.110 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.120 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.130 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.140 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.150 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.160 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.170 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_10_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1549;
 /* t11:rows=1720 */
-INSERT INTO `t11` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t11` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -621,13 +599,11 @@ SELECT
   b'10011001',
   1000000 + 11 * 100000 + `n`,
   2000000 + 11 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_11_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.200 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.210 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.220 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.230 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.200 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.210 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.220 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.230 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.240 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.250 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.260 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.270 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_11_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1720;
 /* t12:rows=1537 */
-INSERT INTO `t12` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t12` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -670,13 +646,11 @@ SELECT
   b'10011001',
   1000000 + 12 * 100000 + `n`,
   2000000 + 12 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_12_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.300 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.310 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.320 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.330 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.300 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.310 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.320 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.330 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.340 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.350 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.360 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.370 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_12_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1537;
 /* t13:rows=1115 */
-INSERT INTO `t13` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t13` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -719,13 +693,11 @@ SELECT
   b'10011001',
   1000000 + 13 * 100000 + `n`,
   2000000 + 13 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_13_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.400 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.410 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.420 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.430 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.400 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.410 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.420 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.430 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.440 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.450 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.460 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.470 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_13_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1115;
 /* t14:rows=1291 */
-INSERT INTO `t14` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t14` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -768,13 +740,11 @@ SELECT
   b'10011001',
   1000000 + 14 * 100000 + `n`,
   2000000 + 14 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_14_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.500 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.510 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.520 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.530 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.500 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.510 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.520 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.530 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.540 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.550 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.560 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.570 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_14_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1291;
 /* t15:rows=1545 */
-INSERT INTO `t15` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t15` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -817,13 +787,11 @@ SELECT
   b'10011001',
   1000000 + 15 * 100000 + `n`,
   2000000 + 15 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_15_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.600 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.610 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.620 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.630 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.600 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.610 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.620 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.630 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.640 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.650 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.660 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.670 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_15_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1545;
 /* t16:rows=1777 */
-INSERT INTO `t16` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t16` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -866,13 +834,11 @@ SELECT
   b'10011001',
   1000000 + 16 * 100000 + `n`,
   2000000 + 16 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_16_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.700 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.710 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.720 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.730 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.700 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.710 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.720 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.730 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.740 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.750 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.760 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.770 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_16_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1777;
 /* t17:rows=1879 */
-INSERT INTO `t17` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t17` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -915,13 +881,11 @@ SELECT
   b'10011001',
   1000000 + 17 * 100000 + `n`,
   2000000 + 17 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_17_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.800 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.810 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.820 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.830 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.800 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.810 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.820 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.830 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.840 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.850 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.860 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.870 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_17_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1879;
 /* t18:rows=1606 */
-INSERT INTO `t18` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t18` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -964,13 +928,11 @@ SELECT
   b'10011001',
   1000000 + 18 * 100000 + `n`,
   2000000 + 18 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_18_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.900 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.910 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.920 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.930 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(1.900 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.910 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.920 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.930 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.940 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.950 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.960 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(1.970 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_18_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1606;
 /* t19:rows=1452 */
-INSERT INTO `t19` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t19` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -1013,13 +975,11 @@ SELECT
   b'10011001',
   1000000 + 19 * 100000 + `n`,
   2000000 + 19 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_19_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.000 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.010 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.020 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.030 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.000 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.010 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.020 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.030 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.040 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.050 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.060 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.070 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_19_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1452;
 /* t20:rows=1304 */
-INSERT INTO `t20` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t20` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -1062,13 +1022,11 @@ SELECT
   b'10011001',
   1000000 + 20 * 100000 + `n`,
   2000000 + 20 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_20_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.100 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.110 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.120 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.130 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.100 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.110 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.120 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.130 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.140 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.150 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.160 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.170 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_20_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1304;
 /* t21:rows=1375 */
-INSERT INTO `t21` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t21` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -1111,13 +1069,11 @@ SELECT
   b'10011001',
   1000000 + 21 * 100000 + `n`,
   2000000 + 21 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_21_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.200 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.210 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.220 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.230 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.200 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.210 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.220 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.230 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.240 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.250 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.260 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.270 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_21_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1375;
 /* t22:rows=1317 */
-INSERT INTO `t22` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t22` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -1160,13 +1116,11 @@ SELECT
   b'10011001',
   1000000 + 22 * 100000 + `n`,
   2000000 + 22 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_22_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.300 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.310 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.320 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.330 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.300 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.310 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.320 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.330 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.340 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.350 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.360 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.370 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_22_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1317;
 /* t23:rows=1273 */
-INSERT INTO `t23` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t23` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -1209,13 +1163,11 @@ SELECT
   b'10011001',
   1000000 + 23 * 100000 + `n`,
   2000000 + 23 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_23_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.400 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.410 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.420 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.430 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.400 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.410 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.420 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.430 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.440 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.450 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.460 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.470 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_23_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1273;
 /* t24:rows=1470 */
-INSERT INTO `t24` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t24` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -1258,13 +1210,11 @@ SELECT
   b'10011001',
   1000000 + 24 * 100000 + `n`,
   2000000 + 24 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_24_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.500 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.510 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.520 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.530 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.500 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.510 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.520 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.530 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.540 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.550 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.560 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.570 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_24_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1470;
 /* t25:rows=1732 */
-INSERT INTO `t25` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t25` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -1307,13 +1257,11 @@ SELECT
   b'10011001',
   1000000 + 25 * 100000 + `n`,
   2000000 + 25 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_25_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.600 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.610 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.620 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.630 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.600 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.610 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.620 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.630 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.640 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.650 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.660 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.670 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_25_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1732;
 /* t26:rows=1131 */
-INSERT INTO `t26` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`,`vector_col`,`vector_aux_col`)
+INSERT INTO `t26` (`id_col`,`tenant_id`,`subpart_id`,`parent_id_col`,`parent_tenant_id`,`parent_subpart_id`,`metric_parent_tenant_id`,`metric_parent_subpart_id`,`parent_int_col`,`parent_bigint_col`,`int_col`,`bigint_col`,`year_col`,`char_col`,`tinyint_col`,`bool_col`,`smallint_col`,`mediumint_col`,`decimal_col`,`float_col`,`double_col`,`date_col`,`datetime_col`,`timestamp_col`,`time_col`,`varchar_col`,`binary_col`,`varbinary_col`,`tinyblob_col`,`blob_col`,`mediumblob_col`,`longblob_col`,`tinytext_col`,`text_col`,`mediumtext_col`,`longtext_col`,`enum_col`,`set_col`,`bit_col`,`unsigned_int_col`,`unsigned_decimal_col`,`json_col`)
 SELECT
   `n`,
   ((`n` - 1) % 8) + 1,
@@ -1356,8 +1304,6 @@ SELECT
   b'10011001',
   1000000 + 26 * 100000 + `n`,
   2000000 + 26 * 100000 + `n`,
-  JSON_OBJECT('k', CONCAT('json_26_', `n`), 'n', `n`),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.700 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.710 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.720 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.730 + `n` * 0.001, 3) AS CHAR), ']')),
-  VEC_FROMTEXT(CONCAT('[', CAST(ROUND(2.700 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.710 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.720 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.730 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.740 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.750 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.760 + `n` * 0.001, 3) AS CHAR), ',', CAST(ROUND(2.770 + `n` * 0.001, 3) AS CHAR), ']'))
+  JSON_OBJECT('k', CONCAT('json_26_', `n`), 'n', `n`)
 FROM `_select_fuzz_seed_numbers`
 WHERE `n` <= 1131;

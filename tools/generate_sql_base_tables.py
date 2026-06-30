@@ -11,12 +11,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "sql_base_tables"
 TOP_PARTITION_VALUES = list(range(1, 9))
-SUBPARTITION_VALUES = [1, 2]
+SUBPARTITION_VALUES = list(range(1, 9))
 TARGET_TOTAL_INDEX_COUNT = 61
 MIN_SEED_ROWS = 1000
 MAX_SEED_ROWS = 2000
 SEED_ROW_RANDOM_SEED = 20260609
 SEED_NUMBER_TABLE = "_select_fuzz_seed_numbers"
+FIRST_PARTITION_START = 7
+FIRST_PARTITION_COUNT = 8
+SUBPARTITION_START = FIRST_PARTITION_START + FIRST_PARTITION_COUNT
+PARTITION_TYPES = [
+    "RANGE",
+    "RANGE COLUMNS",
+    "LIST",
+    "LIST COLUMNS",
+    "HASH",
+    "LINEAR HASH",
+    "KEY",
+    "LINEAR KEY",
+]
+SUBPARTITION_TABLE_COUNT = len(PARTITION_TYPES) * len(PARTITION_TYPES)
+TOTAL_TABLE_COUNT = SUBPARTITION_START + SUBPARTITION_TABLE_COUNT
 
 
 def table_kind(index: int) -> str:
@@ -24,76 +39,99 @@ def table_kind(index: int) -> str:
         return "normal"
     if index <= 6:
         return "temporary"
-    if index <= 10:
+    if index < SUBPARTITION_START:
         return "partition"
     return "subpartition"
 
 
-def range_partitions() -> str:
-    parts = [f"  PARTITION p{idx} VALUES LESS THAN ({value + 1})" for idx, value in enumerate(TOP_PARTITION_VALUES[:-1])]
-    parts.append(f"  PARTITION p{len(TOP_PARTITION_VALUES) - 1} VALUES LESS THAN MAXVALUE")
+def range_partition_value(index: int, values: list[int]) -> str:
+    if index == len(values) - 1:
+        return "MAXVALUE"
+    return str(values[index] + 1)
+
+
+def partition_expr(partition_type: str, column: str) -> str:
+    return f"(`{column}`)"
+
+
+def top_partition_definition(partition_type: str, index: int, subpartitions: list[str] | None = None) -> str:
+    suffix = ""
+    if partition_type.startswith("RANGE"):
+        suffix = f" VALUES LESS THAN ({range_partition_value(index, TOP_PARTITION_VALUES)})"
+    elif partition_type.startswith("LIST"):
+        suffix = f" VALUES IN ({TOP_PARTITION_VALUES[index]})"
+    if subpartitions is None:
+        return f"  PARTITION p{index}{suffix}"
+    inner = ",\n".join(f"    {line}" for line in subpartitions)
+    return f"  PARTITION p{index}{suffix} (\n{inner}\n  )"
+
+
+def subpartition_definition(partition_index: int, subpartition_index: int, subpartition_type: str) -> str:
+    name = f"p{partition_index}sp{subpartition_index}"
+    if subpartition_type.startswith("RANGE"):
+        value = range_partition_value(subpartition_index, SUBPARTITION_VALUES)
+        return f"SUBPARTITION {name} VALUES LESS THAN ({value})"
+    if subpartition_type.startswith("LIST"):
+        value = SUBPARTITION_VALUES[subpartition_index]
+        return f"SUBPARTITION {name} VALUES IN ({value})"
+    return f"SUBPARTITION {name}"
+
+
+def partition_definitions(partition_type: str) -> str:
+    parts = [top_partition_definition(partition_type, idx) for idx in range(len(TOP_PARTITION_VALUES))]
     return ",\n".join(parts)
 
 
-def list_partitions() -> str:
-    return ",\n".join(
-        f"  PARTITION p{idx} VALUES IN ({value})"
-        for idx, value in enumerate(TOP_PARTITION_VALUES)
+def top_partition_clause(partition_type: str) -> str:
+    expr = partition_expr(partition_type, "tenant_id")
+    if partition_type in {"HASH", "LINEAR HASH", "KEY", "LINEAR KEY"}:
+        return f"PARTITION BY {partition_type} {expr} PARTITIONS {len(TOP_PARTITION_VALUES)}"
+    return f"""PARTITION BY {partition_type} {expr} (
+{partition_definitions(partition_type)}
+)"""
+
+
+def subpartition_pair(index: int) -> tuple[str, str]:
+    pair_index = index - SUBPARTITION_START
+    outer = PARTITION_TYPES[pair_index // len(PARTITION_TYPES)]
+    inner = PARTITION_TYPES[pair_index % len(PARTITION_TYPES)]
+    return outer, inner
+
+
+def composite_partition_definitions(outer_type: str, inner_type: str) -> str:
+    parts = []
+    for partition_index in range(len(TOP_PARTITION_VALUES)):
+        subpartitions = None
+        if inner_type.startswith(("RANGE", "LIST")):
+            subpartitions = [
+                subpartition_definition(partition_index, subpartition_index, inner_type)
+                for subpartition_index in range(len(SUBPARTITION_VALUES))
+            ]
+        parts.append(top_partition_definition(outer_type, partition_index, subpartitions))
+    return ",\n".join(parts)
+
+
+def subpartition_clause(outer_type: str, inner_type: str) -> str:
+    outer_expr = partition_expr(outer_type, "tenant_id")
+    inner_expr = partition_expr(inner_type, "subpart_id")
+    subpartition_count = (
+        f" SUBPARTITIONS {len(SUBPARTITION_VALUES)}"
+        if inner_type in {"HASH", "LINEAR HASH", "KEY", "LINEAR KEY"}
+        else ""
     )
+    return f"""PARTITION BY {outer_type} {outer_expr}
+SUBPARTITION BY {inner_type} {inner_expr}{subpartition_count} (
+{composite_partition_definitions(outer_type, inner_type)}
+)"""
 
 
 def partition_clause(index: int, include_subpartition: bool = True) -> str:
-    if index == 7:
-        return f"""PARTITION BY RANGE (`tenant_id`) (
-{range_partitions()}
-)"""
-    if index == 8:
-        return f"""PARTITION BY LIST (`tenant_id`) (
-{list_partitions()}
-)"""
-    if index == 9:
-        return f"""PARTITION BY RANGE COLUMNS (`tenant_id`) (
-{range_partitions()}
-)"""
-    if index == 10:
-        return f"""PARTITION BY LIST COLUMNS (`tenant_id`) (
-{list_partitions()}
-)"""
+    if table_kind(index) == "partition":
+        return top_partition_clause(PARTITION_TYPES[index - FIRST_PARTITION_START])
+    outer, inner = subpartition_pair(index)
     if not include_subpartition:
-        return f"""PARTITION BY RANGE (`tenant_id`) (
-{range_partitions()}
-)"""
-
-    subpartition_patterns = [
-        ("RANGE", "HASH"),
-        ("RANGE", "LINEAR HASH"),
-        ("RANGE", "KEY"),
-        ("RANGE", "LINEAR KEY"),
-        ("RANGE COLUMNS", "HASH"),
-        ("RANGE COLUMNS", "LINEAR HASH"),
-        ("RANGE COLUMNS", "KEY"),
-        ("RANGE COLUMNS", "LINEAR KEY"),
-        ("LIST", "HASH"),
-        ("LIST", "LINEAR HASH"),
-        ("LIST", "KEY"),
-        ("LIST", "LINEAR KEY"),
-        ("LIST COLUMNS", "HASH"),
-        ("LIST COLUMNS", "LINEAR HASH"),
-        ("LIST COLUMNS", "KEY"),
-        ("LIST COLUMNS", "LINEAR KEY"),
-    ]
-    outer, inner = subpartition_patterns[index - 11]
-    if outer.startswith("RANGE"):
-        outer_expr = "(`tenant_id`)" if "COLUMNS" in outer else "(`tenant_id`)"
-        return f"""PARTITION BY {outer} {outer_expr}
-SUBPARTITION BY {inner} (`subpart_id`) SUBPARTITIONS 2 (
-{range_partitions()}
-)"""
-    outer_expr = "(`tenant_id`)" if "COLUMNS" in outer else "(`tenant_id`)"
-    return f"""PARTITION BY {outer} {outer_expr}
-SUBPARTITION BY {inner} (`subpart_id`) SUBPARTITIONS 2 (
-{list_partitions()}
-)"""
+        return top_partition_clause(outer)
+    return subpartition_clause(outer, inner)
 
 
 NORMAL_OR_TEMPORARY_UNIQUE_INDEXES = {
@@ -210,6 +248,7 @@ def supplemental_index_lines(index: int, target_sql_index_count: int, include_su
     missing_count = target_sql_index_count - existing_sql_index_count
     if missing_count < 0 or missing_count > len(index_lines):
         raise ValueError(f"无法补齐 t{index} 的索引数量：需要新增 {missing_count} 个")
+    random.Random(SEED_ROW_RANDOM_SEED + index * 1009).shuffle(index_lines)
     return index_lines[:missing_count]
 
 
@@ -316,7 +355,7 @@ def seed_row_count(index: int) -> int:
 
 
 def max_seed_row_count() -> int:
-    return max(seed_row_count(index) for index in range(27))
+    return max(seed_row_count(index) for index in range(TOTAL_TABLE_COUNT))
 
 
 def tenant_expr(index: int) -> str:
@@ -326,7 +365,7 @@ def tenant_expr(index: int) -> str:
 
 
 def subpart_expr(index: int) -> str:
-    if index >= 11:
+    if index >= SUBPARTITION_START:
         return f"((`n` - 1) % {len(SUBPARTITION_VALUES)}) + 1"
     return "1"
 
@@ -485,12 +524,12 @@ WHERE `n` <= {row_count};"""
 
 
 def seed_sql() -> str:
-    inserts = [insert_sql(index) for index in range(27)]
+    inserts = [insert_sql(index) for index in range(TOTAL_TABLE_COUNT)]
     lines = [
         "SET transaction_isolation = 'READ-COMMITTED';",
         "SET FOREIGN_KEY_CHECKS=0;",
         seed_number_table_sql(),
-        *[f"DELETE FROM `t{index}`;" for index in range(26, -1, -1)],
+        *[f"DELETE FROM `t{index}`;" for index in range(TOTAL_TABLE_COUNT - 1, -1, -1)],
         "SET FOREIGN_KEY_CHECKS=1;",
         *inserts,
     ]
@@ -498,12 +537,12 @@ def seed_sql() -> str:
 
 
 def execution_doc(include_subpartition: bool = True) -> str:
-    table_files = [f"t{index}.sql" for index in range(27)]
-    compatibility_note = "本目录下的 SQL 文件面向 MySQL 8.0.22 兼容能力生成，不包含向量类型、向量索引列备注或向量种子表达式。"
+    table_files = [f"t{index}.sql" for index in range(TOTAL_TABLE_COUNT)]
+    compatibility_note = "本目录下的 SQL 文件面向支持扩展二级分区能力的 MySQL 内核生成，不包含向量类型、向量索引列备注或向量种子表达式。"
     subpartition_note = (
-        "4. 执行二级分区表：`t11.sql` 到 `t26.sql`。"
+        f"4. 执行二级分区表：`t{SUBPARTITION_START}.sql` 到 `t{TOTAL_TABLE_COUNT - 1}.sql`。"
         if include_subpartition
-        else "4. 执行由二级分区降级为一级分区的兼容表：`t11.sql` 到 `t26.sql`。"
+        else f"4. 执行由二级分区降级为一级分区的兼容表：`t{SUBPARTITION_START}.sql` 到 `t{TOTAL_TABLE_COUNT - 1}.sql`。"
     )
     lines = [
         "# SQL 基表执行顺序说明",
@@ -514,13 +553,13 @@ def execution_doc(include_subpartition: bool = True) -> str:
         "",
         "- 所有文件需要在同一个数据库中执行，不在文件内创建或切换数据库。",
         "- 所有建表文件和种子数据文件都会设置 `SET transaction_isolation = 'READ-COMMITTED';`。",
-        "- 当前输出不包含向量列，可用于普通 MySQL 8.0 本地建表和插入验证。",
+        "- 当前输出不包含向量列。",
         "- `t2.sql` 到 `t6.sql` 是临时表，必须和 `zz_seed_fk_data.sql` 在同一个 session 内执行。",
         "- `t2.sql` 到 `t6.sql` 是临时表，只保留父表引用列和种子数据关系，不声明 `FOREIGN KEY`，避免 InnoDB 在建临时表时报 1215。",
         (
-            "- `t7.sql` 到 `t26.sql` 是分区表，只保留父表引用列、关联索引和种子数据关系，不声明 `FOREIGN KEY`，避免 InnoDB 在建分区表时报 1506。"
+            f"- `t{FIRST_PARTITION_START}.sql` 到 `t{TOTAL_TABLE_COUNT - 1}.sql` 是分区表，只保留父表引用列、关联索引和种子数据关系，不声明 `FOREIGN KEY`。"
             if include_subpartition
-            else "- `t7.sql` 到 `t26.sql` 是一级分区兼容表；`t11.sql` 到 `t26.sql` 不生成 `SUBPARTITION BY`，仍不声明 `FOREIGN KEY`，避免 InnoDB 在建分区表时报 1506。"
+            else f"- `t{FIRST_PARTITION_START}.sql` 到 `t{TOTAL_TABLE_COUNT - 1}.sql` 是一级分区兼容表；`t{SUBPARTITION_START}.sql` 到 `t{TOTAL_TABLE_COUNT - 1}.sql` 不生成 `SUBPARTITION BY`，仍不声明 `FOREIGN KEY`。"
         ),
         "- 每个建表文件都会短暂执行 `SET FOREIGN_KEY_CHECKS=0;`，建表完成后恢复为 `SET FOREIGN_KEY_CHECKS=1;`。",
         f"- `zz_seed_fk_data.sql` 会创建 `{SEED_NUMBER_TABLE}` 辅助数字表，先按依赖反序清理数据，再恢复外键检查并为每张表插入 {MIN_SEED_ROWS} 到 {MAX_SEED_ROWS} 行可复现随机数据。",
@@ -530,7 +569,7 @@ def execution_doc(include_subpartition: bool = True) -> str:
         "",
         "1. 执行普通父表：`t0.sql`、`t1.sql`。",
         "2. 在同一个 session 中执行临时表：`t2.sql`、`t3.sql`、`t4.sql`、`t5.sql`、`t6.sql`。",
-        "3. 执行一级分区表：`t7.sql`、`t8.sql`、`t9.sql`、`t10.sql`。",
+        f"3. 执行一级分区表：`t{FIRST_PARTITION_START}.sql` 到 `t{SUBPARTITION_START - 1}.sql`。",
         subpartition_note,
         "5. 执行种子数据脚本：`zz_seed_fk_data.sql`。",
         "",
@@ -546,16 +585,16 @@ def execution_doc(include_subpartition: bool = True) -> str:
             "",
             f"- 每张表通过固定 seed 决定插入 {MIN_SEED_ROWS} 到 {MAX_SEED_ROWS} 行，生成结果可复现。",
             "- 可安全唯一化的普通索引会生成 `UNIQUE KEY`；二级分区表默认只保留已有唯一键，避免违反 MySQL 分区唯一键必须包含全部分区列的限制。",
-            "- `t7.sql` 到 `t10.sql` 每张一级分区表有 8 个一级分区，种子数据使用 `tenant_id` 1 到 8，保证每个一级分区都有数据。",
+            f"- `t{FIRST_PARTITION_START}.sql` 到 `t{SUBPARTITION_START - 1}.sql` 覆盖 8 种一级分区类型，种子数据使用 `tenant_id` 1 到 8，保证每个一级分区都有数据。",
             (
-                "- `t11.sql` 到 `t26.sql` 每张二级分区表有 8 个一级分区，每个一级分区下种子数据写入 `subpart_id` 1 和 2，用于覆盖一级分区和子分区路由。"
+                f"- `t{SUBPARTITION_START}.sql` 到 `t{TOTAL_TABLE_COUNT - 1}.sql` 覆盖 8 x 8 共 64 种二级分区组合，每张表有 8 个一级分区；种子数据写入 `subpart_id` 1 到 8，用于覆盖一级分区和子分区路由。"
                 if include_subpartition
-                else "- `t11.sql` 到 `t26.sql` 在兼容输出中降级为一级分区表，种子数据仍保留 `subpart_id` 1 和 2 取值。"
+                else f"- `t{SUBPARTITION_START}.sql` 到 `t{TOTAL_TABLE_COUNT - 1}.sql` 在兼容输出中降级为一级分区表，种子数据仍保留 `subpart_id` 1 到 8 取值。"
             ),
             "- 父表引用数据固定指向 `t0` 或 `t1`，避免永久表引用临时表造成生命周期不稳定。",
             "- `t0.sql` 和 `t1.sql` 是普通 InnoDB 表，不创建向量索引；其中 `t1.sql` 声明实际 `FOREIGN KEY` 约束。",
             "- `t2.sql` 到 `t6.sql` 是临时表，不包含向量列，也不声明实际外键。",
-            "- `t7.sql` 到 `t26.sql` 是分区表，不包含向量列，也不声明实际外键。",
+            f"- `t{FIRST_PARTITION_START}.sql` 到 `t{TOTAL_TABLE_COUNT - 1}.sql` 是分区表，不包含向量列，也不声明实际外键。",
             "- 按 InnoDB 每表最多 64 个二级索引计算，每张表补齐到索引上限数减 3，即 61 个索引；`PRIMARY KEY` 不计入该数量。",
             "- 输出不包含向量索引，每张表均为 61 个常规二级索引。",
         ]
@@ -574,7 +613,7 @@ def generate_files(output_dir: Path, include_subpartition: bool = True) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     for path in output_dir.glob("*.sql"):
         path.unlink()
-    for index in range(27):
+    for index in range(TOTAL_TABLE_COUNT):
         (output_dir / f"t{index}.sql").write_text(
             create_table_sql(index, include_subpartition=include_subpartition),
             encoding="utf-8",

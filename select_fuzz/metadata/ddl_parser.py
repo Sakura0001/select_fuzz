@@ -248,7 +248,7 @@ def _parse_partition(tail: str) -> Optional[PartitionMetadata]:
     if not partition_match:
         return None
     subpartition_match = re.search(
-        r"SUBPARTITION\s+BY\s+(?P<type>(?:LINEAR\s+)?(?:HASH|KEY)(?:\s+COLUMNS)?)\s*\((?P<expr>.*?)\)",
+        r"SUBPARTITION\s+BY\s+(?P<type>(?:LINEAR\s+)?(?:RANGE|LIST|HASH|KEY)(?:\s+COLUMNS)?)\s*\((?P<expr>.*?)\)",
         tail,
         re.IGNORECASE | re.DOTALL,
     )

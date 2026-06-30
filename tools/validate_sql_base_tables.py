@@ -11,13 +11,28 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SQL_DIR = ROOT / "sql_base_tables"
 EXECUTION_DOC = SQL_DIR / "执行顺序说明.md"
-PARTITION_TABLES = set(range(7, 27))
 TOP_PARTITION_VALUES = list(range(1, 9))
-SUBPARTITION_VALUES = [1, 2]
+SUBPARTITION_VALUES = list(range(1, 9))
 TARGET_TOTAL_INDEX_COUNT = 61
 MIN_SEED_ROWS = 1000
 MAX_SEED_ROWS = 2000
 SEED_NUMBER_TABLE = "_select_fuzz_seed_numbers"
+FIRST_PARTITION_START = 7
+FIRST_PARTITION_COUNT = 8
+SUBPARTITION_START = FIRST_PARTITION_START + FIRST_PARTITION_COUNT
+PARTITION_TYPES = [
+    "RANGE",
+    "RANGE COLUMNS",
+    "LIST",
+    "LIST COLUMNS",
+    "HASH",
+    "LINEAR HASH",
+    "KEY",
+    "LINEAR KEY",
+]
+SUBPARTITION_TABLE_COUNT = len(PARTITION_TYPES) * len(PARTITION_TYPES)
+TOTAL_TABLE_COUNT = SUBPARTITION_START + SUBPARTITION_TABLE_COUNT
+PARTITION_TABLES = set(range(FIRST_PARTITION_START, TOTAL_TABLE_COUNT))
 TENANT_COVERAGE_EXPR = f"((`n` - 1) % {len(TOP_PARTITION_VALUES)}) + 1"
 SUBPARTITION_COVERAGE_EXPR = f"((`n` - 1) % {len(SUBPARTITION_VALUES)}) + 1"
 UNSUPPORTED_GEOMETRY_PATTERN = re.compile(
@@ -42,10 +57,43 @@ def read_table(sql_dir: Path, index: int, errors: list[str]) -> str:
 
 
 def first_level_partition_count(sql: str) -> int:
-    hash_or_key = re.search(r"^PARTITION BY (?:HASH|KEY) \(`tenant_id`\) PARTITIONS (\d+)", sql, flags=re.I | re.M)
+    hash_or_key = re.search(r"^PARTITION BY (?:LINEAR\s+)?(?:HASH|KEY) \(`tenant_id`\) PARTITIONS (\d+)", sql, flags=re.I | re.M)
     if hash_or_key:
         return int(hash_or_key.group(1))
-    return len(re.findall(r"^\s{2}PARTITION p\d+ ", sql, flags=re.I | re.M))
+    return len(re.findall(r"^\s{2}PARTITION p\d+(?:\s|,|$)", sql, flags=re.I | re.M))
+
+
+def partition_type(sql: str) -> str:
+    match = re.search(
+        r"^PARTITION BY (?P<type>(?:LINEAR\s+)?(?:RANGE|LIST|HASH|KEY)(?:\s+COLUMNS)?)\s+\(`tenant_id`\)",
+        sql,
+        flags=re.I | re.M,
+    )
+    return " ".join(match.group("type").upper().split()) if match else ""
+
+
+def subpartition_type(sql: str) -> str:
+    match = re.search(
+        r"^SUBPARTITION BY (?P<type>(?:LINEAR\s+)?(?:RANGE|LIST|HASH|KEY)(?:\s+COLUMNS)?)\s+\(`subpart_id`\)",
+        sql,
+        flags=re.I | re.M,
+    )
+    return " ".join(match.group("type").upper().split()) if match else ""
+
+
+def assert_explicit_range_or_list_subpartitions(sql: str, index: int, errors: list[str]) -> None:
+    sub_type = subpartition_type(sql)
+    if not sub_type.startswith(("RANGE", "LIST")):
+        return
+    expected_fragments = (
+        [f"SUBPARTITION p0sp{idx} VALUES LESS THAN ({value + 1})" for idx, value in enumerate(SUBPARTITION_VALUES[:-1])]
+        + [f"SUBPARTITION p0sp{len(SUBPARTITION_VALUES) - 1} VALUES LESS THAN (MAXVALUE)"]
+        if sub_type.startswith("RANGE")
+        else [f"SUBPARTITION p0sp{idx} VALUES IN ({value})" for idx, value in enumerate(SUBPARTITION_VALUES)]
+    )
+    for fragment in expected_fragments:
+        if fragment not in sql:
+            fail(f"t{index}.sql 缺少显式子分区定义：{fragment}", errors)
 
 
 def sql_secondary_index_count(sql: str) -> int:
@@ -89,13 +137,13 @@ def seed_select_prefix_matches(block: str, values: list[str]) -> bool:
 
 
 def assert_seed_partition_coverage(seed_sql: str, errors: list[str]) -> None:
-    for index in range(7, 27):
+    for index in range(FIRST_PARTITION_START, TOTAL_TABLE_COUNT):
         block = seed_insert_block(seed_sql, index)
         if not block:
             continue
         if not seed_select_prefix_matches(block, ["`n`", TENANT_COVERAGE_EXPR]):
             fail(f"t{index} 种子数据 tenant_id 未覆盖 {TOP_PARTITION_VALUES}", errors)
-    for index in range(11, 27):
+    for index in range(SUBPARTITION_START, TOTAL_TABLE_COUNT):
         block = seed_insert_block(seed_sql, index)
         if not block:
             continue
@@ -106,12 +154,14 @@ def assert_seed_partition_coverage(seed_sql: str, errors: list[str]) -> None:
 def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
     errors: list[str] = []
     files = sorted(path.name for path in sql_dir.glob("t*.sql"))
-    if len(files) != 27:
-        fail(f"期望 27 个 tN.sql 文件，实际 {len(files)} 个", errors)
+    if len(files) != TOTAL_TABLE_COUNT:
+        fail(f"期望 {TOTAL_TABLE_COUNT} 个 tN.sql 文件，实际 {len(files)} 个", errors)
 
     type_counts = {"normal": 0, "temporary": 0, "partition": 0, "subpartition": 0}
     all_sql_parts: list[str] = []
-    for index in range(27):
+    first_partition_types: set[str] = set()
+    subpartition_pairs: set[tuple[str, str]] = set()
+    for index in range(TOTAL_TABLE_COUNT):
         sql = read_table(sql_dir, index, errors)
         if not sql:
             continue
@@ -159,10 +209,11 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
                 fail(f"t{index}.sql 应为临时表", errors)
             if "FOREIGN KEY" in upper_sql:
                 fail(f"t{index}.sql 临时表不应声明 FOREIGN KEY，避免 InnoDB 1215", errors)
-        elif index <= 10:
+        elif index < SUBPARTITION_START:
             type_counts["partition"] += 1
             if "PARTITION BY" not in upper_sql or "SUBPARTITION BY" in upper_sql:
                 fail(f"t{index}.sql 应为一级分区表", errors)
+            first_partition_types.add(partition_type(sql))
             if first_level_partition_count(sql) != 8:
                 fail(f"t{index}.sql 一级分区数量应为 8 个", errors)
             if "FOREIGN KEY" in upper_sql:
@@ -173,6 +224,8 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
                 type_counts["subpartition"] += 1
                 if "SUBPARTITION BY" not in upper_sql:
                     fail(f"t{index}.sql 应为二级分区表", errors)
+                subpartition_pairs.add((partition_type(sql), subpartition_type(sql)))
+                assert_explicit_range_or_list_subpartitions(sql, index, errors)
                 assert_partition_unique_keys_include_columns(sql, index, ["tenant_id", "subpart_id"], errors)
             else:
                 type_counts["partition"] += 1
@@ -185,12 +238,16 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
                 fail(f"t{index}.sql 二级分区表不应声明 FOREIGN KEY，避免 InnoDB 1506", errors)
 
     expected_counts = (
-        {"normal": 2, "temporary": 5, "partition": 4, "subpartition": 16}
+        {"normal": 2, "temporary": 5, "partition": FIRST_PARTITION_COUNT, "subpartition": SUBPARTITION_TABLE_COUNT}
         if include_subpartition
-        else {"normal": 2, "temporary": 5, "partition": 20, "subpartition": 0}
+        else {"normal": 2, "temporary": 5, "partition": FIRST_PARTITION_COUNT + SUBPARTITION_TABLE_COUNT, "subpartition": 0}
     )
     if type_counts != expected_counts:
         fail(f"表类型分布不匹配：{type_counts}", errors)
+    if first_partition_types != set(PARTITION_TYPES):
+        fail(f"一级分区类型覆盖不完整：{sorted(first_partition_types)}", errors)
+    if include_subpartition and subpartition_pairs != {(outer, inner) for outer in PARTITION_TYPES for inner in PARTITION_TYPES}:
+        fail(f"二级分区组合覆盖不完整：{sorted(subpartition_pairs)}", errors)
 
     all_sql = "\n".join(all_sql_parts)
     assert_no_unsupported_geometry(all_sql, "基表目录", errors)
@@ -222,10 +279,10 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
             fail("种子数据脚本缺少 READ COMMITTED 隔离级别设置", errors)
         if f"CREATE TABLE `{SEED_NUMBER_TABLE}`" not in seed_sql:
             fail(f"种子数据脚本缺少 {SEED_NUMBER_TABLE} 辅助数字表", errors)
-        if seed_sql.upper().count("INSERT INTO") != 28:
-            fail("种子数据脚本应包含 1 条数字表 INSERT 和 27 条基表 INSERT SELECT", errors)
+        if seed_sql.upper().count("INSERT INTO") != TOTAL_TABLE_COUNT + 1:
+            fail(f"种子数据脚本应包含 1 条数字表 INSERT 和 {TOTAL_TABLE_COUNT} 条基表 INSERT SELECT", errors)
         seed_markers = {int(index): int(count) for index, count in re.findall(r"/\* t(\d+):rows=(\d+) \*/", seed_sql)}
-        if set(seed_markers) != set(range(27)):
+        if set(seed_markers) != set(range(TOTAL_TABLE_COUNT)):
             fail("种子数据脚本应为每张表写入 rows 标记", errors)
         for index, count in seed_markers.items():
             if not MIN_SEED_ROWS <= count <= MAX_SEED_ROWS:
@@ -237,7 +294,7 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
             fail("种子数据脚本不应包含向量类型、向量函数、DISTANCE 第三参数语法或 DOT 距离", errors)
         if re.search(r"\b(?:nan|inf)\b", seed_sql, re.I):
             fail("种子数据不应包含 NaN 或 Inf", errors)
-        for index in range(27):
+        for index in range(TOTAL_TABLE_COUNT):
             if f"INSERT INTO `t{index}`" not in seed_sql:
                 fail(f"种子数据缺少 t{index}", errors)
 
@@ -246,7 +303,7 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
         fail("缺少执行顺序说明.md", errors)
     else:
         doc = execution_doc.read_text(encoding="utf-8")
-        for name in ["t0.sql", "t1.sql", *[f"t{index}.sql" for index in range(2, 27)], "zz_seed_fk_data.sql"]:
+        for name in ["t0.sql", "t1.sql", *[f"t{index}.sql" for index in range(2, TOTAL_TABLE_COUNT)], "zz_seed_fk_data.sql"]:
             if name not in doc:
                 fail(f"执行顺序说明缺少 {name}", errors)
         doc_fragments = ["READ-COMMITTED", "1000", "2000", "UNIQUE KEY"]
@@ -256,14 +313,14 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
         for fragment in ["64 个二级索引", "61 个索引", "PRIMARY KEY"]:
             if fragment not in doc:
                 fail(f"执行顺序说明缺少索引上限说明：{fragment}", errors)
-        for fragment in ["临时表", "分区表", "不声明 `FOREIGN KEY`", "1215", "1506"]:
+        for fragment in ["临时表", "分区表", "不声明 `FOREIGN KEY`", "1215"]:
             if fragment not in doc:
                 fail(f"执行顺序说明缺少表外键限制说明：{fragment}", errors)
 
     if errors:
         print("\n".join(errors))
         return 1
-    print("结构验证通过：27 张基表、8 个一级分区、分区种子数据、无向量约束、外键、索引类型和执行顺序文档均满足要求。")
+    print(f"结构验证通过：{TOTAL_TABLE_COUNT} 张基表、8 种一级分区、64 种二级分区组合、分区种子数据、无向量约束、外键、索引类型和执行顺序文档均满足要求。")
     return 0
 
 

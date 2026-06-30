@@ -4,9 +4,35 @@ from tools import generate_sql_base_tables as generator
 from tools import validate_sql_base_tables as validator
 
 
+PARTITION_TYPES = {
+    "RANGE",
+    "RANGE COLUMNS",
+    "LIST",
+    "LIST COLUMNS",
+    "HASH",
+    "LINEAR HASH",
+    "KEY",
+    "LINEAR KEY",
+}
+
+
+def _partition_type(sql: str) -> str:
+    for line in sql.splitlines():
+        if line.startswith("PARTITION BY "):
+            return line.removeprefix("PARTITION BY ").split(" (", 1)[0].split(" PARTITIONS ", 1)[0].strip()
+    raise AssertionError("缺少 PARTITION BY")
+
+
+def _subpartition_type(sql: str) -> str:
+    for line in sql.splitlines():
+        if line.startswith("SUBPARTITION BY "):
+            return line.removeprefix("SUBPARTITION BY ").split(" (", 1)[0].split(" SUBPARTITIONS ", 1)[0].strip()
+    raise AssertionError("缺少 SUBPARTITION BY")
+
+
 def test_种子数据每张表生成可复现一到两千行() -> None:
-    first_counts = [generator.seed_row_count(index) for index in range(27)]
-    second_counts = [generator.seed_row_count(index) for index in range(27)]
+    first_counts = [generator.seed_row_count(index) for index in range(79)]
+    second_counts = [generator.seed_row_count(index) for index in range(79)]
 
     assert first_counts == second_counts
     assert all(1000 <= count <= 2000 for count in first_counts)
@@ -16,12 +42,42 @@ def test_种子数据每张表生成可复现一到两千行() -> None:
     for index, count in enumerate(first_counts):
         assert f"/* t{index}:rows={count} */" in seed_sql
         assert f"WHERE `n` <= {count}" in seed_sql
-    assert seed_sql.upper().count("INSERT INTO") == 28
+    assert seed_sql.upper().count("INSERT INTO") == 80
+
+
+def test_默认生成八种一级分区和六十四种二级分区组合(tmp_path: Path) -> None:
+    generator.generate_files(tmp_path)
+
+    table_files = sorted(tmp_path.glob("t*.sql"), key=lambda path: int(path.stem[1:]))
+
+    assert [path.name for path in table_files] == [f"t{index}.sql" for index in range(79)]
+
+    first_level_types = {
+        _partition_type((tmp_path / f"t{index}.sql").read_text(encoding="utf-8"))
+        for index in range(7, 15)
+    }
+    subpartition_pairs = {
+        (
+            _partition_type((tmp_path / f"t{index}.sql").read_text(encoding="utf-8")),
+            _subpartition_type((tmp_path / f"t{index}.sql").read_text(encoding="utf-8")),
+        )
+        for index in range(15, 79)
+    }
+
+    assert first_level_types == PARTITION_TYPES
+    assert subpartition_pairs == {(outer, inner) for outer in PARTITION_TYPES for inner in PARTITION_TYPES}
+
+    range_range_sql = (tmp_path / "t15.sql").read_text(encoding="utf-8")
+    list_list_sql = (tmp_path / "t33.sql").read_text(encoding="utf-8")
+    assert "SUBPARTITION p0sp0 VALUES LESS THAN (2)" in range_range_sql
+    assert "SUBPARTITION p0sp7 VALUES LESS THAN (MAXVALUE)" in range_range_sql
+    assert "SUBPARTITION p0sp0 VALUES IN (1)" in list_list_sql
+    assert "SUBPARTITION p0sp7 VALUES IN (8)" in list_list_sql
 
 
 def test_默认输出不包含向量并可关闭二级分区() -> None:
     normal_sql = generator.create_table_sql(0, include_subpartition=False)
-    subpartition_sql = generator.create_table_sql(11, include_subpartition=False)
+    subpartition_sql = generator.create_table_sql(15, include_subpartition=False)
     seed_sql = generator.seed_sql()
 
     assert "VECTOR(" not in normal_sql.upper()
@@ -34,7 +90,7 @@ def test_默认输出不包含向量并可关闭二级分区() -> None:
 def test_唯一索引转换遵守分区键限制() -> None:
     normal_sql = generator.create_table_sql(0)
     partition_sql = generator.create_table_sql(7)
-    subpartition_sql = generator.create_table_sql(11)
+    subpartition_sql = generator.create_table_sql(15)
 
     assert "UNIQUE KEY `idx_t0_int_col`" in normal_sql
     assert "UNIQUE KEY `idx_t0_varchar_prefix`" in normal_sql

@@ -68,9 +68,9 @@ def test_完整基表目录能解析全部表_列族和分区() -> None:
         except ValueError:
             continue
 
-    assert [table.name for table in tables] == [f"t{index}" for index in range(27)]
+    assert [table.name for table in tables] == [f"t{index}" for index in range(79)]
     assert {table.name for table in tables if table.is_temporary} == {f"t{index}" for index in range(2, 7)}
-    assert {table.name: len(table.columns) for table in tables} == {f"t{index}": 42 for index in range(27)}
+    assert {table.name: len(table.columns) for table in tables} == {f"t{index}": 42 for index in range(79)}
     families = {column.type_family for table in tables for column in table.columns.values()}
     assert {
         ColumnTypeFamily.INTEGER,
@@ -86,9 +86,9 @@ def test_完整基表目录能解析全部表_列族和分区() -> None:
         ColumnTypeFamily.JSON,
     }.issubset(families)
     assert "VECTOR" not in ColumnTypeFamily.__members__
-    assert {table.name for table in tables if table.partition is not None} == {f"t{index}" for index in range(7, 27)}
+    assert {table.name for table in tables if table.partition is not None} == {f"t{index}" for index in range(7, 79)}
     assert {table.name for table in tables if table.partition and table.partition.subpartition_type} == {
-        f"t{index}" for index in range(11, 27)
+        f"t{index}" for index in range(15, 79)
     }
 
 
@@ -119,7 +119,7 @@ def test_完整基表_不生成空间列和空间函数() -> None:
 def test_完整基表_分区表不定义全文索引() -> None:
     partitioned_sql = "\n".join(
         Path("sql_base_tables", f"t{index}.sql").read_text(encoding="utf-8")
-        for index in range(7, 27)
+        for index in range(7, 79)
     )
 
     assert "FULLTEXT KEY" not in partitioned_sql
@@ -132,7 +132,7 @@ def test_完整基表_分区表不定义外键_普通永久表保留外键覆盖
     )
     partitioned_sql = "\n".join(
         Path("sql_base_tables", f"t{index}.sql").read_text(encoding="utf-8")
-        for index in range(7, 27)
+        for index in range(7, 79)
     )
 
     assert "FOREIGN KEY" in non_partitioned_sql
@@ -142,7 +142,7 @@ def test_完整基表_分区表不定义外键_普通永久表保留外键覆盖
 def test_完整基表_种子数据不包含向量并覆盖每张表() -> None:
     seed_sql = Path("sql_base_tables", "zz_seed_fk_data.sql").read_text(encoding="utf-8")
 
-    for index in range(27):
+    for index in range(79):
         assert f"INSERT INTO `t{index}` " in seed_sql
     assert "VEC_FROMTEXT" not in seed_sql
     assert "STRING_TO_VECTOR" not in seed_sql

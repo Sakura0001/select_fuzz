@@ -1,0 +1,41 @@
+# Copy this file to config/local.yaml and keep real endpoints in that ignored file.
+mode: correctness
+
+nodes:
+  - role: baseline
+    host: 127.0.0.1
+    port: 3306
+    username_env: SELECT_FUZZ_MYSQL_USER
+    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+  - role: custom_off
+    host: 127.0.0.1
+    port: 3307
+    username_env: SELECT_FUZZ_MYSQL_USER
+    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+  - role: custom_on
+    host: 127.0.0.1
+    port: 3308
+    username_env: SELECT_FUZZ_MYSQL_USER
+    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+
+correctness:
+  workers: 10
+  queries_per_round: 1000
+  timeout_seconds: 15
+  row_limit: 10000
+  byte_limit: 33554432
+  free_random_rate: 0.05
+  negative_mutation_rate: 0.05
+
+performance:
+  workers: 1
+  queries_per_round: 100
+  initial_table_rows: 100000
+  max_table_rows: 50000000
+  max_calibration_rounds: 8
+  calibration_runs_per_reference: 3
+  calibration_min_seconds: 5
+  calibration_max_seconds: 30
+  formal_timeout_seconds: 60
+  regression_threshold: 0.20
+  max_start_skew_ms: 100

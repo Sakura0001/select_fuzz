@@ -21,6 +21,11 @@ dist/
 .env
 .env.*
 !.env.example
+/config/local.yaml
+/config/local-8041.yaml
+
+# Local runtime state
+/.local/
 
 # Runtime output
 /artifacts/

@@ -3,14 +3,14 @@
 > **接手续读入口**：任何新会话开始工作前，先完整阅读本文件，再读取本文件中指向的计划文档与 `git status`。
 > **更新规则**：每完成、失败、阻塞或新增一个工程步骤，立即更新本文件；不能只依赖对话上下文。
 > **最后更新**：2026-07-13（Asia/Shanghai）
-> **状态**：开发进行中，尚未达到产品交付/12 小时验收条件。
+> **状态**：开发进行中，尚未达到产品交付/12 小时验收条件。Task 8 已提交，当前转入 Task 6 数据生成器审查。
 
 ## 1. 工作区与 Git 状态
 
 - 大仓库根目录：`/Users/yuyu/Documents/select_fuzz 2`
 - 当前工作树：`/Users/yuyu/Documents/select_fuzz 2/.worktrees/mysql-parallel-query-fuzzer`
 - 当前分支：`codex/mysql-parallel-query-fuzzer`
-- 当前 HEAD：`58be854 feat: compare typed three-node query outcomes`
+- 当前 HEAD：`7b4566e feat: execute bounded MySQL queries with safe watchdog`
 - Git 远端：**未配置**。每次提交后执行 `git push` 都会得到 `No configured push destination`；不得猜测或私自创建远端。
 - 凭据规则：只从环境变量读取；不得把用户名密码/token 写入命令、代码、文档、日志或 Git 历史。
 - 本账本本身尚未提交，必须随下一次合适的分片提交一并提交。
@@ -107,6 +107,7 @@ git remote -v
 | 完成 | `8db4f32` | 官方 SQL catalog、证据锁、coverage ledger/scheduler | 23 source、19 feature、58 variant |
 | 完成 | `afca746` | deterministic schema generator | 7 profile、59 focused、10k property、独立复审无 Critical/Important |
 | 完成 | `58be854` | 三节点 typed oracle | 70 focused；float multiset 10k + exhaustive matching 2k；独立复审无剩余 Critical/Important |
+| 完成 | `7b4566e` | bounded MySQL runner / race-safe KILL watchdog / 执行账本 | 431 full、2 skipped；ruff/mypy/diff-check 全绿 |
 
 已知所有提交后的 `git push` 均失败，唯一原因是仓库没有远端。
 
@@ -114,7 +115,7 @@ git remote -v
 
 ### 5.1 Task 6 — 数据生成与 setup bundle
 
-状态：**实现完成，尚未独立复审、尚未提交**。
+状态：**实现与主线程独立等价审查完成，准备提交**。
 
 文件：
 
@@ -132,11 +133,16 @@ git remote -v
 - ruff/mypy 通过。
 - 覆盖 FK 拓扑/复合唯一 FK、UNIQUE MVI 行内与跨行去重、LIST COLUMNS bucket、时间/DECIMAL/零长度类型、LOB/JSON 64 KiB、hex SQL literal、TSV escaping。
 
+审查结论：
+
+- 已逐项审查唯一/前缀/函数/MVI 索引、FK 拓扑与空父表、分区路由、所有类型边界、UTC temporal、SRID、INSERT 批量字节预算、TSV/hex escaping。
+- 唯一发现为 Decimal context 依赖，已先复现后修复；当前 full 431 passed、2 skipped。
+- 未发现剩余 Critical/Important。
+
 未完成：
 
-- 独立 Critical/Important 复审。
 - 精确 MySQL 8.0.41 实际 DDL/INSERT 集成验证。
-- 主线程精确 staged snapshot 复验与提交。
+- staged snapshot 与提交正在执行。
 
 ### 5.2 Task 7 — typed SELECT AST / generator / validator
 
@@ -168,7 +174,7 @@ git remote -v
 
 ### 5.3 Task 8 — MySQL runner / watchdog
 
-状态：**实现与主线程最终复验完成，尚未提交**。
+状态：**实现、主线程最终复验与提交均完成**（`7b4566e`）。
 
 文件：
 
@@ -209,8 +215,8 @@ git remote -v
 
 - 已完成主线程等价最终审查：watchdog thread 上界、shutdown 竞态、client CR_*、warning/control deadline、timeout/result-limit 优先级均已有回归测试。
 - 已完成 race 50 次内循环验证。
-- 精确 MySQL 8.0.41 集成验证。
-- 精确暂存并提交。
+- 精确 MySQL 8.0.41 集成验证仍待正式节点。
+- 已精确暂存并提交；提交后 `git push` 再次因无 configured push destination 失败。
 
 ## 6. 已运行测试记录
 
@@ -264,9 +270,9 @@ git remote -v
 - [x] Task 3 — domain / deterministic IDs / SeedTree。
 - [x] Task 4 — feature catalog / persistent coverage scheduler。
 - [x] Task 5 — schema profiles / MySQL compatibility rules。
-- [~] Task 6 — deterministic data / setup bundles：实现完成，待复审/8.0.41/提交。
+- [~] Task 6 — deterministic data / setup bundles：实现与审查完成，待当前提交；8.0.41 integration 待正式节点。
 - [~] Task 7 — SELECT AST / renderer / read-only validator / generator：实现完成，待复审/8.0.41/提交。
-- [~] Task 8 — MySQL runner / KILL watchdog：实现完成，待最终复验/提交。
+- [x] Task 8 — MySQL runner / KILL watchdog：已提交 `7b4566e`；8.0.41 release integration 待正式节点。
 - [ ] Task 9 — three-node setup and query coordinator。
 - [x] Task 10 — typed multiset/error/timeout oracle。
 - [ ] Task 11 — fsynced artifacts / JSONL reader / HTML / replay。
@@ -316,8 +322,8 @@ git remote -v
    - `.venv/bin/mypy src/select_fuzz`
    - `git diff --check`
 3. Task 8 手工最终审查已完成；最后新增的 timeout/result-limit 同时触发测试已先红后绿。
-4. 下一动作：只暂存 Task 8 + config/domain 增量 + 本账本，检查 cached snapshot，提交；随后执行 `git push` 并记录无远端阻塞。
-5. 独立审查 Task 6 data/setup；跑 focused/property/full/static；精确暂存并提交；push。
+4. Task 8 已精确提交为 `7b4566e`；`git push` 已执行并确认无远端阻塞。
+5. **当前下一动作**：独立审查 Task 6 data/setup；跑 focused/property/full/static；精确暂存并提交；push。
 6. 独立审查 Task 7 query；跑 focused/property/full/static；精确暂存并提交；push。
 7. 实现 Task 9 三节点 coordinator；临时表必须使用 pinned sessions；看到 `connection_reusable=False` 必须丢弃并重建整个 session/round。
 8. 实现 artifact/replay/CLI correctness vertical slice。

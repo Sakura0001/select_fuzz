@@ -21,15 +21,60 @@ dev = [
   "pytest-cov>=5",
   "pytest-timeout>=2.3",
   "ruff>=0.5",
+  "types-PyYAML>=6.0.12,<7",
 ]
 
 [build-system]
 requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+exclude = [
+  "/.git",
+  "/.hypothesis",
+  "/.local",
+  "/.mypy_cache",
+  "/.pytest_cache",
+  "/.ruff_cache",
+  "/.uv-cache",
+  "/.venv",
+  "/.worktrees",
+  "/artifacts",
+  "/dist",
+  "/htmlcov",
+  "/reports",
+  "**/__pycache__",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/select_fuzz"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"catalog/mysql-8.0.41-query-shapes.yaml" = "select_fuzz/data/mysql-8.0.41-query-shapes.yaml"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/.env.example",
+  "/.python-version",
+  "/catalog",
+  "/config/example.yaml",
+  "/docs/research",
+  "/docs/superpowers/plans",
+  "/docs/testing",
+  "/pyproject.toml",
+  "/scripts",
+  "/src",
+  "/tests",
+  "/uv.lock",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["mysql: real MySQL integration", "soak: long-running tests"]
+markers = [
+  "mysql: real MySQL integration",
+  "online: opt-in checks that fetch immutable official sources",
+  "soak: long-running tests",
+]
 
 [tool.ruff]
 line-length = 100

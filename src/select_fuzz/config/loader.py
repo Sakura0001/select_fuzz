@@ -8,7 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 from pydantic import SecretStr, ValidationError
 
 from select_fuzz.config.models import AppConfig, NodeConfig, ResolvedCredentials, RunMode

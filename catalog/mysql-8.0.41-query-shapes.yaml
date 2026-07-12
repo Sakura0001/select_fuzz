@@ -1,0 +1,1116 @@
+schema_version: 2
+target_product: MySQL Community Server
+target_version: "8.0.41"
+raw_web_sql_policy: signatures_only_never_execute
+checked_at: "2026-07-12"
+
+guard_definitions:
+  - alias_required
+  - arity_equal
+  - bounded_cardinality
+  - bounded_recursion
+  - compatible_collation
+  - compatible_types
+  - config_fingerprint_equal
+  - deterministic_expression
+  - exact_grouping
+  - existing_index
+  - existing_partition
+  - fixed_srid
+  - foreign_key_compatible
+  - frame_bounds_valid
+  - fulltext_compatible
+  - json_path_valid
+  - lateral_direction_valid
+  - multivalue_compatible
+  - no_duplicate_json_keys
+  - no_external_json_ref
+  - no_nondeterministic_function
+  - no_unsupported_window_clause
+  - only_full_group_by_legal
+  - partition_unique_key_complete
+  - read_only_select
+  - same_session
+  - scalar_cardinality
+  - shallow_complexity
+  - stable_ordering
+  - termination_predicate
+  - version_available
+
+profile_definitions:
+  - foreign_key_graph
+  - fulltext_innodb
+  - json_multivalue_innodb
+  - partitioned_innodb
+  - regular_innodb
+  - spatial_innodb
+  - temporary_innodb
+
+sources:
+  - source_id: grammar_8041
+    kind: exact_source
+    version: "8.0.41"
+    url: https://raw.githubusercontent.com/mysql/mysql-server/mysql-8.0.41/sql/sql_yacc.yy
+    hash_scope: response_bytes
+    lock_state: verified
+    content_sha256: c8ce0eb7c683f47d555cb08657521a18dc2895e04b1f3a658d81d7181ac142e6
+    checked_at: "2026-07-12"
+    locators:
+      all_or_any: {match_kind: literal, pattern: "all_or_any:"}
+      common_table_expr: {match_kind: literal, pattern: "common_table_expr:"}
+      derived_table: {match_kind: literal, pattern: "derived_table:"}
+      expr: {match_kind: literal, pattern: "expr:"}
+      flatten_equal_set_ops: {match_kind: literal, pattern: "flatten_equal_set_ops"}
+      function_call_generic: {match_kind: literal, pattern: "function_call_generic:"}
+      function_call_keyword: {match_kind: literal, pattern: "function_call_keyword:"}
+      in_sum_expr: {match_kind: literal, pattern: "in_sum_expr:"}
+      inner_join_type: {match_kind: literal, pattern: "inner_join_type:"}
+      joined_table: {match_kind: literal, pattern: "joined_table:"}
+      json_value: {match_kind: literal, pattern: "create_func_json_value"}
+      jt_column: {match_kind: literal, pattern: "jt_column:"}
+      lateral_derived_table: {match_kind: literal, pattern: "LATERAL_SYM table_subquery"}
+      member_of: {match_kind: literal, pattern: "Item_func_member_of"}
+      olap_opt: {match_kind: literal, pattern: "olap_opt:"}
+      opt_group_clause: {match_kind: literal, pattern: "opt_group_clause:"}
+      opt_having_clause: {match_kind: literal, pattern: "opt_having_clause:"}
+      opt_use_partition: {match_kind: literal, pattern: "opt_use_partition:"}
+      outer_join_type: {match_kind: literal, pattern: "outer_join_type:"}
+      query_expression: {match_kind: literal, pattern: "query_expression:"}
+      query_expression_body: {match_kind: literal, pattern: "query_expression_body:"}
+      query_expression_parens: {match_kind: literal, pattern: "query_expression_parens:"}
+      query_specification: {match_kind: literal, pattern: "query_specification:"}
+      row_subquery: {match_kind: literal, pattern: "row_subquery:"}
+      simple_expr: {match_kind: literal, pattern: "simple_expr:"}
+      subquery: {match_kind: literal, pattern: "subquery:"}
+      table_function: {match_kind: literal, pattern: "table_function:"}
+      table_value_constructor: {match_kind: literal, pattern: "table_value_constructor:"}
+      union_option: {match_kind: literal, pattern: "union_option:"}
+      window_frame_extent: {match_kind: literal, pattern: "window_frame_extent:"}
+      window_name_or_spec: {match_kind: literal, pattern: "window_name_or_spec:"}
+      windowing_clause: {match_kind: literal, pattern: "windowing_clause:"}
+      with_clause: {match_kind: literal, pattern: "with_clause:"}
+  - source_id: parse_tree_8041
+    kind: exact_source
+    version: "8.0.41"
+    url: https://raw.githubusercontent.com/mysql/mysql-server/mysql-8.0.41/sql/parse_tree_nodes.h
+    hash_scope: response_bytes
+    lock_state: verified
+    content_sha256: 428c4468d989cb8d5c0c8e005ccaee77521490aa8f2de61eaff9cc290f5e7b7e
+    checked_at: "2026-07-12"
+    locators:
+      pt_derived_table: {match_kind: literal, pattern: "class PT_derived_table"}
+      pt_group: {match_kind: literal, pattern: "class PT_group"}
+      pt_hint_list: {match_kind: literal, pattern: "class PT_hint_list;"}
+      pt_joined_table: {match_kind: literal, pattern: "class PT_joined_table"}
+      pt_query_specification: {match_kind: literal, pattern: "class PT_query_specification"}
+      pt_set_operation: {match_kind: literal, pattern: "class PT_set_operation"}
+      pt_subquery: {match_kind: literal, pattern: "class PT_subquery"}
+      pt_table_factor_function: {match_kind: literal, pattern: "class PT_table_factor_function"}
+      pt_table_factor_table_ident: {match_kind: literal, pattern: "class PT_table_factor_table_ident"}
+      pt_window: {match_kind: literal, pattern: "PT_window_list"}
+      pt_with_clause: {match_kind: literal, pattern: "class PT_with_clause"}
+  - source_id: release_8001
+    kind: release_note
+    version: "8.0.1"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-1.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      common_table_expressions:
+        {match_kind: regex, pattern: "(?is)common.{0,80}table.{0,80}expression"}
+      descending_indexes:
+        {match_kind: regex, pattern: "(?is)descending.{0,80}index"}
+      join_order_hints: {match_kind: literal, pattern: "JOIN_ORDER"}
+      recursive_common_table_expressions:
+        {match_kind: regex, pattern: "(?is)recursive.{0,80}common.{0,80}table"}
+  - source_id: release_8002
+    kind: release_note
+    version: "8.0.2"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-2.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      window_functions: {match_kind: regex, pattern: "(?is)window.{0,80}function"}
+  - source_id: release_8004
+    kind: release_note
+    version: "8.0.4"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-4.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      json_table_function: {match_kind: literal, pattern: "JSON_TABLE"}
+  - source_id: release_8013
+    kind: release_note
+    version: "8.0.13"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-13.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      functional_key_parts:
+        {match_kind: regex, pattern: "(?is)functional.{0,80}key.{0,80}part"}
+  - source_id: release_8014
+    kind: release_note
+    version: "8.0.14"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-14.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      lateral_derived_tables:
+        {match_kind: regex, pattern: "(?is)lateral.{0,80}derived.{0,80}table"}
+  - source_id: release_8017
+    kind: release_note
+    version: "8.0.17"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-17.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      json_schema_validation: {match_kind: literal, pattern: "JSON_SCHEMA_VALID"}
+      multivalued_indexes:
+        {match_kind: regex, pattern: "(?is)multi.{0,20}valued.{0,80}index"}
+  - source_id: release_8019
+    kind: release_note
+    version: "8.0.19"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-19.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      explicit_table_values:
+        {match_kind: regex, pattern: "(?is)TABLE.{0,200}VALUES.{0,200}statement"}
+  - source_id: release_8020
+    kind: release_note
+    version: "8.0.20"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-20.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      index_level_hints:
+        {match_kind: regex, pattern: "(?is)index.{0,80}level.{0,80}optimizer.{0,80}hint"}
+  - source_id: release_8021
+    kind: release_note
+    version: "8.0.21"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-21.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      json_value_function: {match_kind: literal, pattern: "JSON_VALUE"}
+  - source_id: release_8022
+    kind: release_note
+    version: "8.0.22"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-22.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      derived_condition_pushdown:
+        {match_kind: regex, pattern: "(?is)derived.{0,80}condition.{0,80}pushdown"}
+      parenthesized_query_expressions:
+        {match_kind: regex, pattern: "(?is)parenthesized.{0,80}query.{0,80}expression"}
+  - source_id: release_8031
+    kind: release_note
+    version: "8.0.31"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-31.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      except_operator: {match_kind: literal, pattern: "EXCEPT"}
+      intersect_operator: {match_kind: literal, pattern: "INTERSECT"}
+  - source_id: release_8041
+    kind: release_note
+    version: "8.0.41"
+    url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-41.html
+    hash_scope: docs_body_text_v1
+    lock_state: verified
+    content_sha256: a48124031d81275a43585468e5e26f8c2842729284f05671374b8dd3925d59f4
+    checked_at: "2026-07-12"
+    locators:
+      bugs_fixed: {match_kind: literal, pattern: "Bugs Fixed"}
+      descending_primary_index_merge:
+        {match_kind: regex, pattern: "(?is)descending.{0,80}primary.{0,80}key.{0,160}index_merge"}
+      distinct_not_in_group_skip_scan:
+        {match_kind: regex, pattern: "(?is)SELECT DISTINCT.{0,500}group skip scan"}
+      equal_union_chain_flatten:
+        {match_kind: regex, pattern: "(?is)UNION.{0,500}flatten equal.{0,80}set operations"}
+      hash_antijoin_spill_null_key:
+        {match_kind: regex, pattern: "(?is)hash.{0,80}antijoin.{0,300}spilled to disk"}
+      optimizer_hint_comment_lexer:
+        {match_kind: regex, pattern: "(?is)inside an optimizer hint comment"}
+      rollup_row_comparator:
+        {match_kind: regex, pattern: "(?is)WITH.{0,80}ROLLUP.{0,200}row value comparator"}
+      subquery_filter_materialization:
+        {match_kind: regex, pattern: "(?is)index_subquery.{0,300}materialization"}
+      union_view_charset_pushdown:
+        {match_kind: regex, pattern: "(?is)view.{0,300}character set.{0,500}UNION"}
+  - source_id: manual_create_index
+    kind: manual_snapshot
+    version: "8.0"
+    url: https://dev.mysql.com/doc/refman/8.0/en/create-index.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      column_prefix_key_parts:
+        {match_kind: regex, pattern: "(?is)column.{0,80}prefix.{0,80}key.{0,80}part"}
+      create_index_grammar: {match_kind: literal, pattern: "CREATE INDEX"}
+      descending_key_parts:
+        {match_kind: regex, pattern: "(?is)descending.{0,80}key.{0,80}part"}
+      fulltext_indexes: {match_kind: literal, pattern: "FULLTEXT"}
+      functional_key_parts:
+        {match_kind: regex, pattern: "(?is)functional.{0,80}key.{0,80}part"}
+      multivalued_index_restrictions:
+        {match_kind: regex, pattern: "(?is)multi.{0,20}valued.{0,80}index.{0,400}restriction"}
+      multivalued_indexes:
+        {match_kind: regex, pattern: "(?is)multi.{0,20}valued.{0,80}index"}
+      spatial_indexes: {match_kind: literal, pattern: "SPATIAL"}
+  - source_id: manual_partition_limits
+    kind: manual_snapshot
+    version: "8.0"
+    url: https://dev.mysql.com/doc/refman/8.0/en/partitioning-limitations.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      partition_incompatibilities:
+        {match_kind: regex, pattern: "(?is)partition.{0,80}limitation"}
+      temporary_partition_restriction:
+        {match_kind: regex, pattern: "(?is)temporary.{0,300}partition"}
+  - source_id: manual_foreign_keys
+    kind: manual_snapshot
+    version: "8.0"
+    url: https://dev.mysql.com/doc/refman/8.0/en/create-table-foreign-keys.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      foreign_key_restrictions:
+        {match_kind: regex, pattern: "(?is)foreign.{0,20}key.{0,100}restriction"}
+  - source_id: manual_fulltext
+    kind: manual_snapshot
+    version: "8.0"
+    url: https://dev.mysql.com/doc/refman/8.0/en/fulltext-restrictions.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      fulltext_restrictions:
+        {match_kind: regex, pattern: "(?is)full.{0,20}text.{0,100}restriction"}
+  - source_id: manual_spatial
+    kind: manual_snapshot
+    version: "8.0"
+    url: https://dev.mysql.com/doc/refman/8.0/en/spatial-index-optimization.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      spatial_index_requirements:
+        {match_kind: regex, pattern: "(?is)spatial.{0,80}index.{0,200}SRID"}
+  - source_id: manual_data_types
+    kind: manual_snapshot
+    version: "8.0"
+    url: https://dev.mysql.com/doc/refman/8.0/en/data-types.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      data_type_categories:
+        {match_kind: regex, pattern: "(?is)data.{0,20}type.{0,80}categor"}
+      numeric_data_types:
+        {match_kind: regex, pattern: "(?is)numeric.{0,80}data.{0,20}type"}
+      string_data_types:
+        {match_kind: regex, pattern: "(?is)string.{0,80}data.{0,20}type"}
+      temporal_json_spatial_types:
+        {match_kind: regex, pattern: "(?is)temporal.{0,500}JSON.{0,500}spatial"}
+  - source_id: manual_storage
+    kind: manual_snapshot
+    version: "8.0"
+    url: https://dev.mysql.com/doc/refman/8.0/en/storage-requirements.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      numeric_storage_requirements:
+        {match_kind: regex, pattern: "(?is)storage.{0,80}requirements.{0,300}numeric"}
+      storage_requirements:
+        {match_kind: regex, pattern: "(?is)storage.{0,80}requirements"}
+      string_storage_requirements:
+        {match_kind: regex, pattern: "(?is)storage.{0,80}requirements.{0,800}string"}
+  - source_id: manual_innodb_limits
+    kind: manual_snapshot
+    version: "8.0"
+    url: https://dev.mysql.com/doc/refman/8.0/en/innodb-limits.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      innodb_index_limits:
+        {match_kind: regex, pattern: "(?is)InnoDB.{0,80}limit.{0,500}index"}
+      innodb_table_limits:
+        {match_kind: regex, pattern: "(?is)InnoDB.{0,80}limit.{0,500}table"}
+  - source_id: version_builtin
+    kind: version_reference_snapshot
+    version: "8.0"
+    url: https://dev.mysql.com/doc/mysqld-version-reference/en/built-in-functions.html
+    hash_scope: docs_body_text_v1
+    lock_state: refresh_required
+    content_sha256: null
+    checked_at: "2026-07-12"
+    locators:
+      builtin_function_table:
+        {match_kind: regex, pattern: "(?is)built.{0,20}in.{0,80}function"}
+      introduced_deprecated_removed_columns:
+        {match_kind: regex, pattern: "(?is)introduced.{0,300}deprecated.{0,300}removed"}
+
+features:
+  - feature_id: select_family
+    category: select
+    min_version: "5.7.0"
+    ast_nodes: [query_expression, query_specification]
+    guards: [read_only_select, shallow_complexity, stable_ordering]
+    profiles: [regular_innodb]
+    weight: 12
+    evidence:
+      - {source_id: grammar_8041, locator: query_expression}
+      - {source_id: parse_tree_8041, locator: pt_query_specification}
+    variants:
+      - variant_id: select_query_specification
+        min_version: "5.7.0"
+        ast_nodes: [query_expression, query_specification, predicate_expression]
+        guards: [read_only_select, bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 10
+        evidence:
+          - {source_id: grammar_8041, locator: query_specification}
+      - variant_id: select_parenthesized
+        min_version: "8.0.22"
+        ast_nodes: [query_expression, parenthesized_query_expression]
+        guards: [read_only_select, shallow_complexity, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: query_expression_parens}
+          - {source_id: release_8022, locator: parenthesized_query_expressions}
+
+  - feature_id: join_family
+    category: join
+    min_version: "5.7.0"
+    ast_nodes: [query_expression, query_specification, joined_table]
+    guards: [read_only_select, compatible_types, bounded_cardinality]
+    profiles: [regular_innodb]
+    weight: 12
+    evidence:
+      - {source_id: grammar_8041, locator: joined_table}
+      - {source_id: parse_tree_8041, locator: pt_joined_table}
+    variants:
+      - variant_id: join_inner_cross_straight
+        min_version: "5.7.0"
+        ast_nodes: [joined_table, predicate_expression]
+        guards: [compatible_types, bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 7
+        evidence:
+          - {source_id: grammar_8041, locator: inner_join_type}
+      - variant_id: join_outer_natural
+        min_version: "5.7.0"
+        ast_nodes: [joined_table, predicate_expression]
+        guards: [compatible_types, bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 5
+        evidence:
+          - {source_id: grammar_8041, locator: outer_join_type}
+
+  - feature_id: subquery_family
+    category: subquery
+    min_version: "5.7.0"
+    ast_nodes: [query_expression, subquery_expression]
+    guards: [read_only_select, bounded_cardinality, stable_ordering]
+    profiles: [regular_innodb]
+    weight: 10
+    evidence:
+      - {source_id: grammar_8041, locator: subquery}
+      - {source_id: parse_tree_8041, locator: pt_subquery}
+    variants:
+      - variant_id: subquery_result_kinds
+        min_version: "5.7.0"
+        ast_nodes: [subquery_expression, row_constructor]
+        guards: [arity_equal, scalar_cardinality, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 5
+        evidence:
+          - {source_id: grammar_8041, locator: row_subquery}
+      - variant_id: subquery_quantified
+        min_version: "5.7.0"
+        ast_nodes: [subquery_expression, predicate_expression]
+        guards: [arity_equal, compatible_types, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 5
+        evidence:
+          - {source_id: grammar_8041, locator: all_or_any}
+
+  - feature_id: derived_lateral_family
+    category: derived_lateral
+    min_version: "5.7.0"
+    ast_nodes: [query_expression, derived_table]
+    guards: [alias_required, bounded_cardinality, stable_ordering]
+    profiles: [regular_innodb]
+    weight: 8
+    evidence:
+      - {source_id: grammar_8041, locator: derived_table}
+      - {source_id: parse_tree_8041, locator: pt_derived_table}
+    variants:
+      - variant_id: derived_regular
+        min_version: "5.7.0"
+        ast_nodes: [derived_table, query_specification]
+        guards: [alias_required, bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 4
+        evidence:
+          - {source_id: grammar_8041, locator: derived_table}
+      - variant_id: lateral_correlated
+        min_version: "8.0.14"
+        ast_nodes: [lateral_derived_table, joined_table, subquery_expression]
+        guards: [alias_required, lateral_direction_valid, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 4
+        evidence:
+          - {source_id: grammar_8041, locator: lateral_derived_table}
+          - {source_id: release_8014, locator: lateral_derived_tables}
+
+  - feature_id: cte_family
+    category: cte
+    min_version: "8.0.1"
+    ast_nodes: [query_expression, common_table_expression]
+    guards: [read_only_select, bounded_cardinality, stable_ordering]
+    profiles: [regular_innodb]
+    weight: 8
+    evidence:
+      - {source_id: grammar_8041, locator: with_clause}
+      - {source_id: parse_tree_8041, locator: pt_with_clause}
+      - {source_id: release_8001, locator: common_table_expressions}
+    variants:
+      - variant_id: cte_nonrecursive
+        min_version: "8.0.1"
+        ast_nodes: [common_table_expression, query_expression]
+        guards: [arity_equal, bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 4
+        evidence:
+          - {source_id: grammar_8041, locator: common_table_expr}
+          - {source_id: release_8001, locator: common_table_expressions}
+      - variant_id: cte_recursive
+        min_version: "8.0.1"
+        ast_nodes: [recursive_common_table_expression, set_operation]
+        guards: [bounded_recursion, termination_predicate, arity_equal]
+        profiles: [regular_innodb]
+        weight: 4
+        evidence:
+          - {source_id: grammar_8041, locator: with_clause}
+          - {source_id: release_8001, locator: recursive_common_table_expressions}
+
+  - feature_id: set_operation_family
+    category: set_operation
+    min_version: "5.7.0"
+    ast_nodes: [query_expression, set_operation]
+    guards: [arity_equal, compatible_types, stable_ordering]
+    profiles: [regular_innodb]
+    weight: 10
+    evidence:
+      - {source_id: grammar_8041, locator: query_expression_body}
+      - {source_id: parse_tree_8041, locator: pt_set_operation}
+    variants:
+      - variant_id: set_union
+        min_version: "5.7.0"
+        ast_nodes: [set_operation, query_specification]
+        guards: [arity_equal, compatible_types, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 4
+        evidence:
+          - {source_id: grammar_8041, locator: union_option}
+      - variant_id: set_intersect
+        min_version: "8.0.31"
+        ast_nodes: [set_operation, query_specification]
+        guards: [arity_equal, compatible_types, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: query_expression_body}
+          - {source_id: release_8031, locator: intersect_operator}
+      - variant_id: set_except
+        min_version: "8.0.31"
+        ast_nodes: [set_operation, query_specification]
+        guards: [arity_equal, compatible_types, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: query_expression_body}
+          - {source_id: release_8031, locator: except_operator}
+      - variant_id: set_table_values
+        min_version: "8.0.19"
+        ast_nodes: [set_operation, table_value_constructor]
+        guards: [arity_equal, compatible_types, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: table_value_constructor}
+          - {source_id: release_8019, locator: explicit_table_values}
+
+  - feature_id: grouping_rollup_family
+    category: grouping_rollup
+    min_version: "5.7.0"
+    ast_nodes: [query_specification, grouping_clause, aggregate_expression]
+    guards: [only_full_group_by_legal, exact_grouping, stable_ordering]
+    profiles: [regular_innodb]
+    weight: 8
+    evidence:
+      - {source_id: grammar_8041, locator: opt_group_clause}
+      - {source_id: parse_tree_8041, locator: pt_group}
+    variants:
+      - variant_id: grouping_aggregate_having
+        min_version: "5.7.0"
+        ast_nodes: [grouping_clause, aggregate_expression, predicate_expression]
+        guards: [only_full_group_by_legal, exact_grouping, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 5
+        evidence:
+          - {source_id: grammar_8041, locator: opt_having_clause}
+      - variant_id: grouping_with_rollup
+        min_version: "5.7.0"
+        ast_nodes: [grouping_clause, aggregate_expression]
+        guards: [only_full_group_by_legal, exact_grouping, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 3
+        evidence:
+          - {source_id: grammar_8041, locator: olap_opt}
+
+  - feature_id: window_family
+    category: window
+    min_version: "8.0.2"
+    ast_nodes: [query_specification, window_clause, window_function]
+    guards: [stable_ordering, frame_bounds_valid, no_unsupported_window_clause]
+    profiles: [regular_innodb]
+    weight: 8
+    evidence:
+      - {source_id: grammar_8041, locator: windowing_clause}
+      - {source_id: parse_tree_8041, locator: pt_window}
+      - {source_id: release_8002, locator: window_functions}
+    variants:
+      - variant_id: window_inline_named
+        min_version: "8.0.2"
+        ast_nodes: [window_clause, window_function]
+        guards: [stable_ordering, no_unsupported_window_clause, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 5
+        evidence:
+          - {source_id: grammar_8041, locator: window_name_or_spec}
+          - {source_id: release_8002, locator: window_functions}
+      - variant_id: window_frames
+        min_version: "8.0.2"
+        ast_nodes: [window_clause, window_function, frame_clause]
+        guards: [stable_ordering, frame_bounds_valid, no_unsupported_window_clause]
+        profiles: [regular_innodb]
+        weight: 3
+        evidence:
+          - {source_id: grammar_8041, locator: window_frame_extent}
+          - {source_id: release_8002, locator: window_functions}
+
+  - feature_id: json_table_family
+    category: json_table
+    min_version: "8.0.4"
+    ast_nodes: [query_expression, json_table_function]
+    guards: [alias_required, json_path_valid, bounded_cardinality]
+    profiles: [regular_innodb, json_multivalue_innodb]
+    weight: 6
+    evidence:
+      - {source_id: grammar_8041, locator: table_function}
+      - {source_id: parse_tree_8041, locator: pt_table_factor_function}
+      - {source_id: release_8004, locator: json_table_function}
+    variants:
+      - variant_id: json_table_columns
+        min_version: "8.0.4"
+        ast_nodes: [json_table_function, query_specification]
+        guards: [alias_required, json_path_valid, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 4
+        evidence:
+          - {source_id: grammar_8041, locator: jt_column}
+          - {source_id: release_8004, locator: json_table_function}
+      - variant_id: json_table_implicit_lateral
+        min_version: "8.0.4"
+        ast_nodes: [json_table_function, joined_table]
+        guards: [alias_required, json_path_valid, lateral_direction_valid]
+        profiles: [json_multivalue_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: table_function}
+          - {source_id: release_8004, locator: json_table_function}
+
+  - feature_id: json_function_family
+    category: json_function
+    min_version: "5.7.0"
+    ast_nodes: [function_expression, predicate_expression]
+    guards: [deterministic_expression, json_path_valid, bounded_cardinality]
+    profiles: [regular_innodb, json_multivalue_innodb]
+    weight: 6
+    evidence:
+      - {source_id: grammar_8041, locator: function_call_keyword}
+      - {source_id: parse_tree_8041, locator: pt_query_specification}
+    variants:
+      - variant_id: json_create_extract
+        min_version: "5.7.0"
+        ast_nodes: [function_expression, predicate_expression]
+        guards: [deterministic_expression, json_path_valid, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: function_call_keyword}
+      - variant_id: json_member_overlap
+        min_version: "8.0.17"
+        ast_nodes: [function_expression, predicate_expression]
+        guards: [deterministic_expression, multivalue_compatible, json_path_valid]
+        profiles: [json_multivalue_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: member_of}
+          - {source_id: release_8017, locator: multivalued_indexes}
+      - variant_id: json_value_scalar
+        min_version: "8.0.21"
+        ast_nodes: [function_expression, predicate_expression]
+        guards: [deterministic_expression, json_path_valid, compatible_types]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: grammar_8041, locator: json_value}
+          - {source_id: release_8021, locator: json_value_function}
+      - variant_id: json_schema_validation
+        min_version: "8.0.17"
+        ast_nodes: [function_expression, predicate_expression]
+        guards: [deterministic_expression, no_external_json_ref, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: grammar_8041, locator: function_call_generic}
+          - {source_id: release_8017, locator: json_schema_validation}
+
+  - feature_id: case_control_flow
+    category: case
+    min_version: "5.7.0"
+    ast_nodes: [query_specification, case_expression]
+    guards: [deterministic_expression, compatible_types, bounded_cardinality]
+    profiles: [regular_innodb]
+    weight: 5
+    evidence:
+      - {source_id: grammar_8041, locator: expr}
+      - {source_id: parse_tree_8041, locator: pt_query_specification}
+    variants:
+      - variant_id: case_simple
+        min_version: "5.7.0"
+        ast_nodes: [case_expression, function_expression]
+        guards: [deterministic_expression, compatible_types, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: simple_expr}
+      - variant_id: case_searched
+        min_version: "5.7.0"
+        ast_nodes: [case_expression, predicate_expression]
+        guards: [deterministic_expression, compatible_types, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 3
+        evidence:
+          - {source_id: grammar_8041, locator: expr}
+
+  - feature_id: optimizer_hint_family
+    category: optimizer_hint
+    min_version: "8.0.1"
+    ast_nodes: [query_specification, hint_comment]
+    guards: [version_available, existing_index, config_fingerprint_equal]
+    profiles: [regular_innodb]
+    weight: 5
+    evidence:
+      - {source_id: parse_tree_8041, locator: pt_hint_list}
+      - {source_id: release_8001, locator: join_order_hints}
+    variants:
+      - variant_id: optimizer_hint_join_order
+        min_version: "8.0.1"
+        ast_nodes: [hint_comment, joined_table]
+        guards: [version_available, compatible_types, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: parse_tree_8041, locator: pt_hint_list}
+          - {source_id: release_8001, locator: join_order_hints}
+      - variant_id: optimizer_hint_index_level
+        min_version: "8.0.20"
+        ast_nodes: [hint_comment, query_specification]
+        guards: [version_available, existing_index, config_fingerprint_equal]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: parse_tree_8041, locator: pt_hint_list}
+          - {source_id: release_8020, locator: index_level_hints}
+      - variant_id: optimizer_hint_derived_pushdown
+        min_version: "8.0.22"
+        ast_nodes: [hint_comment, derived_table, predicate_expression]
+        guards: [version_available, alias_required, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: parse_tree_8041, locator: pt_hint_list}
+          - {source_id: release_8022, locator: derived_condition_pushdown}
+
+  - feature_id: partition_selection_family
+    category: partition_selection
+    min_version: "5.7.0"
+    ast_nodes: [query_specification, explicit_partition]
+    guards: [existing_partition, bounded_cardinality, stable_ordering]
+    profiles: [partitioned_innodb]
+    weight: 4
+    evidence:
+      - {source_id: grammar_8041, locator: opt_use_partition}
+      - {source_id: parse_tree_8041, locator: pt_table_factor_table_ident}
+    variants:
+      - variant_id: partition_explicit_selection
+        min_version: "5.7.0"
+        ast_nodes: [explicit_partition, predicate_expression]
+        guards: [existing_partition, bounded_cardinality, stable_ordering]
+        profiles: [partitioned_innodb]
+        weight: 4
+        evidence:
+          - {source_id: grammar_8041, locator: opt_use_partition}
+
+  - feature_id: functions_operators_family
+    category: functions_operators
+    min_version: "5.7.0"
+    ast_nodes: [function_expression, predicate_expression, aggregate_expression]
+    guards: [deterministic_expression, no_nondeterministic_function, version_available]
+    profiles: [regular_innodb]
+    weight: 8
+    evidence:
+      - {source_id: grammar_8041, locator: expr}
+      - {source_id: parse_tree_8041, locator: pt_query_specification}
+      - {source_id: version_builtin, locator: builtin_function_table}
+    variants:
+      - variant_id: function_deterministic_scalar
+        min_version: "5.7.0"
+        ast_nodes: [function_expression, predicate_expression]
+        guards: [deterministic_expression, no_nondeterministic_function, version_available]
+        profiles: [regular_innodb]
+        weight: 4
+        evidence:
+          - {source_id: grammar_8041, locator: function_call_generic}
+          - {source_id: version_builtin, locator: builtin_function_table}
+      - variant_id: function_aggregate
+        min_version: "5.7.0"
+        ast_nodes: [aggregate_expression, grouping_clause]
+        guards: [deterministic_expression, exact_grouping, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: in_sum_expr}
+      - variant_id: function_fulltext_spatial
+        min_version: "5.7.0"
+        ast_nodes: [function_expression, predicate_expression]
+        guards: [deterministic_expression, config_fingerprint_equal, bounded_cardinality]
+        profiles: [fulltext_innodb, spatial_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: function_call_generic}
+
+  - feature_id: regression_8041_family
+    category: regression_seed
+    min_version: "8.0.41"
+    ast_nodes: [query_expression, query_specification]
+    guards: [read_only_select, bounded_cardinality, stable_ordering]
+    profiles: [regular_innodb]
+    weight: 8
+    evidence:
+      - {source_id: grammar_8041, locator: query_expression}
+      - {source_id: release_8041, locator: bugs_fixed}
+    variants:
+      - variant_id: regression_8041_union_view_charset
+        min_version: "8.0.41"
+        ast_nodes: [query_expression, set_operation, predicate_expression]
+        guards: [compatible_collation, stable_ordering, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: grammar_8041, locator: query_expression_body}
+          - {source_id: release_8041, locator: union_view_charset_pushdown}
+      - variant_id: regression_8041_desc_pk_index_merge
+        min_version: "8.0.41"
+        ast_nodes: [query_specification, predicate_expression]
+        guards: [existing_index, bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: grammar_8041, locator: query_specification}
+          - {source_id: release_8041, locator: descending_primary_index_merge}
+      - variant_id: regression_8041_subquery_materialization
+        min_version: "8.0.41"
+        ast_nodes: [query_expression, subquery_expression, predicate_expression]
+        guards: [scalar_cardinality, bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: grammar_8041, locator: subquery}
+          - {source_id: release_8041, locator: subquery_filter_materialization}
+      - variant_id: regression_8041_union_chain_flatten
+        min_version: "8.0.41"
+        ast_nodes: [query_expression, set_operation]
+        guards: [arity_equal, compatible_types, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: grammar_8041, locator: flatten_equal_set_ops}
+          - {source_id: release_8041, locator: equal_union_chain_flatten}
+      - variant_id: regression_8041_rollup_row_comparator
+        min_version: "8.0.41"
+        ast_nodes: [row_constructor, subquery_expression, grouping_clause]
+        guards: [arity_equal, scalar_cardinality, exact_grouping]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: grammar_8041, locator: row_subquery}
+          - {source_id: release_8041, locator: rollup_row_comparator}
+      - variant_id: regression_8041_antijoin_spill_null_key
+        min_version: "8.0.41"
+        ast_nodes: [anti_join, joined_table, predicate_expression]
+        guards: [compatible_types, bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: grammar_8041, locator: all_or_any}
+          - {source_id: release_8041, locator: hash_antijoin_spill_null_key}
+      - variant_id: regression_8041_distinct_not_in
+        min_version: "8.0.41"
+        ast_nodes: [query_specification, subquery_expression, predicate_expression]
+        guards: [existing_index, bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: grammar_8041, locator: query_specification}
+          - {source_id: release_8041, locator: distinct_not_in_group_skip_scan}
+      - variant_id: regression_8041_hint_lexer
+        min_version: "8.0.41"
+        ast_nodes: [hint_comment, query_specification]
+        guards: [read_only_select, shallow_complexity, version_available]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: parse_tree_8041, locator: pt_hint_list}
+          - {source_id: release_8041, locator: optimizer_hint_comment_lexer}
+
+  - feature_id: scene_compatibility
+    category: scene_constraint
+    min_version: "5.7.0"
+    ast_nodes: [scene_profile]
+    guards: [config_fingerprint_equal, bounded_cardinality, shallow_complexity]
+    profiles: [regular_innodb, partitioned_innodb, temporary_innodb]
+    weight: 7
+    evidence:
+      - {source_id: manual_partition_limits, locator: partition_incompatibilities}
+      - {source_id: manual_foreign_keys, locator: foreign_key_restrictions}
+    variants:
+      - variant_id: scene_regular
+        min_version: "5.7.0"
+        ast_nodes: [scene_profile]
+        guards: [config_fingerprint_equal, bounded_cardinality, shallow_complexity]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_innodb_limits, locator: innodb_table_limits}
+      - variant_id: scene_partitioned
+        min_version: "5.7.0"
+        ast_nodes: [scene_profile, explicit_partition]
+        guards: [partition_unique_key_complete, existing_partition, bounded_cardinality]
+        profiles: [partitioned_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_partition_limits, locator: partition_incompatibilities}
+      - variant_id: scene_temporary
+        min_version: "5.7.0"
+        ast_nodes: [scene_profile]
+        guards: [same_session, bounded_cardinality, shallow_complexity]
+        profiles: [temporary_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_partition_limits, locator: temporary_partition_restriction}
+      - variant_id: scene_foreign_key
+        min_version: "5.7.0"
+        ast_nodes: [scene_profile, joined_table]
+        guards: [foreign_key_compatible, compatible_types, compatible_collation]
+        profiles: [foreign_key_graph]
+        weight: 1
+        evidence:
+          - {source_id: manual_foreign_keys, locator: foreign_key_restrictions}
+      - variant_id: scene_fulltext
+        min_version: "5.7.0"
+        ast_nodes: [scene_profile, function_expression]
+        guards: [fulltext_compatible, config_fingerprint_equal, bounded_cardinality]
+        profiles: [fulltext_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_fulltext, locator: fulltext_restrictions}
+      - variant_id: scene_spatial
+        min_version: "5.7.0"
+        ast_nodes: [scene_profile, function_expression]
+        guards: [fixed_srid, config_fingerprint_equal, bounded_cardinality]
+        profiles: [spatial_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_spatial, locator: spatial_index_requirements}
+      - variant_id: scene_json_multivalue
+        min_version: "5.7.0"
+        ast_nodes: [scene_profile, function_expression]
+        guards: [multivalue_compatible, json_path_valid, bounded_cardinality]
+        profiles: [json_multivalue_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_create_index, locator: multivalued_index_restrictions}
+
+  - feature_id: index_profiles
+    category: index_constraint
+    min_version: "5.7.0"
+    ast_nodes: [scene_profile]
+    guards: [existing_index, compatible_types, config_fingerprint_equal]
+    profiles: [regular_innodb]
+    weight: 6
+    evidence:
+      - {source_id: manual_create_index, locator: create_index_grammar}
+      - {source_id: manual_innodb_limits, locator: innodb_index_limits}
+    variants:
+      - variant_id: index_prefix
+        min_version: "5.7.0"
+        ast_nodes: [scene_profile]
+        guards: [existing_index, compatible_collation, config_fingerprint_equal]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_create_index, locator: column_prefix_key_parts}
+      - variant_id: index_descending
+        min_version: "8.0.1"
+        ast_nodes: [scene_profile]
+        guards: [existing_index, compatible_types, version_available]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_create_index, locator: descending_key_parts}
+          - {source_id: release_8001, locator: descending_indexes}
+      - variant_id: index_functional
+        min_version: "8.0.13"
+        ast_nodes: [scene_profile, function_expression]
+        guards: [existing_index, deterministic_expression, version_available]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_create_index, locator: functional_key_parts}
+          - {source_id: release_8013, locator: functional_key_parts}
+      - variant_id: index_multivalue
+        min_version: "8.0.17"
+        ast_nodes: [scene_profile, function_expression]
+        guards: [multivalue_compatible, json_path_valid, version_available]
+        profiles: [json_multivalue_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_create_index, locator: multivalued_indexes}
+          - {source_id: release_8017, locator: multivalued_indexes}
+      - variant_id: index_fulltext
+        min_version: "5.7.0"
+        ast_nodes: [scene_profile]
+        guards: [fulltext_compatible, existing_index, config_fingerprint_equal]
+        profiles: [fulltext_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_create_index, locator: fulltext_indexes}
+      - variant_id: index_spatial
+        min_version: "5.7.0"
+        ast_nodes: [scene_profile]
+        guards: [fixed_srid, existing_index, config_fingerprint_equal]
+        profiles: [spatial_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_create_index, locator: spatial_indexes}
+
+  - feature_id: type_domains
+    category: type_constraint
+    min_version: "5.7.0"
+    ast_nodes: [type_domain]
+    guards: [compatible_types, bounded_cardinality, config_fingerprint_equal]
+    profiles: [regular_innodb]
+    weight: 4
+    evidence:
+      - {source_id: manual_data_types, locator: data_type_categories}
+      - {source_id: manual_storage, locator: storage_requirements}
+    variants:
+      - variant_id: type_numeric_boundaries
+        min_version: "5.7.0"
+        ast_nodes: [type_domain]
+        guards: [compatible_types, deterministic_expression, bounded_cardinality]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: manual_data_types, locator: numeric_data_types}
+          - {source_id: manual_storage, locator: numeric_storage_requirements}
+      - variant_id: type_string_lob_boundaries
+        min_version: "5.7.0"
+        ast_nodes: [type_domain]
+        guards: [compatible_collation, bounded_cardinality, config_fingerprint_equal]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_data_types, locator: string_data_types}
+          - {source_id: manual_storage, locator: string_storage_requirements}
+      - variant_id: type_temporal_json_spatial
+        min_version: "5.7.0"
+        ast_nodes: [type_domain]
+        guards: [compatible_types, fixed_srid, json_path_valid]
+        profiles: [regular_innodb, spatial_innodb]
+        weight: 1
+        evidence:
+          - {source_id: manual_data_types, locator: temporal_json_spatial_types}
+
+  - feature_id: function_discovery
+    category: discovery_source
+    min_version: "5.7.0"
+    ast_nodes: [function_expression]
+    guards: [version_available, no_nondeterministic_function, deterministic_expression]
+    profiles: [regular_innodb]
+    weight: 1
+    evidence:
+      - {source_id: version_builtin, locator: builtin_function_table}
+    variants:
+      - variant_id: function_version_import
+        min_version: "5.7.0"
+        ast_nodes: [function_expression]
+        guards: [version_available, no_nondeterministic_function, deterministic_expression]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: version_builtin, locator: introduced_deprecated_removed_columns}

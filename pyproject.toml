@@ -1,0 +1,41 @@
+[project]
+name = "select-fuzz"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "mysql-connector-python>=9.0,<10",
+  "pydantic>=2.8,<3",
+  "PyYAML>=6.0,<7",
+  "typer>=0.12,<1",
+]
+
+[project.scripts]
+select-fuzz = "select_fuzz.cli:app"
+
+[dependency-groups]
+dev = [
+  "hatchling==1.27.0",
+  "hypothesis>=6.100",
+  "mypy>=1.10",
+  "pytest>=8.2",
+  "pytest-cov>=5",
+  "pytest-timeout>=2.3",
+  "ruff>=0.5",
+]
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["mysql: real MySQL integration", "soak: long-running tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["select_fuzz"]

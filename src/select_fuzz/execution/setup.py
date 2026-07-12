@@ -40,9 +40,14 @@ _INFRA_MYSQL_ERRNOS = frozenset(
 
 
 class SetupBundleLike(Protocol):
-    requires_same_session: bool
-    payload_sha256: str
-    statements: tuple[str, ...]
+    @property
+    def requires_same_session(self) -> bool: ...
+
+    @property
+    def payload_sha256(self) -> str: ...
+
+    @property
+    def statements(self) -> tuple[str, ...]: ...
 
 
 def validate_database_name(database: object) -> str:

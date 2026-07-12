@@ -3,17 +3,17 @@
 > **接手续读入口**：任何新会话开始工作前，先完整阅读本文件，再读取本文件中指向的计划文档与 `git status`。
 > **更新规则**：每完成、失败、阻塞或新增一个工程步骤，立即更新本文件；不能只依赖对话上下文。
 > **最后更新**：2026-07-13（Asia/Shanghai）
-> **状态**：开发进行中，尚未达到产品交付/12 小时验收条件。Task 6/7/8 已提交；Task 9 实现、独立审查与全量验证完成，正在精确提交。
+> **状态**：开发进行中，尚未达到产品交付/12 小时验收条件。Task 6/7/8/9 已提交；Task 11 实现、独立审查与全量验证完成，正在精确提交。
 
 ## 1. 工作区与 Git 状态
 
 - 大仓库根目录：`/Users/yuyu/Documents/select_fuzz 2`
 - 当前工作树：`/Users/yuyu/Documents/select_fuzz 2/.worktrees/mysql-parallel-query-fuzzer`
 - 当前分支：`codex/mysql-parallel-query-fuzzer`
-- 当前 HEAD：`813d423 feat: generate safe coverage-directed SELECT queries`
+- 当前 HEAD：`089ac84 feat: coordinate identical three-node test cases`
 - Git 远端：**未配置**。每次提交后执行 `git push` 都会得到 `No configured push destination`；不得猜测或私自创建远端。
 - 凭据规则：只从环境变量读取；不得把用户名密码/token 写入命令、代码、文档、日志或 Git 历史。
-- 本账本已随 Task 7 提交；本次记录 Task 7 提交/push 结果的增量将随 Task 9 提交。
+- 本账本已随 Task 9 提交；本次记录 Task 9 提交/push 结果的增量将随 Task 11 提交。
 
 每次开始修改前必须执行：
 
@@ -110,6 +110,7 @@ git remote -v
 | 完成 | `7b4566e` | bounded MySQL runner / race-safe KILL watchdog / 执行账本 | 431 full、2 skipped；ruff/mypy/diff-check 全绿 |
 | 完成 | `b64eccd` | deterministic mixed-distribution data / setup bundle | 82 focused；Decimal context finding 已修；431 full、2 skipped |
 | 完成 | `813d423` | safe coverage-directed SELECT AST/generator/validator | 98 focused；437 full、2 skipped；独立复审无剩余 Critical/Important |
+| 完成 | `089ac84` | identical three-node setup/query coordinator | 464 full、3 skipped；pinned sessions/infra retry/retained DB/role integrity |
 
 已知所有提交后的 `git push` 均失败，唯一原因是仓库没有远端。
 
@@ -234,7 +235,7 @@ git remote -v
 
 ### 5.4 Task 9 — three-node setup/query coordinator
 
-状态：**实现、主线程独立等价审查与全量验证完成，准备精确提交**。
+状态：**实现、主线程独立等价审查、全量验证与提交完成**（`089ac84`）。
 
 计划文件：
 
@@ -272,7 +273,58 @@ git remote -v
 未完成：
 
 - 精确 MySQL 8.0.41 三节点实际 setup/query 集成验证。
+- staged snapshot 已审计并精确提交；提交后 `git push` 因无 configured push destination 失败。
+
+### 5.5 Task 11 — fsynced artifacts / reader / HTML / replay
+
+状态：**实现、主线程独立等价审查与全量验证完成，准备精确提交**。
+
+计划文件：
+
+- `src/select_fuzz/artifacts/__init__.py`
+- `src/select_fuzz/artifacts/jsonl.py`
+- `src/select_fuzz/artifacts/bundle.py`
+- `src/select_fuzz/artifacts/reader.py`
+- `src/select_fuzz/artifacts/report.py`
+- `src/select_fuzz/replay.py`
+- `tests/artifacts/test_jsonl.py`
+- `tests/artifacts/test_bundle.py`
+- `tests/integration/test_replay.py`
+
+已执行：
+
+1. 完整读取 Task 11 细化计划与设计/测试计划中的持久化要求。
+2. 冻结接口边界：线程安全 append+fsync JSONL；reader 只忽略无换行 torn tail；pass 仅紧凑事件；finding 原子目录含三路 gzip；HTML 完全从事实来源重建；replay 同时接受 case-id 与 manifest path。
+3. TDD bootstrap RED/GREEN：artifact package 缺失时 `1 failed`；创建最小模块后 `1 passed`。
+4. JSONL durability RED/GREEN：fsync-before-publish、1000 concurrent appends、torn-tail、strict corruption/JSON、fsync failure；实现后 `12 passed`。
+5. Bundle durability RED/GREEN：compact pass、三路 deterministic gzip、atomic directory、ENOSPC cleanup、duplicate no-overwrite、sensitive-key preflight、case-id confinement；实现后 `9 passed`。
+6. Reader/HTML RED/GREEN：case-id/manifest-path、result traversal、decompressed cap、CSP/HTML escaping、atomic report；focused `4 passed`。
+7. Replay RED/GREEN：case-id 与 manifest-path 等价、reproduced/not-reproduced/infra 三状态；初版 `3 passed`。
+8. 独立审查补齐 MySQL 完整类型结果编码（BIGINT/bytes/Decimal/temporal/timedelta/float/nested JSON）、artifact root relative path、lifecycle event case 计数、package exports；修复后 artifacts/replay `32 passed`。
+9. Replay manifest 增加原始 `QueryLimits`，防止复现时 timeout/row/byte envelope 漂移；三路 result 强制内部 role/status 与外层文件一致。
+10. 新增生产 `TriadReplayAdapter`：真实 triad prepare/execute、最多 3 次 infra retry、actual retry database 回传、round lease 必关、semantic setup failure 单独分类；replay focused `5 passed`。
+11. 将 `SetupBundleLike` 修正为只读 property protocol，使 frozen `SetupBundle` 与 `ReplayCase` 都静态满足；replay+triad focused `31 passed`，mypy/ruff 全绿。
+12. 生产 replay adapter 静态收紧到真实 `TriadCoordinator`；QueryLimits、actual retry database 与 lease close 均进入 typed contract。
+13. JSONL 终审补齐 8 MiB bounded `readline` 与通用 sensitive-key guard；超大 torn tail/密码-token-credential 事件均先红后绿。
+14. 当前 artifacts + replay focused：`39 passed in 0.25s`；ruff/mypy/diff-check 全绿。
+15. 第一轮 full：`502 passed, 3 skipped, 1 failed in 26.58s`；唯一失败为旧 packaging 测试把合法源码路径 `src/select_fuzz/artifacts` 误判成仓库根运行产物 `/artifacts`。
+16. 已将 packaging 规则收紧为：cache 名全路径禁止，`artifacts/reports` 只在 sdist 根禁止；复验 `3 passed in 0.49s`，合法 artifact 源码仍打包、运行产物仍排除。
+17. 最终 fresh release verification：`503 passed, 3 skipped in 26.34s`；`ruff check src tests`、`mypy src/select_fuzz`、`git diff --check` 全绿。
+
+独立审查结论：
+
+- JSONL 线程锁 + `flock`、fsync-before-publish、strict JSON、torn tail、有界读取均有测试。
+- finding 使用跨进程 publish lock、临时目录全文件/目录 fsync、atomic replace；三路完整 typed result 支持 BIGINT/bytes/Decimal/temporal/timedelta/float/nested JSON。
+- manifest 包含 setup/query/query limits/checksum/seeds/database/fingerprint/diff/statistics/replay；result role/status 必须匹配。
+- reader 防路径穿越与 gzip bomb；HTML CSP/escape/atomic write；replay 双入口及真实 triad adapter 均有测试。
+- 当前未发现剩余 Critical/Important；精确 MySQL 8.0.41 replay integration 仍随正式节点阻塞。
+
+未完成：
+
+- 精确 MySQL 8.0.41 三节点真实 finding replay integration。
 - staged snapshot 审计、精确提交与提交后 `git push`。
+
+下一步：审计 Task 11 git diff/staged snapshot；精确提交并执行 `git push`。
 
 下一步：审计 git diff/staged snapshot；精确暂存 Task 9 文件与本台账；提交并执行 `git push`。
 
@@ -299,6 +351,7 @@ git remote -v
 - 2026-07-13 Task 7 独立审查修复后 focused：`98 passed in 5.79s`；其中 Hypothesis 10,000 safe bounded byte-stable + 1,000 negative 全绿。
 - Task 7 修复后最新 full：`437 passed, 2 skipped in 26.51s`；`ruff check src tests`、`mypy src/select_fuzz`、`git diff --check` 全绿。
 - Task 9 最终 fresh full：`464 passed, 3 skipped in 27.12s`；3 个 skip 均为未启用的真实 MySQL integration；ruff/mypy/diff-check 全绿。
+- Task 11 最终 fresh full：`503 passed, 3 skipped in 26.34s`；ruff/mypy/diff-check 全绿；packaging 合法 artifact source/非法 runtime artifact 已区分。
 
 ## 7. 精确 MySQL 与在线来源状态
 
@@ -334,9 +387,9 @@ git remote -v
 - [x] Task 6 — deterministic data / setup bundles：已提交 `b64eccd`；8.0.41 integration 待正式节点。
 - [x] Task 7 — SELECT AST / renderer / read-only validator / generator：已提交 `813d423`；8.0.41 release integration 待正式节点。
 - [x] Task 8 — MySQL runner / KILL watchdog：已提交 `7b4566e`；8.0.41 release integration 待正式节点。
-- [~] Task 9 — three-node setup and query coordinator：实现/独立审查/全量验证完成，正在提交；8.0.41 integration 待正式节点。
+- [x] Task 9 — three-node setup and query coordinator：已提交 `089ac84`；8.0.41 integration 待正式节点。
 - [x] Task 10 — typed multiset/error/timeout oracle。
-- [ ] Task 11 — fsynced artifacts / JSONL reader / HTML / replay。
+- [~] Task 11 — fsynced artifacts / JSONL reader / HTML / replay：实现/独立审查/503-test verification 完成，正在提交；8.0.41 replay integration 待正式节点。
 - [ ] Task 12 — correctness service / mode registry / doctor / CLI vertical slice。
 - [ ] Task 13 — core release gate / regression corpus。
 
@@ -386,8 +439,8 @@ git remote -v
 4. Task 8 已精确提交为 `7b4566e`；`git push` 已执行并确认无远端阻塞。
 5. Task 6 已提交为 `b64eccd`；push 已确认仅受无远端阻塞。
 6. Task 7 已提交为 `813d423`；`git push` 已执行并确认仅受无远端阻塞。
-7. **当前下一动作**：Task 9 已完成 464-test release verification；精确暂存、提交并 push。
-8. 实现 artifact/replay/CLI correctness vertical slice。
+7. Task 9 已提交为 `089ac84`；`git push` 已执行并确认仅受无远端阻塞。
+8. **当前下一动作**：Task 11 完成 503-test release verification；精确暂存、提交并 push；再进入 Task 12 CLI correctness vertical slice。
 9. 再实现 performance、FastAPI/React、12h validation。
 10. 获得可用三节点 MySQL 8.0.41 后执行 release matrix；8.0.45 只作 smoke。
 

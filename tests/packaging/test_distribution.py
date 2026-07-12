@@ -10,7 +10,7 @@ from zipfile import ZipFile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CATALOG_MEMBER = "select_fuzz/data/mysql-8.0.41-query-shapes.yaml"
-FORBIDDEN_PARTS = frozenset(
+FORBIDDEN_ANYWHERE = frozenset(
     {
         ".git",
         ".hypothesis",
@@ -18,10 +18,21 @@ FORBIDDEN_PARTS = frozenset(
         ".uv-cache",
         ".venv",
         "__pycache__",
-        "artifacts",
-        "reports",
     }
 )
+FORBIDDEN_WORKSPACE_ROOTS = frozenset({"artifacts", "reports"})
+
+
+def _is_forbidden_sdist_member(path: Path) -> bool:
+    # Every sdist member starts with hatchling's project-version directory.
+    relative_parts = path.parts[1:]
+    return bool(
+        FORBIDDEN_ANYWHERE.intersection(relative_parts)
+        or (
+            relative_parts
+            and relative_parts[0] in FORBIDDEN_WORKSPACE_ROOTS
+        )
+    )
 
 
 def _build_distribution(output: Path, target: str, suffix: str) -> Path:
@@ -89,4 +100,4 @@ def test_sdist_is_reproducible_source_not_a_workspace_snapshot(tmp_path: Path) -
         members = [Path(member.name) for member in archive.getmembers()]
 
     assert any(path.name == "mysql-8.0.41-query-shapes.yaml" for path in members)
-    assert not any(FORBIDDEN_PARTS.intersection(path.parts) for path in members)
+    assert not any(_is_forbidden_sdist_member(path) for path in members)

@@ -1,0 +1,31 @@
+invalid_cases:
+  - id: temporary_partition
+    mutation: temporary_partition
+    rule_id: temporary_no_partition
+  - id: partition_unique_missing_key
+    mutation: partition_unique_missing_key
+    rule_id: partition_unique_key_contains_partition_key
+  - id: lob_index_without_prefix
+    mutation: lob_index_without_prefix
+    rule_id: lob_index_requires_prefix
+  - id: index_budget
+    mutation: index_budget
+    rule_id: index_key_byte_budget
+  - id: spatial_nullable
+    mutation: spatial_nullable
+    rule_id: spatial_not_null
+  - id: spatial_missing_srid
+    mutation: spatial_missing_srid
+    rule_id: spatial_srid_required
+  - id: multiple_multivalue_parts
+    mutation: unique_multivalue
+    rule_id: multivalue_single_array_part
+  - id: fk_type_mismatch
+    mutation: fk_type_mismatch
+    rule_id: foreign_key_column_compatible
+  - id: fk_collation_mismatch
+    mutation: fk_collation_mismatch
+    rule_id: foreign_key_column_compatible
+  - id: fk_reference_missing_index
+    mutation: fk_reference_missing_index
+    rule_id: foreign_key_reference_index_left_prefix

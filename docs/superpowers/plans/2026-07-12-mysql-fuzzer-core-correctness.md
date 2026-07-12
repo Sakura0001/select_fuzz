@@ -422,7 +422,7 @@ git commit -m "feat: add coverage-debt feature scheduling"
         ("partitioned", {"fulltext"}, False),
         ("temporary", {"partitioned"}, False),
         ("foreign_key_graph", {"composite_fk"}, True),
-        ("json_multivalue", {"unique_multivalue"}, False),
+        ("json_multivalue", {"unique_multivalue"}, True),
     ],
 )
 def test_profile_compatibility(profile, features, valid):

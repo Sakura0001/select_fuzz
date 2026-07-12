@@ -2,6 +2,22 @@
 
 from select_fuzz.generation.catalog import EvidenceRef, FeatureCatalog, FeatureSpec
 from select_fuzz.generation.coverage import CoverageLedger, CoverageScheduler
+from select_fuzz.generation.query import (
+    EvidenceGateError,
+    GeneratedQuery,
+    QueryBatchPlanner,
+    QueryBudget,
+    QueryBudgetExceeded,
+    QueryComplexity,
+    QueryGenerator,
+    QueryLane,
+    QueryMix,
+    SUPPORTED_VARIANT_IDS,
+    TargetNotReachable,
+    UnsupportedQueryFeature,
+)
+from select_fuzz.generation.query_ast import ExpectedError, ExpectedErrorKind, QueryAst
+from select_fuzz.generation.query_safety import ReadOnlyValidator, UnsafeQuery
 from select_fuzz.generation.schema import (
     ColumnDef,
     ForeignKeyDef,
@@ -24,7 +40,10 @@ __all__ = [
     "CoverageLedger",
     "CoverageScheduler",
     "ColumnDef",
+    "EvidenceGateError",
     "EvidenceRef",
+    "ExpectedError",
+    "ExpectedErrorKind",
     "FeatureCatalog",
     "FeatureSpec",
     "ForeignKeyDef",
@@ -34,6 +53,17 @@ __all__ = [
     "IndexKind",
     "IndexPart",
     "PartitionDef",
+    "GeneratedQuery",
+    "QueryAst",
+    "QueryBatchPlanner",
+    "QueryBudget",
+    "QueryBudgetExceeded",
+    "QueryComplexity",
+    "QueryGenerator",
+    "QueryLane",
+    "QueryMix",
+    "ReadOnlyValidator",
+    "SUPPORTED_VARIANT_IDS",
     "SchemaGenerator",
     "SchemaLimits",
     "SchemaManifest",
@@ -42,4 +72,7 @@ __all__ = [
     "SchemaRules",
     "SortDirection",
     "TableDef",
+    "TargetNotReachable",
+    "UnsafeQuery",
+    "UnsupportedQueryFeature",
 ]

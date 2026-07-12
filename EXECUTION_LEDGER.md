@@ -3,17 +3,17 @@
 > **接手续读入口**：任何新会话开始工作前，先完整阅读本文件，再读取本文件中指向的计划文档与 `git status`。
 > **更新规则**：每完成、失败、阻塞或新增一个工程步骤，立即更新本文件；不能只依赖对话上下文。
 > **最后更新**：2026-07-13（Asia/Shanghai）
-> **状态**：开发进行中，尚未达到产品交付/12 小时验收条件。Task 6/8 已提交，Task 7 已完成独立等价审查与全量验证，正在精确提交。
+> **状态**：开发进行中，尚未达到产品交付/12 小时验收条件。Task 6/7/8 已提交；Task 9 实现、独立审查与全量验证完成，正在精确提交。
 
 ## 1. 工作区与 Git 状态
 
 - 大仓库根目录：`/Users/yuyu/Documents/select_fuzz 2`
 - 当前工作树：`/Users/yuyu/Documents/select_fuzz 2/.worktrees/mysql-parallel-query-fuzzer`
 - 当前分支：`codex/mysql-parallel-query-fuzzer`
-- 当前 HEAD：`b64eccd feat: generate deterministic mixed-distribution data`
+- 当前 HEAD：`813d423 feat: generate safe coverage-directed SELECT queries`
 - Git 远端：**未配置**。每次提交后执行 `git push` 都会得到 `No configured push destination`；不得猜测或私自创建远端。
 - 凭据规则：只从环境变量读取；不得把用户名密码/token 写入命令、代码、文档、日志或 Git 历史。
-- 本账本本身尚未提交，必须随下一次合适的分片提交一并提交。
+- 本账本已随 Task 7 提交；本次记录 Task 7 提交/push 结果的增量将随 Task 9 提交。
 
 每次开始修改前必须执行：
 
@@ -109,6 +109,7 @@ git remote -v
 | 完成 | `58be854` | 三节点 typed oracle | 70 focused；float multiset 10k + exhaustive matching 2k；独立复审无剩余 Critical/Important |
 | 完成 | `7b4566e` | bounded MySQL runner / race-safe KILL watchdog / 执行账本 | 431 full、2 skipped；ruff/mypy/diff-check 全绿 |
 | 完成 | `b64eccd` | deterministic mixed-distribution data / setup bundle | 82 focused；Decimal context finding 已修；431 full、2 skipped |
+| 完成 | `813d423` | safe coverage-directed SELECT AST/generator/validator | 98 focused；437 full、2 skipped；独立复审无剩余 Critical/Important |
 
 已知所有提交后的 `git push` 均失败，唯一原因是仓库没有远端。
 
@@ -147,7 +148,7 @@ git remote -v
 
 ### 5.2 Task 7 — typed SELECT AST / generator / validator
 
-状态：**实现与主线程独立等价审查完成，准备精确提交**。
+状态：**实现、主线程独立等价审查与提交完成**（`813d423`）。
 
 文件：
 
@@ -183,7 +184,7 @@ git remote -v
 未完成：
 
 - 精确 MySQL 8.0.41 实际语法执行验证。
-- staged snapshot 检查、精确提交与提交后 `git push`。
+- 已完成 staged snapshot 检查并精确提交；提交后 `git push` 因无 configured push destination 失败。
 
 ### 5.3 Task 8 — MySQL runner / watchdog
 
@@ -231,6 +232,50 @@ git remote -v
 - 精确 MySQL 8.0.41 集成验证仍待正式节点。
 - 已精确暂存并提交；提交后 `git push` 再次因无 configured push destination 失败。
 
+### 5.4 Task 9 — three-node setup/query coordinator
+
+状态：**实现、主线程独立等价审查与全量验证完成，准备精确提交**。
+
+计划文件：
+
+- `src/select_fuzz/execution/triad.py`
+- `src/select_fuzz/execution/setup.py`
+- `tests/execution/test_triad.py`
+- `tests/integration/test_setup_mysql.py`
+
+已执行：
+
+1. 重新读取 Task 9 细化计划与现有 runner/setup/oracle contracts。
+2. 冻结本切片接口：三路同 bundle 并发 setup；临时表 pinned sessions；共享 barrier 查询；任一 pinned session 丢失/不可复用则整轮重建；infra 返回暂停/重试状态，不进入 oracle。
+3. TDD bootstrap RED：`.venv/bin/pytest -q tests/execution/test_triad.py` 得到 `1 failed`，失败原因精确为 `select_fuzz.execution.triad` 尚不存在。
+4. TDD bootstrap GREEN：创建最小 module 后同命令 `1 passed`。
+5. TDD public-contract RED/GREEN：先验证 coordinator/status/limits/setup runner/result 五个公开契约，缺 `execution.setup` 时 `1 failed`；加入最小契约后 `1 passed`。
+6. TDD core-behavior RED：加入三路并发 setup、setup 分类、pinned session、丢失/不可复用整轮重建、query barrier、安全数据库名与结果不变量测试；运行得到 `9 failed`，均精确指向尚未实现的行为。
+7. TDD core-behavior GREEN：实现 `MySQLSetupRunner`、`PreparedRound`、`TriadCoordinator`、共享 query barrier 与整轮 session 重建；专项 `9 passed`。
+8. TDD risk-boundary RED/GREEN：补 checksum mismatch、部分 pinned acquisition 清理、失败 temporary setup 清理、worker exception barrier abort、指数退避与 QueryLimits ceiling/NaN；实现后专项 `17 passed`。
+9. 静态检查首次发现 4 个 mypy error，根因是异构 `common` dict 经 `**kwargs` 后被推断为 `object`；改为显式 typed kwargs 后 mypy/专项/ruff 全绿。
+10. 公开导出 TDD：未从 `select_fuzz.execution` 导出时 `1 failed, 17 passed`；补导出后 `18 passed, 1 skipped`（三节点真实 MySQL smoke 未配置端点）。
+11. 独立审查发现并修复：cached connection-id 不等于 liveness（增加 `ping(reconnect=False)`）；非临时 infra retry 必须换新库避免半成品 DDL；错误 role adapter 结果不得进入语义路径。相关测试均先红后绿。
+12. 当前 execution + setup integration focused：`63 passed, 1 skipped in 0.46s`；ruff/mypy 全绿。
+13. 第一轮全仓回归：`459 passed, 3 skipped in 27.10s`；ruff/mypy/diff-check 全绿。
+14. 24/7 retained-database 审查：修复同秒跨进程 sequence 归零碰撞、64-byte 外部名 retry 截断唯一尾部；专项升至 `23 passed`。
+15. 安全审查：数据库只允许 `sf_` 产品命名空间，拒绝 `mysql`、`information_schema` 及注入名；当前 execution focused `67 passed, 1 skipped in 0.46s`，ruff/mypy/diff-check 全绿。
+16. 错误分类审查：access denied、server shutdown、连接/资源上限、transport、lock wait/deadlock、interruption/statement timeout 归 infrastructure pause，不得误报 `rejected_generation`；相关测试先红后绿。
+17. 最终 fresh release verification：`464 passed, 3 skipped in 27.12s`；`ruff check src tests`、`mypy src/select_fuzz`、`git diff --check` 全绿。
+
+独立审查结论：
+
+- 三路 setup/query 并发、pinned temporary session、barrier abort、role integrity、payload checksum、错误分类、infra retry、retained database naming 与资源清理均有回归测试。
+- 发现的 Critical/Important 均已先红后绿关闭；当前无剩余 Critical/Important。
+- opt-in 三节点真实 MySQL smoke 已实现，但本机未配置三角色端点，当前计入 3 个 integration skip 之一；精确 8.0.41 release integration 仍阻塞。
+
+未完成：
+
+- 精确 MySQL 8.0.41 三节点实际 setup/query 集成验证。
+- staged snapshot 审计、精确提交与提交后 `git push`。
+
+下一步：审计 git diff/staged snapshot；精确暂存 Task 9 文件与本台账；提交并执行 `git push`。
+
 ## 6. 已运行测试记录
 
 ### 6.1 已提交切片
@@ -253,6 +298,7 @@ git remote -v
 - 同次 `ruff check src tests` 与 `mypy src/select_fuzz` 均通过。
 - 2026-07-13 Task 7 独立审查修复后 focused：`98 passed in 5.79s`；其中 Hypothesis 10,000 safe bounded byte-stable + 1,000 negative 全绿。
 - Task 7 修复后最新 full：`437 passed, 2 skipped in 26.51s`；`ruff check src tests`、`mypy src/select_fuzz`、`git diff --check` 全绿。
+- Task 9 最终 fresh full：`464 passed, 3 skipped in 27.12s`；3 个 skip 均为未启用的真实 MySQL integration；ruff/mypy/diff-check 全绿。
 
 ## 7. 精确 MySQL 与在线来源状态
 
@@ -286,9 +332,9 @@ git remote -v
 - [x] Task 4 — feature catalog / persistent coverage scheduler。
 - [x] Task 5 — schema profiles / MySQL compatibility rules。
 - [x] Task 6 — deterministic data / setup bundles：已提交 `b64eccd`；8.0.41 integration 待正式节点。
-- [~] Task 7 — SELECT AST / renderer / read-only validator / generator：实现与独立审查完成，待 8.0.41 release integration；当前正在提交。
+- [x] Task 7 — SELECT AST / renderer / read-only validator / generator：已提交 `813d423`；8.0.41 release integration 待正式节点。
 - [x] Task 8 — MySQL runner / KILL watchdog：已提交 `7b4566e`；8.0.41 release integration 待正式节点。
-- [ ] Task 9 — three-node setup and query coordinator。
+- [~] Task 9 — three-node setup and query coordinator：实现/独立审查/全量验证完成，正在提交；8.0.41 integration 待正式节点。
 - [x] Task 10 — typed multiset/error/timeout oracle。
 - [ ] Task 11 — fsynced artifacts / JSONL reader / HTML / replay。
 - [ ] Task 12 — correctness service / mode registry / doctor / CLI vertical slice。
@@ -339,8 +385,8 @@ git remote -v
 3. Task 8 手工最终审查已完成；最后新增的 timeout/result-limit 同时触发测试已先红后绿。
 4. Task 8 已精确提交为 `7b4566e`；`git push` 已执行并确认无远端阻塞。
 5. Task 6 已提交为 `b64eccd`；push 已确认仅受无远端阻塞。
-6. **当前下一动作**：Task 7 已完成独立审查与 focused/property/full/static；精确暂存、提交并 push。
-7. 实现 Task 9 三节点 coordinator；临时表必须使用 pinned sessions；看到 `connection_reusable=False` 必须丢弃并重建整个 session/round。
+6. Task 7 已提交为 `813d423`；`git push` 已执行并确认仅受无远端阻塞。
+7. **当前下一动作**：Task 9 已完成 464-test release verification；精确暂存、提交并 push。
 8. 实现 artifact/replay/CLI correctness vertical slice。
 9. 再实现 performance、FastAPI/React、12h validation。
 10. 获得可用三节点 MySQL 8.0.41 后执行 release matrix；8.0.45 只作 smoke。

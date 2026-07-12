@@ -480,6 +480,10 @@ class _ConnectorSession:
             raise TypeError("connector returned an invalid connection ID")
         return value
 
+    def is_alive(self) -> bool:
+        self._connection.ping(reconnect=False, attempts=1, delay=0)
+        return True
+
     def execute(self, sql: str) -> _ConnectorCursor:
         cursor = self._connection.cursor(buffered=False, raw=False)
         try:

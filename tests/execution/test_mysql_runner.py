@@ -653,6 +653,7 @@ class _RawConnection:
         self.warning_cursor = _RawCursor(rows=(("Warning", 1265, "truncated"),))
         self.closed = False
         self.shutdown_called = False
+        self.ping_calls: list[dict[str, object]] = []
         self.cursor_calls: list[dict[str, object]] = []
 
     def cursor(self, *, buffered: bool, raw: bool = False, **kwargs: object):  # type: ignore[no-untyped-def]
@@ -664,6 +665,9 @@ class _RawConnection:
 
     def shutdown(self) -> None:
         self.shutdown_called = True
+
+    def ping(self, **kwargs: object) -> None:
+        self.ping_calls.append(dict(kwargs))
 
 
 def test_connector_adapter_preserves_flags_and_fetches_warnings_after_result(
@@ -731,6 +735,26 @@ def test_connector_abort_shuts_down_socket_without_sending_quit(node: NodeConfig
         assert connection.closed is False
 
     assert connection.closed is True
+
+
+def test_connector_liveness_probe_never_reconnects_a_pinned_session(
+    node: NodeConfig,
+) -> None:
+    connection = _RawConnection()
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=lambda **kwargs: connection,
+    )
+
+    with factory.query_session(node, "sf_case_1") as session:
+        assert session.is_alive() is True
+
+    assert connection.ping_calls == [
+        {"reconnect": False, "attempts": 1, "delay": 0}
+    ]
 
 
 def test_control_connections_use_a_short_independent_timeout(node: NodeConfig) -> None:

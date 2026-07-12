@@ -1,0 +1,30 @@
+# Local Git worktrees
+.worktrees/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+
+# Node / frontend
+node_modules/
+dist/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Runtime output
+artifacts/
+reports/
+*.log
+
+# macOS
+.DS_Store

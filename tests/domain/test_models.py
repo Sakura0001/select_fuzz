@@ -106,6 +106,48 @@ def test_error_info_and_column_metadata_validate_wire_contract() -> None:
     with pytest.raises(ValueError, match="name"):
         ColumnMeta("", 3, True, False, False)
 
+    for kwargs in (
+        {"errno": True, "sqlstate": "HY000", "message": "x"},
+        {"errno": 65_536, "sqlstate": "HY000", "message": "x"},
+        {"errno": 1, "sqlstate": 42_000, "message": "x"},
+        {"errno": 1, "sqlstate": "HY000", "message": b"x"},
+    ):
+        with pytest.raises((TypeError, ValueError)):
+            ErrorInfo(**kwargs)  # type: ignore[arg-type]
+
+    malformed_metadata = (
+        ("x", True, False, False, False),
+        ("x", 256, False, False, False),
+        ("x", 3, 0, False, False),
+        ("x", 3, False, 1, False),
+        ("x", 3, False, False, 0),
+    )
+    for values in malformed_metadata:
+        with pytest.raises((TypeError, ValueError)):
+            ColumnMeta(*values)  # type: ignore[arg-type]
+
+    metadata = ColumnMeta(
+        "bits",
+        16,
+        False,
+        True,
+        True,
+        character_set_id=63,
+        column_length=8,
+        decimals=0,
+        flags=0x20,
+    )
+    assert metadata.column_length == 8
+
+    for field, value in (
+        ("character_set_id", -1),
+        ("column_length", -1),
+        ("decimals", 256),
+        ("flags", 65_536),
+    ):
+        with pytest.raises(ValueError, match=field):
+            ColumnMeta("x", 3, True, False, False, **{field: value})
+
 
 def test_run_request_validates_but_does_not_supply_mode_defaults() -> None:
     request = RunRequest(

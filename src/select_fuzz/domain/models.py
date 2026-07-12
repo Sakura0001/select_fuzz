@@ -50,10 +50,16 @@ class ErrorInfo:
     message: str
 
     def __post_init__(self) -> None:
-        if self.errno < 0:
-            raise ValueError("errno must be nonnegative")
-        if not _SQLSTATE.fullmatch(self.sqlstate):
+        if (
+            not isinstance(self.errno, int)
+            or isinstance(self.errno, bool)
+            or not 0 <= self.errno <= 0xFFFF
+        ):
+            raise ValueError("errno must be an unsigned 16-bit integer")
+        if not isinstance(self.sqlstate, str) or not _SQLSTATE.fullmatch(self.sqlstate):
             raise ValueError("sqlstate must contain five uppercase alphanumeric characters")
+        if not isinstance(self.message, str):
+            raise TypeError("message must be a string")
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,12 +69,38 @@ class ColumnMeta:
     nullable: bool
     unsigned: bool
     binary: bool
+    character_set_id: int | None = None
+    column_length: int | None = None
+    decimals: int | None = None
+    flags: int | None = None
 
     def __post_init__(self) -> None:
-        if not self.name:
+        if not isinstance(self.name, str) or not self.name:
             raise ValueError("column name must not be empty")
-        if self.type_code < 0:
-            raise ValueError("type_code must be nonnegative")
+        if (
+            not isinstance(self.type_code, int)
+            or isinstance(self.type_code, bool)
+            or not 0 <= self.type_code <= 0xFF
+        ):
+            raise ValueError("type_code must be an unsigned 8-bit integer")
+        for field_name in ("nullable", "unsigned", "binary"):
+            if not isinstance(getattr(self, field_name), bool):
+                raise TypeError(f"{field_name} must be a bool")
+        bounded_fields = (
+            ("character_set_id", self.character_set_id, 0xFFFF),
+            ("column_length", self.column_length, 0xFFFFFFFF),
+            ("decimals", self.decimals, 0xFF),
+            ("flags", self.flags, 0xFFFF),
+        )
+        for field_name, value, maximum in bounded_fields:
+            if value is not None and (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not 0 <= value <= maximum
+            ):
+                raise ValueError(
+                    f"{field_name} must be an unsigned protocol integer when present"
+                )
 
 
 @dataclass(frozen=True, slots=True)

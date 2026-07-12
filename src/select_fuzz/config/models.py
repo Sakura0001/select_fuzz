@@ -28,6 +28,9 @@ class RunMode(StrEnum):
     PERFORMANCE = "performance"
 
 
+MAX_STATEMENT_TIMEOUT_SECONDS = 300.0
+
+
 class NodeRole(StrEnum):
     """The only server roles accepted by the differential runner."""
 
@@ -74,7 +77,9 @@ class CorrectnessConfig(StrictModel):
 
     workers: int = Field(default=10, ge=1, le=64)
     queries_per_round: int = Field(default=1000, ge=1)
-    timeout_seconds: float = Field(default=15.0, gt=0)
+    timeout_seconds: float = Field(
+        default=15.0, gt=0, le=MAX_STATEMENT_TIMEOUT_SECONDS
+    )
     row_limit: int = Field(default=10_000, ge=1)
     byte_limit: int = Field(default=32 * 1024 * 1024, ge=1)
     free_random_rate: float = Field(default=0.05, ge=0, le=1)
@@ -98,7 +103,9 @@ class PerformanceConfig(StrictModel):
     calibration_runs_per_reference: Literal[3] = 3
     calibration_min_seconds: float = Field(default=5.0, gt=0)
     calibration_max_seconds: float = Field(default=30.0, gt=0)
-    formal_timeout_seconds: float = Field(default=60.0, gt=0)
+    formal_timeout_seconds: float = Field(
+        default=60.0, gt=0, le=MAX_STATEMENT_TIMEOUT_SECONDS
+    )
     regression_threshold: float = Field(default=0.20, ge=0)
     max_start_skew_ms: float = Field(default=100.0, ge=0)
 

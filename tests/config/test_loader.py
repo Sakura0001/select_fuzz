@@ -103,6 +103,16 @@ def test_performance_workers_must_equal_one() -> None:
         PerformanceConfig(calibration_runs_per_reference=2)
 
 
+def test_statement_timeouts_share_the_ui_and_connector_safety_ceiling() -> None:
+    assert CorrectnessConfig(timeout_seconds=300).timeout_seconds == 300
+    assert PerformanceConfig(formal_timeout_seconds=300).formal_timeout_seconds == 300
+
+    with pytest.raises(ValidationError):
+        CorrectnessConfig(timeout_seconds=300.001)
+    with pytest.raises(ValidationError):
+        PerformanceConfig(formal_timeout_seconds=300.001)
+
+
 @pytest.mark.parametrize(
     "nodes",
     [

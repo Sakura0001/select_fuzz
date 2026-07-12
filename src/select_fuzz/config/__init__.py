@@ -4,6 +4,7 @@ from select_fuzz.config.loader import ConfigLoadError, load_config, resolve_cred
 from select_fuzz.config.models import (
     AppConfig,
     CorrectnessConfig,
+    MAX_STATEMENT_TIMEOUT_SECONDS,
     NodeConfig,
     NodePreflight,
     NodeRole,
@@ -19,6 +20,7 @@ __all__ = [
     "AppConfig",
     "ConfigLoadError",
     "CorrectnessConfig",
+    "MAX_STATEMENT_TIMEOUT_SECONDS",
     "NodeConfig",
     "NodePreflight",
     "NodeRole",

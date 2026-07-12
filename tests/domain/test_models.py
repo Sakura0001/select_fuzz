@@ -139,6 +139,19 @@ def test_error_info_and_column_metadata_validate_wire_contract() -> None:
     )
     assert metadata.column_length == 8
 
+    invalidated = NodeExecution.failure(
+        role=NodeRole.BASELINE,
+        status=ExecutionStatus.INFRA_ERROR,
+        started_ns=1,
+        ended_ns=2,
+        connection_id=7,
+        error=ErrorInfo(2013, "HY000", "lost connection"),
+        connection_reusable=False,
+        watchdog_error_type="ReadTimeoutError",
+    )
+    assert invalidated.connection_reusable is False
+    assert invalidated.watchdog_error_type == "ReadTimeoutError"
+
     for field, value in (
         ("character_set_id", -1),
         ("column_length", -1),

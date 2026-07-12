@@ -115,6 +115,8 @@ class NodeExecution:
     error: ErrorInfo | None = None
     warnings: tuple[str, ...] = ()
     watchdog_fired: bool = False
+    watchdog_error_type: str | None = None
+    connection_reusable: bool = True
     performance_payload: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
@@ -125,6 +127,13 @@ class NodeExecution:
             tuple(tuple(_freeze(cell) for cell in row) for row in self.rows),
         )
         object.__setattr__(self, "warnings", tuple(self.warnings))
+        if not isinstance(self.connection_reusable, bool):
+            raise TypeError("connection_reusable must be a bool")
+        if self.watchdog_error_type is not None and (
+            not isinstance(self.watchdog_error_type, str)
+            or not self.watchdog_error_type
+        ):
+            raise TypeError("watchdog_error_type must be a nonempty string when present")
         if self.started_ns < 0 or self.ended_ns < self.started_ns:
             raise ValueError("ended_ns must be greater than or equal to started_ns")
         if self.connection_id is not None and self.connection_id <= 0:
@@ -159,6 +168,7 @@ class NodeExecution:
         columns: tuple[ColumnMeta, ...] = (),
         rows: tuple[tuple[object, ...], ...] = (),
         warnings: tuple[str, ...] = (),
+        connection_reusable: bool = True,
         performance_payload: Mapping[str, object] | None = None,
     ) -> NodeExecution:
         return cls(
@@ -170,6 +180,7 @@ class NodeExecution:
             columns=columns,
             rows=rows,
             warnings=warnings,
+            connection_reusable=connection_reusable,
             performance_payload=performance_payload,
         )
 
@@ -186,6 +197,8 @@ class NodeExecution:
         rows: tuple[tuple[object, ...], ...] = (),
         warnings: tuple[str, ...] = (),
         watchdog_fired: bool = False,
+        watchdog_error_type: str | None = None,
+        connection_reusable: bool = True,
         performance_payload: Mapping[str, object] | None = None,
     ) -> NodeExecution:
         if status is ExecutionStatus.SUCCESS:
@@ -200,6 +213,8 @@ class NodeExecution:
             error=error,
             warnings=warnings,
             watchdog_fired=watchdog_fired,
+            watchdog_error_type=watchdog_error_type,
+            connection_reusable=connection_reusable,
             performance_payload=performance_payload,
         )
 

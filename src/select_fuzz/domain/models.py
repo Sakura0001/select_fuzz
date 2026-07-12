@@ -1,0 +1,213 @@
+"""Immutable values crossing generator, executor, oracle, and control-plane boundaries."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import StrEnum
+import re
+from types import MappingProxyType
+from typing import Literal
+
+from select_fuzz.config import NodeRole
+
+
+class ExecutionStatus(StrEnum):
+    SUCCESS = "success"
+    ERROR = "error"
+    TIMEOUT = "timeout"
+    INFRA_ERROR = "infra_error"
+
+
+_SQLSTATE = re.compile(r"^[0-9A-Z]{5}$")
+
+
+def _freeze(value: object) -> object:
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("immutable payload mappings require string keys")
+        return MappingProxyType({key: _freeze(child) for key, child in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(child) for child in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze(child) for child in value)
+    if isinstance(value, bytearray):
+        return bytes(value)
+    return value
+
+
+def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+    frozen = _freeze(value)
+    if not isinstance(frozen, Mapping):  # pragma: no cover - helper contract
+        raise TypeError("expected a mapping payload")
+    return frozen
+
+
+@dataclass(frozen=True, slots=True)
+class ErrorInfo:
+    errno: int
+    sqlstate: str
+    message: str
+
+    def __post_init__(self) -> None:
+        if self.errno < 0:
+            raise ValueError("errno must be nonnegative")
+        if not _SQLSTATE.fullmatch(self.sqlstate):
+            raise ValueError("sqlstate must contain five uppercase alphanumeric characters")
+
+
+@dataclass(frozen=True, slots=True)
+class ColumnMeta:
+    name: str
+    type_code: int
+    nullable: bool
+    unsigned: bool
+    binary: bool
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("column name must not be empty")
+        if self.type_code < 0:
+            raise ValueError("type_code must be nonnegative")
+
+
+@dataclass(frozen=True, slots=True)
+class NodeExecution:
+    role: NodeRole
+    status: ExecutionStatus
+    started_ns: int
+    ended_ns: int
+    connection_id: int | None
+    columns: tuple[ColumnMeta, ...] = ()
+    rows: tuple[tuple[object, ...], ...] = ()
+    error: ErrorInfo | None = None
+    warnings: tuple[str, ...] = ()
+    watchdog_fired: bool = False
+    performance_payload: Mapping[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "columns", tuple(self.columns))
+        object.__setattr__(
+            self,
+            "rows",
+            tuple(tuple(_freeze(cell) for cell in row) for row in self.rows),
+        )
+        object.__setattr__(self, "warnings", tuple(self.warnings))
+        if self.started_ns < 0 or self.ended_ns < self.started_ns:
+            raise ValueError("ended_ns must be greater than or equal to started_ns")
+        if self.connection_id is not None and self.connection_id <= 0:
+            raise ValueError("connection_id must be positive when present")
+        if self.status is ExecutionStatus.SUCCESS and self.error is not None:
+            raise ValueError("successful execution cannot contain an error")
+        if self.status is not ExecutionStatus.SUCCESS and self.error is None:
+            raise ValueError("non-successful execution requires an error")
+        if self.status is not ExecutionStatus.SUCCESS and self.rows:
+            raise ValueError("rows are only valid for successful execution")
+        if any(len(row) != len(self.columns) for row in self.rows):
+            raise ValueError("result row width must match column metadata width")
+        if self.performance_payload is not None:
+            object.__setattr__(
+                self,
+                "performance_payload",
+                _freeze_mapping(self.performance_payload),
+            )
+
+    @property
+    def elapsed_ns(self) -> int:
+        return self.ended_ns - self.started_ns
+
+    @classmethod
+    def success(
+        cls,
+        *,
+        role: NodeRole,
+        connection_id: int | None,
+        started_ns: int,
+        ended_ns: int,
+        columns: tuple[ColumnMeta, ...] = (),
+        rows: tuple[tuple[object, ...], ...] = (),
+        warnings: tuple[str, ...] = (),
+        performance_payload: Mapping[str, object] | None = None,
+    ) -> NodeExecution:
+        return cls(
+            role=role,
+            status=ExecutionStatus.SUCCESS,
+            started_ns=started_ns,
+            ended_ns=ended_ns,
+            connection_id=connection_id,
+            columns=columns,
+            rows=rows,
+            warnings=warnings,
+            performance_payload=performance_payload,
+        )
+
+    @classmethod
+    def failure(
+        cls,
+        *,
+        role: NodeRole,
+        status: ExecutionStatus,
+        started_ns: int,
+        ended_ns: int,
+        connection_id: int | None,
+        error: ErrorInfo,
+        rows: tuple[tuple[object, ...], ...] = (),
+        warnings: tuple[str, ...] = (),
+        watchdog_fired: bool = False,
+        performance_payload: Mapping[str, object] | None = None,
+    ) -> NodeExecution:
+        if status is ExecutionStatus.SUCCESS:
+            raise ValueError("failure status cannot be success")
+        return cls(
+            role=role,
+            status=status,
+            started_ns=started_ns,
+            ended_ns=ended_ns,
+            connection_id=connection_id,
+            rows=rows,
+            error=error,
+            warnings=warnings,
+            watchdog_fired=watchdog_fired,
+            performance_payload=performance_payload,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RunRequest:
+    run_id: str
+    mode: Literal["correctness", "performance"]
+    seed: int
+    workers: int
+    rounds: int | None
+    queries_per_round: int
+
+    def __post_init__(self) -> None:
+        if not self.run_id:
+            raise ValueError("run_id must not be empty")
+        if self.mode not in ("correctness", "performance"):
+            raise ValueError("mode must be correctness or performance")
+        if self.workers <= 0:
+            raise ValueError("workers must be positive")
+        if self.mode == "performance" and self.workers != 1:
+            raise ValueError("performance mode requires one worker")
+        if self.rounds is not None and self.rounds <= 0:
+            raise ValueError("rounds must be positive when supplied")
+        if self.queries_per_round <= 0:
+            raise ValueError("queries_per_round must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class RunEvent:
+    run_id: str
+    sequence: int
+    kind: str
+    payload: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        if not self.run_id:
+            raise ValueError("run_id must not be empty")
+        if self.sequence < 0:
+            raise ValueError("sequence must be nonnegative")
+        if not self.kind:
+            raise ValueError("kind must not be empty")
+        object.__setattr__(self, "payload", _freeze_mapping(self.payload))

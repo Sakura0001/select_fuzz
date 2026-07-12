@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+from types import MappingProxyType
+
+import pytest
+
+from select_fuzz.config import NodeRole
+from select_fuzz.domain.models import (
+    ColumnMeta,
+    ErrorInfo,
+    ExecutionStatus,
+    NodeExecution,
+    RunEvent,
+    RunRequest,
+)
+
+
+def test_node_execution_success_records_typed_timing_and_immutable_payload() -> None:
+    mutable_payload = {"tree": {"operators": ["scan"]}}
+    result = NodeExecution.success(
+        role=NodeRole.BASELINE,
+        connection_id=12,
+        started_ns=10,
+        ended_ns=20,
+        columns=(ColumnMeta("answer", 3, False, False, False),),
+        rows=((42,),),
+        warnings=("warning text",),
+        performance_payload=mutable_payload,
+    )
+    mutable_payload["tree"]["operators"].append("mutated")  # type: ignore[index,union-attr]
+
+    assert result.elapsed_ns == 10
+    assert result.status is ExecutionStatus.SUCCESS
+    assert result.rows == ((42,),)
+    assert isinstance(result.performance_payload, MappingProxyType)
+    assert result.performance_payload["tree"] == {"operators": ("scan",)}
+    with pytest.raises(TypeError):
+        result.performance_payload["tree"] = "changed"  # type: ignore[index]
+
+
+def test_execution_normalizes_sequences_and_freezes_nested_row_values() -> None:
+    json_value = {"items": [1, 2]}
+    result = NodeExecution.success(
+        role=NodeRole.BASELINE,
+        connection_id=12,
+        started_ns=10,
+        ended_ns=20,
+        columns=[ColumnMeta("doc", 245, True, False, False)],  # type: ignore[arg-type]
+        rows=[[json_value]],  # type: ignore[arg-type]
+        warnings=["warning"],  # type: ignore[arg-type]
+    )
+    json_value["items"].append(3)
+
+    assert isinstance(result.columns, tuple)
+    assert isinstance(result.rows, tuple)
+    assert result.rows[0][0] == {"items": (1, 2)}
+    assert result.warnings == ("warning",)
+
+
+def test_execution_payload_status_invariants() -> None:
+    error = ErrorInfo(errno=1064, sqlstate="42000", message="syntax error")
+
+    with pytest.raises(ValueError, match="ended_ns"):
+        NodeExecution.success(
+            role=NodeRole.BASELINE,
+            connection_id=1,
+            started_ns=20,
+            ended_ns=10,
+        )
+    with pytest.raises(ValueError, match="error"):
+        NodeExecution(
+            role=NodeRole.BASELINE,
+            status=ExecutionStatus.SUCCESS,
+            started_ns=1,
+            ended_ns=2,
+            connection_id=1,
+            error=error,
+        )
+    with pytest.raises(ValueError, match="rows"):
+        NodeExecution.failure(
+            role=NodeRole.BASELINE,
+            status=ExecutionStatus.ERROR,
+            started_ns=1,
+            ended_ns=2,
+            connection_id=1,
+            error=error,
+            rows=((1,),),
+        )
+
+    with pytest.raises(ValueError, match="row width"):
+        NodeExecution.success(
+            role=NodeRole.BASELINE,
+            connection_id=1,
+            started_ns=1,
+            ended_ns=2,
+            columns=(ColumnMeta("a", 3, False, False, False),),
+            rows=((1, 2),),
+        )
+
+
+def test_error_info_and_column_metadata_validate_wire_contract() -> None:
+    with pytest.raises(ValueError, match="sqlstate"):
+        ErrorInfo(errno=1, sqlstate="bad", message="x")
+    with pytest.raises(ValueError, match="errno"):
+        ErrorInfo(errno=-1, sqlstate="HY000", message="x")
+    with pytest.raises(ValueError, match="name"):
+        ColumnMeta("", 3, True, False, False)
+
+
+def test_run_request_validates_but_does_not_supply_mode_defaults() -> None:
+    request = RunRequest(
+        run_id="run_1",
+        mode="correctness",
+        seed=7,
+        workers=10,
+        rounds=None,
+        queries_per_round=1000,
+    )
+    assert request.rounds is None
+
+    with pytest.raises(ValueError, match="one worker"):
+        RunRequest(
+            run_id="run_2",
+            mode="performance",
+            seed=7,
+            workers=2,
+            rounds=1,
+            queries_per_round=100,
+        )
+    with pytest.raises(ValueError, match="queries_per_round"):
+        RunRequest(
+            run_id="run_3",
+            mode="correctness",
+            seed=7,
+            workers=1,
+            rounds=1,
+            queries_per_round=0,
+        )
+
+
+def test_run_event_copies_payload_and_sequence_is_nonnegative() -> None:
+    source = {"state": "running", "details": {"roles": ["baseline"]}}
+    event = RunEvent(run_id="run_1", sequence=0, kind="state", payload=source)
+    source["state"] = "mutated"
+    source["details"]["roles"].append("custom_on")  # type: ignore[index,union-attr]
+
+    assert event.payload == {
+        "state": "running",
+        "details": {"roles": ("baseline",)},
+    }
+    with pytest.raises(ValueError, match="sequence"):
+        RunEvent(run_id="run_1", sequence=-1, kind="state", payload={})

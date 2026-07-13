@@ -1,0 +1,1 @@
+export function ReportsPage({items}: {items: {id: string; filename: string}[]}) {return <main><h1>Reports</h1>{items.length === 0 ? <p>No reports yet.</p> : <ul>{items.map((item) => <li key={item.id}><a href={`/api/v1/artifacts/${item.id}`}>{item.filename}</a></li>)}</ul>}</main>;}

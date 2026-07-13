@@ -1,0 +1,2 @@
+import type {RunView} from "../api/client";
+export function RunsPage({runs}: {runs: RunView[]}) {return <main><h1>Run history</h1>{runs.length === 0 ? <p>No runs yet.</p> : <table><thead><tr><th>ID</th><th>Mode</th><th>State</th><th>Workers</th></tr></thead><tbody>{runs.map((run) => <tr key={run.id}><td><a href={`/runs/${run.id}`}>{run.id}</a></td><td>{run.request.mode}</td><td><span className={`state ${run.state}`}>{run.state}</span></td><td>{run.request.workers}</td></tr>)}</tbody></table>}</main>;}

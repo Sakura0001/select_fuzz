@@ -306,6 +306,24 @@ def test_html_case_total_ignores_non_case_lifecycle_events(tmp_path: Path) -> No
     assert "1 total cases" in html
 
 
+def test_html_report_counts_performance_results_and_alerts(tmp_path: Path) -> None:
+    writer = JsonlWriter(tmp_path / "events.jsonl")
+    writer.append({"type": "performance_result", "case_id": "perf-pass"})
+    writer.append({"type": "performance_alert", "case_id": "perf-alert"})
+    writer.append(
+        {
+            "type": "performance_calibration_failure",
+            "case_id": "perf-calibration",
+            "failure_category": "setup_mismatch",
+        }
+    )
+
+    html = HtmlReportBuilder(ArtifactReader(tmp_path)).render()
+
+    assert "3 total cases" in html
+    assert "2 findings" in html
+
+
 def _typed_execution(role: NodeRole) -> NodeExecution:
     row = (
         2**64 - 1,

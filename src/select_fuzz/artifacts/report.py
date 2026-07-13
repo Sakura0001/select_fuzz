@@ -42,9 +42,22 @@ class HtmlReportBuilder:
     def render(self) -> str:
         events = self._reader.events()
         case_events = [
-            event for event in events if event.get("type") in {"pass", "finding"}
+            event
+            for event in events
+            if event.get("type")
+            in {
+                "pass",
+                "finding",
+                "performance_result",
+                "performance_alert",
+                "performance_calibration_failure",
+            }
         ]
-        findings = sum(event.get("type") == "finding" for event in case_events)
+        findings = sum(
+            event.get("type")
+            in {"finding", "performance_alert", "performance_calibration_failure"}
+            for event in case_events
+        )
         rows = []
         for index, event in enumerate(events, start=1):
             detail = json.dumps(

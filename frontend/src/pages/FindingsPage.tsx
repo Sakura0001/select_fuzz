@@ -1,0 +1,2 @@
+import {FindingVirtualList} from "../components/FindingVirtualList";
+export function FindingsPage({items}: {items: {id: string}[]}) {return <main><h1>Findings</h1><div className="filters"><label>Severity<select><option>All</option><option>High</option></select></label><label>Node<select><option>All</option><option>custom_on</option></select></label><label>Query text<input type="search"/></label></div><FindingVirtualList items={items}/></main>;}

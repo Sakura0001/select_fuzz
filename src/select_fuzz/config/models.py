@@ -108,9 +108,9 @@ class PerformanceConfig(StrictModel):
     max_calibration_rounds: int = Field(default=8, ge=1)
     calibration_runs_per_reference: Literal[3] = 3
     calibration_min_seconds: float = Field(default=5.0, gt=0)
-    calibration_max_seconds: float = Field(default=30.0, gt=0)
+    calibration_max_seconds: float = Field(default=12.0, gt=0)
     formal_timeout_seconds: float = Field(
-        default=60.0, gt=0, le=MAX_STATEMENT_TIMEOUT_SECONDS
+        default=15.0, gt=0, le=MAX_STATEMENT_TIMEOUT_SECONDS
     )
     regression_threshold: float = Field(default=0.20, ge=0)
     max_start_skew_ms: float = Field(default=100.0, ge=0)

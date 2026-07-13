@@ -37,7 +37,7 @@ performance:
   max_calibration_rounds: 8
   calibration_runs_per_reference: 3
   calibration_min_seconds: 5
-  calibration_max_seconds: 30
-  formal_timeout_seconds: 60
+  calibration_max_seconds: 12
+  formal_timeout_seconds: 15
   regression_threshold: 0.20
   max_start_skew_ms: 100

@@ -12,8 +12,13 @@ import time
 from typing import Any, Protocol
 
 import typer
+import uvicorn
 
 from select_fuzz.artifacts import ArtifactReader, HtmlReportBuilder
+from select_fuzz.api import create_app
+from select_fuzz.api.replays import ProductionReplayExecutor
+from select_fuzz.api.run_state import RunStore
+from select_fuzz.api.supervisor import SelectFuzzCommandBuilder, SubprocessSupervisor
 from select_fuzz.config import (
     AppConfig,
     ConfigLoadError,
@@ -30,6 +35,8 @@ from select_fuzz.replay import (
     ReplayStatus,
     build_replay_service,
 )
+from select_fuzz.regression import write_seed_corpus
+from select_fuzz.performance.entrypoint import build_performance_runner
 from select_fuzz.service import RunSummary
 
 
@@ -45,7 +52,10 @@ class ModeRunner(Protocol):
 
 
 ModeFactory = Callable[[AppConfig, Path], ModeRunner]
-MODE_RUNNERS: dict[str, ModeFactory] = {"correctness": build_correctness_runner}
+MODE_RUNNERS: dict[str, ModeFactory] = {
+    "correctness": build_correctness_runner,
+    "performance": build_performance_runner,
+}
 
 
 class DoctorRunner(Protocol):
@@ -71,20 +81,43 @@ def run_command(
     duration_seconds: float | None = typer.Option(
         None, "--duration-seconds", min=0.001
     ),
+    timeout_seconds: float | None = typer.Option(
+        None, "--timeout-seconds", min=0.001, max=300
+    ),
+    degradation_ratio: float | None = typer.Option(
+        None, "--degradation-ratio", min=0
+    ),
+    data_rows_min: int | None = typer.Option(None, "--data-rows-min", min=1),
+    data_rows_max: int | None = typer.Option(None, "--data-rows-max", min=1),
     artifacts: Path = typer.Option(Path("artifacts"), "--artifacts"),
 ) -> None:
     """Run one registered correctness or performance mode."""
 
     try:
         selected_mode = RunMode(mode)
-        loaded = load_config(
-            config,
-            cli={
-                "mode": selected_mode.value,
-                "workers": workers,
-                "queries_per_round": queries_per_round,
-            },
-        )
+        overrides: dict[str, object] = {
+            "mode": selected_mode.value,
+            "workers": workers,
+            "queries_per_round": queries_per_round,
+        }
+        if selected_mode is RunMode.CORRECTNESS:
+            overrides.update(
+                {
+                    "correctness.timeout_seconds": timeout_seconds,
+                    "correctness.min_rows_per_table": data_rows_min,
+                    "correctness.max_rows_per_table": data_rows_max,
+                }
+            )
+        else:
+            overrides.update(
+                {
+                    "performance.formal_timeout_seconds": timeout_seconds,
+                    "performance.regression_threshold": degradation_ratio,
+                    "performance.initial_table_rows": data_rows_min,
+                    "performance.max_table_rows": data_rows_max,
+                }
+            )
+        loaded = load_config(config, cli=overrides)
     except (ValueError, ConfigLoadError) as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=2) from None
@@ -126,6 +159,9 @@ def run_command(
         if timer is not None:
             timer.start()
         summary = factory(loaded, artifacts).run(request, stop_event)
+    except Exception as error:
+        typer.echo(f"run failed: {type(error).__name__}", err=True)
+        raise typer.Exit(code=1) from None
     finally:
         if timer is not None:
             timer.cancel()
@@ -210,7 +246,63 @@ def replay_command(
         raise typer.Exit(code=1)
 
 
-for _command_name in ("serve", "cleanup"):
+@app.command("regression-seeds")
+def regression_seeds_command(
+    output: Path = typer.Option(
+        Path("tests/regression/seeds.json"), "--output"
+    ),
+    seed: int = typer.Option(20260712, "--seed"),
+) -> None:
+    """Freeze versioned generator seeds and expected coverage tags."""
+
+    try:
+        written = write_seed_corpus(output, seed=seed)
+    except Exception as error:
+        typer.echo(f"regression seed write failed: {type(error).__name__}", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo(str(written))
+
+
+@app.command("serve")
+def serve_command(
+    config: Path = typer.Option(..., "--config", exists=True, dir_okay=False),
+    artifacts: Path = typer.Option(Path("artifacts"), "--artifacts"),
+    state: Path | None = typer.Option(None, "--state", dir_okay=False),
+    spa_dist: Path = typer.Option(Path("frontend/dist"), "--spa-dist"),
+    port: int = typer.Option(8765, "--port", min=1, max=65535),
+) -> None:
+    """Run the loopback FastAPI and React control plane."""
+
+    try:
+        loaded = load_config(config)
+        if not (spa_dist / "index.html").is_file():
+            raise ValueError("SPA build is unavailable; run npm --prefix frontend run build")
+        state_path = state or artifacts / "control-plane.sqlite3"
+        store = RunStore(state_path)
+        supervisor = SubprocessSupervisor(
+            store,
+            SelectFuzzCommandBuilder(config, artifacts),
+        )
+        correctness_config = loaded.model_copy(
+            update={"mode": RunMode.CORRECTNESS}
+        )
+        replay_executor = ProductionReplayExecutor(
+            build_replay_service(correctness_config, artifacts)
+        )
+        api = create_app(
+            state_path=state_path,
+            artifact_root=artifacts,
+            supervisor=supervisor,
+            replay_executor=replay_executor,
+            spa_dist=spa_dist,
+        )
+    except Exception as error:
+        typer.echo(f"serve failed: {type(error).__name__}", err=True)
+        raise typer.Exit(code=1) from None
+    uvicorn.run(api, host="127.0.0.1", port=port, log_level="warning")
+
+
+for _command_name in ("cleanup",):
     app.command(name=_command_name)(_pending_command(_command_name))
 
 
@@ -225,5 +317,7 @@ __all__ = [
     "doctor_command",
     "run_command",
     "replay_command",
+    "regression_seeds_command",
     "report_command",
+    "serve_command",
 ]

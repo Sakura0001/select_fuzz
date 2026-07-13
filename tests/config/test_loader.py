@@ -65,6 +65,8 @@ def test_mode_defaults_cli_override_and_secret_never_enters_config(
     assert config.performance.workers == 1
     assert config.performance.queries_per_round == 100
     assert config.performance.regression_threshold == 0.20
+    assert config.performance.calibration_max_seconds == 12.0
+    assert config.performance.formal_timeout_seconds == 15.0
     assert "runtime-secret" not in config.model_dump_json()
     assert "runtime-secret" not in repr(config)
 

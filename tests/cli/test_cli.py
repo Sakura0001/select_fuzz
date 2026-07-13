@@ -95,13 +95,45 @@ def test_cli_overrides_seed_workers_and_queries(monkeypatch, tmp_path: Path) -> 
     assert (request.seed, request.workers, request.queries_per_round) == (99, 3, 7)
 
 
-def test_cli_rejects_unregistered_mode_without_exposing_traceback(tmp_path: Path) -> None:
+def test_run_cli_sanitizes_runner_failures(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    class FailingRunner:
+        def run(self, request: RunRequest, stop_event: Event) -> RunSummary:
+            raise RuntimeError("must-not-leak-database-error-detail")
+
+    monkeypatch.setitem(
+        MODE_RUNNERS,
+        "correctness",
+        lambda config, root: FailingRunner(),
+    )
+
     result = CliRunner().invoke(
         app,
         [
             "run",
             "--mode",
-            "performance",
+            "correctness",
+            "--config",
+            str(PROJECT_ROOT / "config" / "example.yaml"),
+            "--rounds",
+            "1",
+            "--artifacts",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "run failed: RuntimeError" in result.output
+    assert "must-not-leak" not in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_rejects_unknown_mode_without_exposing_traceback(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--mode",
+            "not-a-mode",
             "--config",
             str(PROJECT_ROOT / "config" / "example.yaml"),
             "--rounds",
@@ -112,7 +144,7 @@ def test_cli_rejects_unregistered_mode_without_exposing_traceback(tmp_path: Path
     )
 
     assert result.exit_code == 2
-    assert "not registered" in result.output
+    assert "not-a-mode" in result.output or "Invalid" in result.output
     assert "Traceback" not in result.output
 
 
@@ -264,3 +296,56 @@ def test_replay_cli_returns_one_when_finding_no_longer_reproduces(
 
     assert result.exit_code == 1
     assert '"status":"not_reproduced"' in result.output
+
+
+def test_regression_seeds_cli_writes_versioned_corpus(tmp_path: Path) -> None:
+    output = tmp_path / "seeds.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "regression-seeds",
+            "--output",
+            str(output),
+            "--seed",
+            "20260712",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert output.exists()
+    assert '"schema_version":1' in output.read_text(encoding="utf-8")
+
+
+def test_serve_cli_builds_loopback_app_with_real_supervision(
+    monkeypatch, tmp_path: Path
+) -> None:  # type: ignore[no-untyped-def]
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+    received: dict[str, object] = {}
+
+    def fake_run(app, *, host: str, port: int, log_level: str) -> None:  # type: ignore[no-untyped-def]
+        received.update(app=app, host=host, port=port, log_level=log_level)
+
+    monkeypatch.setattr("select_fuzz.cli.uvicorn.run", fake_run)
+    result = CliRunner().invoke(
+        app,
+        [
+            "serve",
+            "--config",
+            str(PROJECT_ROOT / "config" / "example.yaml"),
+            "--artifacts",
+            str(tmp_path / "artifacts"),
+            "--state",
+            str(tmp_path / "state.sqlite3"),
+            "--spa-dist",
+            str(dist),
+            "--port",
+            "8877",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert received["host"] == "127.0.0.1"
+    assert received["port"] == 8877

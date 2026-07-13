@@ -10,7 +10,7 @@
 - 大仓库根目录：`/Users/yuyu/Documents/select_fuzz 2`
 - 当前工作树：`/Users/yuyu/Documents/select_fuzz 2/.worktrees/mysql-parallel-query-fuzzer`
 - 当前分支：`codex/mysql-parallel-query-fuzzer`
-- 当前 HEAD：`626997e feat: add active SQL coverage validation`
+- 当前 HEAD：`21c6127 test: enforce release coverage and SQL gap gates`
 - Git 远端：**未配置**。每次提交后执行 `git push` 都会得到 `No configured push destination`；不得猜测或私自创建远端。
 - 凭据规则：只从环境变量读取；不得把用户名密码/token 写入命令、代码、文档、日志或 Git 历史。
 - 本账本已随 Task 11 提交；本次记录 Task 11 提交/push 结果的增量将随 Task 12 提交。
@@ -115,6 +115,7 @@ git remote -v
 | 完成 | `af7919b` | correctness service / doctor / run/report/replay CLI | 527 full、4 skipped；actual engine、setup mismatch finding、opt-in 8.0.41 gate |
 | 完成 | `cbd2105` | performance mode / FastAPI+React control plane / regression corpus | 141 focused、3 opt-in skip；frontend coverage 98.86/88.82、Playwright 7/7 |
 | 完成 | `626997e` | resumable official-source SQL coverage validation | 179 generation/property/validation、2 opt-in skip；online cycle 2 为 9 signatures/3 evidence blocks |
+| 完成 | `21c6127` | release coverage / online-gap generator / CI / README | 1111 full、11 skipped；line 92.23%、branch 86.13%；exact 8.0.41 directed matrix 4/4 |
 
 已知所有提交后的 `git push` 均失败，唯一原因是仓库没有远端。
 
@@ -559,6 +560,7 @@ git remote -v
 72. 主线程复验第二轮 generator：generation/query property/validation `226 passed, 2 skipped`。新增 online-gap directed variant 三 socket integration；默认 `4 skipped`，实际三套 8.0.41 运行 `4 passed in 1.04s`，包含 scalar COUNT、LEFT JOIN/subquery、JOIN CAST/INNER subquery、table/scalar subquery LIMIT，证据未锁 variant 仍不执行。
 73. 主线程在合入第二轮 generator 与所有 coverage tests 后执行 fresh full release gate：`1111 passed, 11 skipped, 0 failed in 79.26s`；coverage JSON checker 实测 lines `92.23%`、branches `86.13%`，均超过 90/85；Ruff `All checks passed`；Mypy `81 source files`；`git diff --check` 通过。唯一 warning 为第三方 Starlette/httpx deprecation。
 74. 12h 运行中间状态（约 elapsed 1296.5s）：274 official sources、49 unique signatures、13 supported/6 blocked_evidence/30 gap、pending 6693。由于第二轮 generator 在进程启动后修改，计划等首个 30m checkpoint 写入后优雅停止并从同一 output/run_id 恢复，使 startup re-audit 使用新代码且不丢累计 elapsed。
+75. release-gate 切片精确暂存 29 files，staged diff-check 通过；secret scan 只命中 ledger 内已记录且已撤销的 `skip-grant-tables` 文字，无密码/token/private key。提交成功：`21c6127 test: enforce release coverage and SQL gap gates`。提交后立即 `git push`，仍只因 `No configured push destination` 失败。
 
 ## 10. 当前高风险审查清单
 

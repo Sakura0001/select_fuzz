@@ -624,6 +624,7 @@ git remote -v
 135. 终审 P2 也按 TDD 关闭：`ParenthesizedQuery` 与旧 `QueryScope` 的唯一序号证明曾因 Python `True == 1 == 1.0` 接受 bool/float，4 个 RED 证明后统一要求 exact int 且非 bool；新 boundary test `11 passed`。8.0.31 nested locator 从仅锚定 “parenthesized query ... nested” 收紧为同一 bounded span 内同时出现 `ORDER BY` 与 `LIMIT`，仍精确命中 1 次；因此 catalog digest 最终更新为 `93ce862b4ec6474c1c1dc9dceb29a9e5b33be6e7e6c002c447782c9d3af05007`。独立终审最终 PASS，复测 wrapper/WITH/derived/scalar/window/string/comment、table/scalar witness 同域、bool/float proof 与全部证据锁，未发现剩余 P0/P1/P2。
 136. 所有后续修复后的 fresh 门禁对应当前代码：focused `424 passed, 3 skipped`；三套精确 MySQL 8.0.41 完整 suite `4 passed in 1.36s`，包含 scalar branch-local witness，三路结果为 `((1,), (2,))`；fresh full coverage 明确 exit 0：`1207 passed, 11 skipped, 1 warning in 80.30s`；lines `92.12%`、branches `86.23%`；Ruff 全绿、Mypy `81 source files`、`git diff --check` 通过。条目 132 的旧 full 现只保留为中间失败/修复轨迹，不作为最终通过证据。
 137. 人工主动研究累计计时第 3 段：`2026-07-13T14:52:51+0800` 至 `2026-07-13T15:37:51+0800`，本段 `00:45:00`，累计 `02:34:21 / 12:00:00`。本段持续完成两组官网形态研究、两份官方 release evidence lock、两轮 RED→GREEN、新增结构扫描反例审查、精确 MySQL 与全量回归；不计 heartbeat 空档或后台程序。剩余 `09:25:39`，下一段优先研究 8.0.31 arbitrary nested `UNION DISTINCT/UNION ALL`、INTERSECT 优先级与括号改变结合顺序；automation `12-sql` 继续保持启用。
+138. 第 3 段 18 个相关文件已精确暂存，cached diff-check 通过；提交成功：`b347ec6 feat: generate parenthesized query top-n shapes`。随后按仓库规则立即执行 `git push`，失败原因为 `fatal: No configured push destination`；没有配置可用 remote，未擅自创建远端或写入认证信息。本条单独持久化该唯一交付阻塞，下一 heartbeat 继续人工研究而不是把当前 `02:34:21` 误报为 12 小时完成。
 
 ## 10. 当前高风险审查清单
 

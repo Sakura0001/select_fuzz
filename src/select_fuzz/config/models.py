@@ -82,6 +82,8 @@ class CorrectnessConfig(StrictModel):
     )
     row_limit: int = Field(default=10_000, ge=1)
     byte_limit: int = Field(default=32 * 1024 * 1024, ge=1)
+    min_rows_per_table: int = Field(default=10, ge=1)
+    max_rows_per_table: int = Field(default=500, ge=1)
     free_random_rate: float = Field(default=0.05, ge=0, le=1)
     negative_mutation_rate: float = Field(default=0.05, ge=0, le=1)
 
@@ -89,6 +91,10 @@ class CorrectnessConfig(StrictModel):
     def reserve_space_for_coverage_driven_queries(self) -> Self:
         if self.free_random_rate + self.negative_mutation_rate > 1:
             raise ValueError("free_random_rate and negative_mutation_rate must sum to at most 1")
+        if self.min_rows_per_table > self.max_rows_per_table:
+            raise ValueError(
+                "min_rows_per_table must not exceed max_rows_per_table"
+            )
         return self
 
 

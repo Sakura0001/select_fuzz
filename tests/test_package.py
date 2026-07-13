@@ -12,7 +12,7 @@ def test_package_and_cli_are_importable() -> None:
         assert command in result.stdout
 
 
-def test_unimplemented_command_cannot_report_success() -> None:
+def test_run_command_requires_an_explicit_config_file() -> None:
     result = CliRunner().invoke(app, ["run"])
     assert result.exit_code == 2
-    assert "not implemented" in result.stdout
+    assert "Missing option '--config'" in result.output

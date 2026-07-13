@@ -3,17 +3,17 @@
 > **接手续读入口**：任何新会话开始工作前，先完整阅读本文件，再读取本文件中指向的计划文档与 `git status`。
 > **更新规则**：每完成、失败、阻塞或新增一个工程步骤，立即更新本文件；不能只依赖对话上下文。
 > **最后更新**：2026-07-13（Asia/Shanghai）
-> **状态**：开发进行中，尚未达到产品交付/12 小时验收条件。Task 6/7/8/9 已提交；Task 11 实现、独立审查与全量验证完成，正在精确提交。
+> **状态**：开发进行中，尚未达到产品交付/12 小时验收条件。Task 12 correctness service/doctor/CLI 已完成待提交，performance/API/validation 正在审查与接入。
 
 ## 1. 工作区与 Git 状态
 
 - 大仓库根目录：`/Users/yuyu/Documents/select_fuzz 2`
 - 当前工作树：`/Users/yuyu/Documents/select_fuzz 2/.worktrees/mysql-parallel-query-fuzzer`
 - 当前分支：`codex/mysql-parallel-query-fuzzer`
-- 当前 HEAD：`089ac84 feat: coordinate identical three-node test cases`
+- 当前 HEAD：`ddf9d1e feat: persist and replay complete correctness findings`
 - Git 远端：**未配置**。每次提交后执行 `git push` 都会得到 `No configured push destination`；不得猜测或私自创建远端。
 - 凭据规则：只从环境变量读取；不得把用户名密码/token 写入命令、代码、文档、日志或 Git 历史。
-- 本账本已随 Task 9 提交；本次记录 Task 9 提交/push 结果的增量将随 Task 11 提交。
+- 本账本已随 Task 11 提交；本次记录 Task 11 提交/push 结果的增量将随 Task 12 提交。
 
 每次开始修改前必须执行：
 
@@ -111,6 +111,7 @@ git remote -v
 | 完成 | `b64eccd` | deterministic mixed-distribution data / setup bundle | 82 focused；Decimal context finding 已修；431 full、2 skipped |
 | 完成 | `813d423` | safe coverage-directed SELECT AST/generator/validator | 98 focused；437 full、2 skipped；独立复审无剩余 Critical/Important |
 | 完成 | `089ac84` | identical three-node setup/query coordinator | 464 full、3 skipped；pinned sessions/infra retry/retained DB/role integrity |
+| 完成 | `ddf9d1e` | durable artifacts / HTML / typed replay | 503 full、3 skipped；fsync/atomic/gzip/type-safe/TriadReplayAdapter |
 
 已知所有提交后的 `git push` 均失败，唯一原因是仓库没有远端。
 
@@ -277,7 +278,7 @@ git remote -v
 
 ### 5.5 Task 11 — fsynced artifacts / reader / HTML / replay
 
-状态：**实现、主线程独立等价审查与全量验证完成，准备精确提交**。
+状态：**实现、主线程独立等价审查、全量验证与提交完成**（`ddf9d1e`）。
 
 计划文件：
 
@@ -322,7 +323,53 @@ git remote -v
 未完成：
 
 - 精确 MySQL 8.0.41 三节点真实 finding replay integration。
-- staged snapshot 审计、精确提交与提交后 `git push`。
+- staged snapshot 已审计并精确提交；提交后 `git push` 因无 configured push destination 失败。
+
+### 5.6 Task 12 — correctness service / doctor / CLI
+
+状态：**TDD 实现进行中，尚未提交**。
+
+当前文件：
+
+- `src/select_fuzz/service.py`
+- `src/select_fuzz/doctor.py`
+- `src/select_fuzz/cli.py`
+- `tests/service/test_correctness.py`
+- `tests/service/test_doctor.py`
+- `tests/cli/test_cli.py`
+- `tests/test_package.py`
+
+已执行：
+
+1. 完整读取 Task 12 计划、现有 CLI/config/domain contracts。
+2. Service/CLI TDD RED：缺 `select_fuzz.service` 与 `MODE_RUNNERS` 时 2 个 collection error。
+3. 实现 thread-safe `EventPublisher`、有限/无限 round worker-slot 调度、stop-event、Run/Round summary、CLI config override/mode dispatch/signal/duration/JSON 输出；行为 `6 passed`。
+4. Doctor TDD RED：缺 `select_fuzz.doctor` 与 `DOCTOR_FACTORY` 时 2 个 collection error。
+5. 实现三节点并发 doctor、精确 8.0.41 + EXPLAIN ANALYZE capability gate、权限 gate、配置/role warning、sanitized node-unavailable fatal 与 CLI exit 0/1；doctor focused `6 passed`。
+6. 当前 service + CLI 全行为：`12 passed in 0.20s`；ruff 全绿；mypy signal/DoctorRunner 两个类型问题已逐项修复，当前 3 个模块 mypy 全绿。
+7. 第一轮 partial full：`514 passed, 3 skipped, 1 failed in 26.68s`；唯一失败是旧 bootstrap 仍断言 `run` 输出 `not implemented`。
+8. 已把 bootstrap 更新为真实命令契约：缺 `--config` 必须 exit 2 并输出 usage error；focused `14 passed in 0.19s`，ruff/mypy/diff-check 全绿。
+9. 修复后 fresh partial full：`515 passed, 3 skipped in 26.55s`。
+10. Actual round engine TDD RED：缺 `select_fuzz.correctness` 时 collection error。
+11. 实现 `GeneratedRoundSource`（official catalog→schema/data/setup/query batch）、`CorrectnessRoundEngine`（triad→oracle→pass/finding/coverage）、`JsonlEventSink`、`build_correctness_runner` 与默认 correctness registry；round engine `3 passed`，service/CLI 当前 `18 passed`。
+12. mypy 发现真实 TriadCoordinator 参数逆变问题；增加 `ProductionCoordinatorAdapter` 与 read-only Protocol boundary 后，4 个 Task 12 source 模块 mypy/ruff 全绿。
+
+未完成：
+
+- `src/select_fuzz/correctness.py` 实际 schema/data/query/triad/oracle/artifact round engine。
+- 默认注册 `correctness` mode factory；当前单元测试通过 monkeypatch registry。
+- replay/report CLI command 与 graceful active-statement cancellation 细化。
+- opt-in `tests/integration/test_correctness_mysql.py` 与本地/8.0.41 vertical slice。
+- Task 12 独立审查、full suite、提交/push。
+
+下一步：TDD 实现 actual CorrectnessRoundEngine + `build_correctness_runner` 并默认注册；再补 replay/report CLI 与 integration skip gate。
+
+并行子任务（用户已明确授权子智能体）：
+
+- `performance_core`：仅 `src/select_fuzz/performance/**`、`tests/performance/**`，实现 performance policy/parser/calibration/formal verdict/service；进行中。
+- `control_plane`：仅 `src/select_fuzz/api/**`、`frontend/**`、API/E2E tests，实现 FastAPI/React vertical slice；进行中。
+- `validation_core`：仅 `src/select_fuzz/validation/**`、`tests/validation/**`、validation scripts，实现安全 12h 循环骨架；进行中。
+- 子智能体禁止修改 Task 12 当前文件、ledger、共享依赖与 Git；主线程统一做两阶段 review、全量验证、提交/push。
 
 下一步：审计 Task 11 git diff/staged snapshot；精确提交并执行 `git push`。
 
@@ -389,8 +436,8 @@ git remote -v
 - [x] Task 8 — MySQL runner / KILL watchdog：已提交 `7b4566e`；8.0.41 release integration 待正式节点。
 - [x] Task 9 — three-node setup and query coordinator：已提交 `089ac84`；8.0.41 integration 待正式节点。
 - [x] Task 10 — typed multiset/error/timeout oracle。
-- [~] Task 11 — fsynced artifacts / JSONL reader / HTML / replay：实现/独立审查/503-test verification 完成，正在提交；8.0.41 replay integration 待正式节点。
-- [ ] Task 12 — correctness service / mode registry / doctor / CLI vertical slice。
+- [x] Task 11 — fsynced artifacts / JSONL reader / HTML / replay：已提交 `ddf9d1e`；8.0.41 replay integration 待正式节点。
+- [x] Task 12 — correctness service / mode registry / doctor / CLI vertical slice：actual engine、默认 correctness factory、doctor、run/report/replay CLI、setup mismatch artifact/replay 与 opt-in 8.0.41 gate 已完成。
 - [ ] Task 13 — core release gate / regression corpus。
 
 ### 8.2 Performance（7 tasks）
@@ -440,9 +487,27 @@ git remote -v
 5. Task 6 已提交为 `b64eccd`；push 已确认仅受无远端阻塞。
 6. Task 7 已提交为 `813d423`；`git push` 已执行并确认仅受无远端阻塞。
 7. Task 9 已提交为 `089ac84`；`git push` 已执行并确认仅受无远端阻塞。
-8. **当前下一动作**：Task 11 完成 503-test release verification；精确暂存、提交并 push；再进入 Task 12 CLI correctness vertical slice。
-9. 再实现 performance、FastAPI/React、12h validation。
-10. 获得可用三节点 MySQL 8.0.41 后执行 release matrix；8.0.45 只作 smoke。
+8. Task 11 已提交为 `ddf9d1e`；`git push` 已执行并确认仅受无远端阻塞。
+9. Task 12 已完成；**当前下一动作**：审查并接入 performance core，随后接入 FastAPI/React 与 12h validation。
+10. 完成 Task 13 core release gate/regression corpus，并验收 performance、FastAPI/React、12h validation。
+11. 获得可用三节点 MySQL 8.0.41 后执行 release matrix；8.0.45 只作 smoke。
+
+### 2026-07-13 Task 12 continued
+
+13. TDD RED：新增查询比例取整、正确性数据行数范围、setup mismatch 完整 finding 三类回归；定向 pytest 在收集阶段因 `query_mix_from_rates` 尚不存在而失败，确认新行为未被旧实现误覆盖。
+14. 当前实现顺序：先补 config/source/mix，再补 setup mismatch artifact，然后实现 replay/report CLI 与 opt-in correctness integration。
+15. TDD GREEN：`4 passed in 0.35s`。已实现 `min_rows_per_table`/`max_rows_per_table`（默认 10–500，CLI/YAML 可配）、由 round seed 确定性选择行数、精确合计 100% 的 query mix，以及 setup mismatch 的三节点结果/DDL/seed/limit/fingerprint 实时完整 finding。
+16. TDD RED：CLI report/replay 定向测试 `3 failed`；旧 placeholder 不接受参数且不存在 replay factory，符合预期。
+17. TDD GREEN：report/replay CLI 定向 `3 passed`，Ruff/Mypy 全绿；report 原子生成 HTML，replay 使用新三节点数据库并以 JSON+退出码区分 reproduced/not-reproduced/infra/preparation。
+18. 回归扩展：setup mismatch finding 现可被 replay 识别为 reproduced；相关 correctness/config/CLI/replay 集合 `40 passed in 0.45s`，Ruff/Mypy 全绿。
+19. 新增精确 MySQL 8.0.41 三节点正确性 release integration：当前 `1 skipped`，原因是正式 opt-in 环境变量/三节点仍未提供；测试会先通过 doctor 强制精确版本与权限，再执行一轮真实生成/建库/查询/oracle，数据库保留。
+20. performance 子智能体交付独立核心模块与 `32 passed` 自验；已启动只读规格+质量复审，尚未接入主 CLI/API，不能视为完成。
+21. Task 12 隔离验收：排除并发开发目录后 pytest `527 passed, 4 skipped in 27.52s`，Ruff 全绿。首次 Mypy 排除 glob 未生效，误扫尚在编辑的 `validation/source.py`，报告 3 个错误（unused-ignore 与 redirect_request typing）；该命令失败已保留，接下来用显式文件过滤复验 core，validation 由其子智能体修复后独立验收。
+22. 账本状态更新首次补丁因空格上下文不一致失败，未影响代码；已改用精确小补丁。
+23. Task 12 core Mypy 显式过滤复验：`Success: no issues found in 40 source files`；`git diff --check` 通过。精确提交时排除 performance/API/frontend/validation 并发目录。
+24. 首次精确 `git add` 失败：sandbox 禁止创建大仓库 `.git/worktrees/mysql-parallel-query-fuzzer/index.lock`；没有文件被暂存。下一步仅为同一精确路径集申请沙箱外 Git 元数据写权限。
+25. performance 只读复审完成：虽然 32 tests/ruff/mypy 通过，但存在 P0（无生产 builder/CLI 注册、错误实现三节点同时跑而非 `baseline || (custom_off → custom_on)`）及 P1（默认 60s 非 15s、产物不可完整复现、成本关联未落地、校准错误分类混淆、缺 fingerprint）。结论：不得原样合入，先 TDD 修正冻结需求。
+26. Task 12 使用沙箱外 Git 元数据权限精确暂存成功；cached diff 仅含 17 个 Task 12/账本文件，`git diff --cached --check` 通过，performance/API/frontend/validation 均保持未暂存。
 
 ## 10. 当前高风险审查清单
 

@@ -24,6 +24,8 @@ _CORRECTNESS_FLAT_KEYS = {
     "timeout_seconds",
     "row_limit",
     "byte_limit",
+    "min_rows_per_table",
+    "max_rows_per_table",
     "free_random_rate",
     "negative_mutation_rate",
 }

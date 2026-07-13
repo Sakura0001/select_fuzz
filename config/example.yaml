@@ -24,6 +24,8 @@ correctness:
   timeout_seconds: 15
   row_limit: 10000
   byte_limit: 33554432
+  min_rows_per_table: 10
+  max_rows_per_table: 500
   free_random_rate: 0.05
   negative_mutation_rate: 0.05
 

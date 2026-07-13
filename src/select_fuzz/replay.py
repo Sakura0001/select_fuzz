@@ -14,15 +14,21 @@ from select_fuzz.artifacts.reader import (
     ArtifactValidationError,
     StoredFinding,
 )
-from select_fuzz.config import NodeRole
+from select_fuzz.config import AppConfig, NodeRole
 from select_fuzz.domain import ExecutionStatus, NodeExecution
 from select_fuzz.execution.setup import validate_database_name
 from select_fuzz.execution.triad import (
+    DatabaseNameFactory,
     InfrastructureRetryPolicy,
     PrepareStatus,
     QueryLimits,
     TriadCoordinator,
     TriadExecutionResult,
+)
+from select_fuzz.execution import (
+    MySQLConnectorFactory,
+    MySQLSetupRunner,
+    NodeQueryRunner,
 )
 from select_fuzz.oracle import OracleVerdict, compare_three_nodes
 
@@ -107,7 +113,11 @@ class ReplayCase:
             typed_databases[role] = validate_database_name(database)
         if not isinstance(requires_same_session, bool):
             raise ArtifactValidationError("replay session scope is invalid")
-        if original_verdict not in {verdict.value for verdict in OracleVerdict}:
+        accepted_verdicts = {
+            *(verdict.value for verdict in OracleVerdict),
+            PrepareStatus.SETUP_MISMATCH.value,
+        }
+        if original_verdict not in accepted_verdicts:
             raise ArtifactValidationError("original oracle verdict is invalid")
         assert isinstance(mode, str) and isinstance(original_verdict, str)
         return cls(
@@ -240,10 +250,19 @@ class ReplayService:
         try:
             coordinator_result = self._coordinator.replay(replay_case, database)
         except ReplayPreparationError as error:
+            reproduced_setup_mismatch = (
+                replay_case.original_verdict
+                == PrepareStatus.SETUP_MISMATCH.value
+                and error.status is PrepareStatus.SETUP_MISMATCH
+            )
             status = (
-                ReplayStatus.INFRASTRUCTURE_ERROR
-                if error.status is PrepareStatus.INFRASTRUCTURE_PAUSE
-                else ReplayStatus.PREPARATION_FAILED
+                ReplayStatus.REPRODUCED
+                if reproduced_setup_mismatch
+                else (
+                    ReplayStatus.INFRASTRUCTURE_ERROR
+                    if error.status is PrepareStatus.INFRASTRUCTURE_PAUSE
+                    else ReplayStatus.PREPARATION_FAILED
+                )
             )
             return ReplayResult(
                 case_id=replay_case.case_id,
@@ -286,6 +305,25 @@ class ReplayService:
         )
 
 
+def build_replay_service(config: AppConfig, artifact_root: Path) -> ReplayService:
+    """Build the production three-node replay path from a correctness config."""
+
+    if config.mode.value != "correctness":
+        raise ValueError("replay requires correctness config mode")
+    factory = MySQLConnectorFactory()
+    triad = TriadCoordinator(
+        config.nodes,
+        setup_runner=MySQLSetupRunner(factory),
+        query_runner=NodeQueryRunner(factory),
+        session_factory=factory,
+    )
+    return ReplayService(
+        ArtifactReader(artifact_root),
+        TriadReplayAdapter(triad),
+        DatabaseNameFactory(),
+    )
+
+
 __all__ = [
     "ReplayCase",
     "ReplayCoordinator",
@@ -295,4 +333,5 @@ __all__ = [
     "ReplayService",
     "ReplayStatus",
     "TriadReplayAdapter",
+    "build_replay_service",
 ]

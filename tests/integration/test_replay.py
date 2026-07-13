@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
 
@@ -209,3 +210,19 @@ def test_production_triad_replay_adapter_classifies_semantic_setup_failure(
     assert result.status is ReplayStatus.PREPARATION_FAILED
     assert result.executions == ()
     assert triad.prepared.closed is True
+
+
+def test_setup_mismatch_finding_replays_as_reproduced_setup_failure(
+    tmp_path: Path,
+) -> None:
+    CaseBundleWriter(tmp_path).write_finding(
+        replace(_finding(), original_verdict=PrepareStatus.SETUP_MISMATCH.value)
+    )
+    triad = _Triad(PrepareStatus.SETUP_MISMATCH)
+
+    result = _service(
+        tmp_path, TriadReplayAdapter(triad)  # type: ignore[arg-type]
+    ).replay("case_finding_1")
+
+    assert result.status is ReplayStatus.REPRODUCED
+    assert result.replay_verdict is None

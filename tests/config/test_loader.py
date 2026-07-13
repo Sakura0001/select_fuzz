@@ -113,6 +113,19 @@ def test_statement_timeouts_share_the_ui_and_connector_safety_ceiling() -> None:
         PerformanceConfig(formal_timeout_seconds=300.001)
 
 
+def test_correctness_row_range_is_configurable_and_ordered(tmp_path: Path) -> None:
+    config = load_config(
+        _write_config(tmp_path, _config_data()),
+        cli={"min_rows_per_table": 37, "max_rows_per_table": 419},
+    )
+
+    assert config.correctness.min_rows_per_table == 37
+    assert config.correctness.max_rows_per_table == 419
+
+    with pytest.raises(ValidationError, match="min_rows_per_table"):
+        CorrectnessConfig(min_rows_per_table=500, max_rows_per_table=100)
+
+
 @pytest.mark.parametrize(
     "nodes",
     [

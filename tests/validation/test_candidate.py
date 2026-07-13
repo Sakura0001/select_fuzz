@@ -175,6 +175,98 @@ def test_signature_distinguishes_union_distinct_from_union_all() -> None:
     assert "set_union_distinct" not in all_rows.nodes
 
 
+def test_signature_distinguishes_parenthesized_branch_local_top_n() -> None:
+    signature = SignatureExtractor("8.0.41").extract(
+        "(SELECT id FROM t ORDER BY 1 LIMIT 2) UNION "
+        "(SELECT id FROM u ORDER BY 1 LIMIT 2) ORDER BY 1"
+    )
+
+    assert {
+        "branch_local_order_limit",
+        "parenthesized_query",
+        "set_union",
+        "set_union_distinct",
+    } <= set(signature.nodes)
+    assert "subquery" not in signature.nodes
+
+
+def test_signature_does_not_confuse_scalar_subquery_with_branch_local_top_n() -> None:
+    signature = SignatureExtractor("8.0.41").extract(
+        "SELECT (SELECT id FROM t ORDER BY 1 LIMIT 1) UNION SELECT 2 ORDER BY 1"
+    )
+
+    assert "subquery" in signature.nodes
+    assert "branch_local_order_limit" not in signature.nodes
+    assert "parenthesized_query" not in signature.nodes
+
+
+def test_signature_finds_branch_local_top_n_on_right_of_union() -> None:
+    signature = SignatureExtractor("8.0.41").extract(
+        "SELECT id FROM t UNION "
+        "(SELECT id FROM u ORDER BY 1 LIMIT 2) ORDER BY 1"
+    )
+
+    assert {"branch_local_order_limit", "parenthesized_query"} <= set(signature.nodes)
+    assert "subquery" not in signature.nodes
+
+
+def test_signature_distinguishes_nested_parenthesized_top_n() -> None:
+    signature = SignatureExtractor("8.0.41").extract(
+        "((SELECT id FROM t ORDER BY 1 LIMIT 5) ORDER BY 1 LIMIT 3) "
+        "ORDER BY 1 LIMIT 2"
+    )
+
+    assert {"nested_parenthesized_order_limit", "parenthesized_query"} <= set(
+        signature.nodes
+    )
+    assert "subquery" not in signature.nodes
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "(SELECT (SELECT id FROM v ORDER BY 1 LIMIT 1) ORDER BY 1 LIMIT 1) "
+        "UNION SELECT 2 ORDER BY 1",
+        "((SELECT (SELECT id FROM v ORDER BY 1 LIMIT 1) ORDER BY 1 LIMIT 1) "
+        "ORDER BY 1 LIMIT 1) ORDER BY 1 LIMIT 1",
+    ],
+)
+def test_signature_preserves_scalar_subquery_inside_parenthesized_top_n(sql: str) -> None:
+    signature = SignatureExtractor("8.0.41").extract(sql)
+
+    assert "subquery" in signature.nodes
+    assert {
+        "branch_local_order_limit",
+        "nested_parenthesized_order_limit",
+    }.intersection(signature.nodes)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "((SELECT 1 AS id ORDER BY 1 LIMIT 1) UNION SELECT 2 AS id) ORDER BY 1",
+        "(SELECT 1 AS id UNION (SELECT 2 AS id ORDER BY 1 LIMIT 1)) ORDER BY 1",
+        "(WITH cte AS (SELECT 1 AS id) "
+        "SELECT id FROM cte ORDER BY 1 LIMIT 1) UNION SELECT 2 ORDER BY 1",
+    ],
+)
+def test_signature_finds_branch_local_top_n_inside_wrappers_and_with(sql: str) -> None:
+    signature = SignatureExtractor("8.0.41").extract(sql)
+
+    assert {"branch_local_order_limit", "parenthesized_query"} <= set(signature.nodes)
+
+
+def test_signature_finds_nested_parenthesized_top_n_inside_derived_subquery() -> None:
+    signature = SignatureExtractor("8.0.41").extract(
+        "SELECT id FROM (((SELECT 1 AS id ORDER BY 1 LIMIT 5) "
+        "ORDER BY 1 LIMIT 3)) AS d ORDER BY 1"
+    )
+
+    assert {"nested_parenthesized_order_limit", "parenthesized_query", "subquery"} <= set(
+        signature.nodes
+    )
+
+
 @pytest.mark.parametrize(
     "operator",
     [

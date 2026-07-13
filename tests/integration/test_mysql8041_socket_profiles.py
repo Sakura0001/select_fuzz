@@ -243,6 +243,9 @@ def test_online_gap_directed_variants_execute_on_three_exact_8041_sockets() -> N
         ("subquery_result_kinds", "scalar_limit"),
         ("subquery_result_kinds", "table_limit"),
         ("grouping_with_rollup", "scalar_rollup"),
+        ("set_branch_local_top_n", "branch_local_top_n"),
+        ("set_branch_local_top_n", "scalar_branch_local_top_n"),
+        ("select_nested_parenthesized_top_n", "nested_parenthesized_top_n"),
         ("table_explicit", "table_only"),
         ("table_values_union", "table_values_union"),
         ("table_values_union", "table_values_union_distinct"),
@@ -296,6 +299,7 @@ def test_online_gap_directed_variants_execute_on_three_exact_8041_sockets() -> N
             assert outcomes[0] == outcomes[1] == outcomes[2], directed_variant
             executed.add(directed_variant)
         assert "scalar_aggregate" in executed
+        assert "branch_local_top_n" in executed
         assert "left_subquery" in executed
         assert "inner_subquery" in executed
         assert "table_only" in executed

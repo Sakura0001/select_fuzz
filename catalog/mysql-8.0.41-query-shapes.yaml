@@ -217,8 +217,8 @@ sources:
     version: "8.0.22"
     url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-22.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
+    lock_state: verified
+    content_sha256: 6f6b9b5ff9c8e58f63bca13625a51addfc345160d7c7d667ca7515362d2e6b85
     checked_at: "2026-07-12"
     locators:
       derived_condition_pushdown:
@@ -230,12 +230,14 @@ sources:
     version: "8.0.31"
     url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-31.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
+    lock_state: verified
+    content_sha256: 35b88b00431217e20b23bdd635ca48f807cb22083163159dc5f1298f55b081f8
     checked_at: "2026-07-12"
     locators:
       except_operator: {match_kind: literal, pattern: "EXCEPT"}
       intersect_operator: {match_kind: literal, pattern: "INTERSECT"}
+      nested_parenthesized_query_expressions:
+        {match_kind: regex, pattern: "(?is)parenthesized.{0,120}query.{0,120}nested.{0,500}ORDER BY.{0,120}LIMIT"}
   - source_id: release_8041
     kind: release_note
     version: "8.0.41"
@@ -418,6 +420,16 @@ features:
         evidence:
           - {source_id: grammar_8041, locator: query_expression_parens}
           - {source_id: release_8022, locator: parenthesized_query_expressions}
+      - variant_id: select_nested_parenthesized_top_n
+        min_version: "8.0.31"
+        ast_nodes: [query_expression, parenthesized_query_expression]
+        guards: [read_only_select, bounded_cardinality, shallow_complexity, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 1
+        evidence:
+          - {source_id: grammar_8041, locator: query_expression_parens}
+          - {source_id: grammar_8041, locator: query_expression}
+          - {source_id: release_8031, locator: nested_parenthesized_query_expressions}
 
   - feature_id: join_family
     category: join
@@ -562,6 +574,16 @@ features:
         weight: 4
         evidence:
           - {source_id: grammar_8041, locator: union_option}
+      - variant_id: set_branch_local_top_n
+        min_version: "8.0.22"
+        ast_nodes: [set_operation, parenthesized_query_expression, query_specification]
+        guards: [arity_equal, compatible_types, bounded_cardinality, shallow_complexity, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: query_expression_parens}
+          - {source_id: grammar_8041, locator: query_expression_body}
+          - {source_id: release_8022, locator: parenthesized_query_expressions}
       - variant_id: set_intersect
         min_version: "8.0.31"
         ast_nodes: [set_operation, query_specification]

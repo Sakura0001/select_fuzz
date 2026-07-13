@@ -21,6 +21,7 @@ from select_fuzz.generation.query_ast import (
     Literal,
     MatchAgainst,
     OrderBy,
+    ParenthesizedQuery,
     Projection,
     QueryAst,
     QueryScope,
@@ -39,6 +40,7 @@ from select_fuzz.generation.query_ast import (
     WindowSpec,
     require_identifier,
 )
+from select_fuzz.generation.query_render import render_query_ast
 
 
 NUMBER = Literal(1, SqlType.NUMERIC)
@@ -162,12 +164,8 @@ def test_order_proofs_cover_cardinality_uniqueness_and_out_of_scope_paths() -> N
 
     assert not OrderBy((2,)).proves_total_order(QueryScope(1))
     assert OrderBy((1,)).proves_total_order(QueryScope(1, max_rows=1))
-    assert OrderBy((1, 2)).proves_total_order(
-        QueryScope(2, frozenset({frozenset({1, 2})}))
-    )
-    assert not OrderBy((1,)).proves_total_order(
-        QueryScope(2, frozenset({frozenset({1, 2})}))
-    )
+    assert OrderBy((1, 2)).proves_total_order(QueryScope(2, frozenset({frozenset({1, 2})})))
+    assert not OrderBy((1,)).proves_total_order(QueryScope(2, frozenset({frozenset({1, 2})})))
 
 
 def test_derived_relation_accepts_an_exact_explicit_column_list() -> None:
@@ -217,17 +215,74 @@ def test_query_ast_caps_limit_and_offset_at_mysql_unsigned_bigint() -> None:
     scope = QueryScope(1, max_rows=1)
 
     assert QueryAst(SELECT, OrderBy((1,)), scope, limit=maximum).limit == maximum
-    assert QueryAst(
-        SELECT,
-        OrderBy((1,)),
-        scope,
-        limit=1,
-        offset=maximum,
-    ).offset == maximum
+    assert (
+        QueryAst(
+            SELECT,
+            OrderBy((1,)),
+            scope,
+            limit=1,
+            offset=maximum,
+        ).offset
+        == maximum
+    )
     with pytest.raises(ValueError, match="unsigned BIGINT"):
         QueryAst(SELECT, OrderBy((1,)), scope, limit=maximum + 1)
     with pytest.raises(ValueError, match="unsigned BIGINT"):
         QueryAst(SELECT, OrderBy((1,)), scope, limit=1, offset=maximum + 1)
+
+
+def test_parenthesized_query_owns_a_bounded_local_order_and_limit() -> None:
+    branch = ParenthesizedQuery(
+        SELECT,
+        order_by=(1,),
+        limit=1,
+        offset=0,
+        max_rows=1,
+    )
+    query = QueryAst(
+        SetQuery((branch, SELECT), SetOperator.UNION),
+        OrderBy((1,)),
+        QueryScope(1, frozenset({frozenset({1})}), 2),
+    )
+
+    assert render_query_ast(query) == (
+        "(SELECT 1 ORDER BY 1 LIMIT 1 OFFSET 0) UNION SELECT 1 ORDER BY 1"
+    )
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: ParenthesizedQuery(SELECT, order_by=(1,)),
+        lambda: ParenthesizedQuery(SELECT, limit=1),
+        lambda: ParenthesizedQuery(SELECT, order_by=(2,), limit=1),
+        lambda: ParenthesizedQuery(SELECT, order_by=(1,), offset=1),
+        lambda: ParenthesizedQuery(SELECT, order_by=(1,), limit=True),
+        lambda: ParenthesizedQuery(SELECT, order_by=(1,), limit=2**64),
+        lambda: ParenthesizedQuery(SELECT, order_by=(1,), limit=1),
+        lambda: ParenthesizedQuery(
+            SELECT,
+            order_by=(1,),
+            limit=1,
+            unique_projection_sets=frozenset({frozenset({True})}),
+            max_rows=2,
+        ),
+        lambda: ParenthesizedQuery(
+            SELECT,
+            order_by=(1,),
+            limit=1,
+            unique_projection_sets=frozenset({frozenset({1.0})}),
+            max_rows=2,
+        ),
+        lambda: QueryScope(1, frozenset({frozenset({True})}), 2),
+        lambda: QueryScope(1, frozenset({frozenset({1.0})}), 2),
+    ],
+)
+def test_parenthesized_query_rejects_unsafe_local_top_n_contracts(
+    factory: Callable[[], object],
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        factory()
 
 
 def test_query_ast_rejects_out_of_scope_and_nondeterministic_window_orders() -> None:

@@ -96,9 +96,7 @@ def render_expression(expression: Expression) -> str:
         if expression.base is not None:
             pieces.append(render_expression(expression.base))
         for condition, result in expression.branches:
-            pieces.extend(
-                ("WHEN", render_expression(condition), "THEN", render_expression(result))
-            )
+            pieces.extend(("WHEN", render_expression(condition), "THEN", render_expression(result)))
         pieces.extend(("ELSE", render_expression(expression.otherwise), "END"))
         return " ".join(pieces)
     if isinstance(expression, SubqueryExpression):
@@ -149,18 +147,14 @@ def _render_window_spec(window: WindowSpec) -> str:
     pieces: list[str] = []
     if window.partition_by:
         pieces.append(
-            "PARTITION BY "
-            + ", ".join(render_expression(item) for item in window.partition_by)
+            "PARTITION BY " + ", ".join(render_expression(item) for item in window.partition_by)
         )
     pieces.append(
         "ORDER BY " + ", ".join(render_expression(item) for item in window.order.expressions)
     )
     if window.frame is not None:
         preceding, following = window.frame
-        pieces.append(
-            "ROWS BETWEEN "
-            f"{preceding} PRECEDING AND {following} FOLLOWING"
-        )
+        pieces.append(f"ROWS BETWEEN {preceding} PRECEDING AND {following} FOLLOWING")
     return "(" + " ".join(pieces) + ")"
 
 
@@ -168,12 +162,13 @@ def render_relation(relation: Relation) -> str:
     if isinstance(relation, TableRelation):
         partitions = ""
         if relation.partitions:
-            partitions = " PARTITION (" + ", ".join(
-                quote_identifier(item) for item in relation.partitions
-            ) + ")"
+            partitions = (
+                " PARTITION ("
+                + ", ".join(quote_identifier(item) for item in relation.partitions)
+                + ")"
+            )
         return (
-            f"{quote_identifier(relation.table)}{partitions} "
-            f"AS {quote_identifier(relation.alias)}"
+            f"{quote_identifier(relation.table)}{partitions} AS {quote_identifier(relation.alias)}"
         )
     if isinstance(relation, NamedRelation):
         return f"{quote_identifier(relation.name)} AS {quote_identifier(relation.alias)}"
@@ -181,9 +176,9 @@ def render_relation(relation: Relation) -> str:
         lateral = "LATERAL " if relation.lateral else ""
         columns = ""
         if relation.columns:
-            columns = " (" + ", ".join(
-                quote_identifier(column) for column in relation.columns
-            ) + ")"
+            columns = (
+                " (" + ", ".join(quote_identifier(column) for column in relation.columns) + ")"
+            )
         return (
             f"{lateral}({render_query_body(relation.query)}) "
             f"AS {quote_identifier(relation.alias)}{columns}"
@@ -213,17 +208,19 @@ def render_query_body(query: QueryBody) -> str:
         if query.optimizer_hint is not None:
             hint = f" /*+ {query.optimizer_hint} */"
         distinct = " DISTINCT" if query.distinct else ""
-        rendered = "SELECT" + hint + distinct + " " + ", ".join(
-            _render_projection(item) for item in query.projection
+        rendered = (
+            "SELECT"
+            + hint
+            + distinct
+            + " "
+            + ", ".join(_render_projection(item) for item in query.projection)
         )
         if query.source is not None:
             rendered += " FROM " + render_relation(query.source)
         if query.predicate is not None:
             rendered += " WHERE " + render_expression(query.predicate)
         if query.grouping:
-            rendered += " GROUP BY " + ", ".join(
-                render_expression(item) for item in query.grouping
-            )
+            rendered += " GROUP BY " + ", ".join(render_expression(item) for item in query.grouping)
             if query.with_rollup:
                 rendered += " WITH ROLLUP"
         if query.having is not None:
@@ -241,11 +238,21 @@ def render_query_body(query: QueryBody) -> str:
         return f" {operator} ".join(_render_set_branch(branch) for branch in query.branches)
     if isinstance(query, ValuesQuery):
         return "VALUES " + ", ".join(
-            "ROW(" + ", ".join(render_expression(item) for item in row) + ")"
-            for row in query.rows
+            "ROW(" + ", ".join(render_expression(item) for item in row) + ")" for row in query.rows
         )
     if isinstance(query, ParenthesizedQuery):
-        return f"({render_query_body(query.body)})"
+        rendered = render_query_body(query.body)
+        if query.order_by:
+            ordinals = []
+            for ordinal in query.order_by:
+                suffix = " DESC" if ordinal in query.descending else ""
+                ordinals.append(f"{ordinal}{suffix}")
+            rendered += " ORDER BY " + ", ".join(ordinals)
+        if query.limit is not None:
+            rendered += f" LIMIT {query.limit}"
+            if query.offset is not None:
+                rendered += f" OFFSET {query.offset}"
+        return f"({rendered})"
     raise TypeError(f"unsupported query body: {type(query).__name__}")
 
 

@@ -443,6 +443,8 @@ class QueryGenerator:
             return self._simple(manifest, rows, top_n=require_top_n, free_random=free_random)
         if feature_id == "select_parenthesized":
             return self._parenthesized(manifest, rows)
+        if feature_id == "select_nested_parenthesized_top_n":
+            return self._nested_parenthesized_top_n(manifest, rows)
         if feature_id == "join_inner_cross_straight":
             return self._join(manifest, rows, rng, outer=False, directed=directed_variant)
         if feature_id == "join_outer_natural":
@@ -490,6 +492,10 @@ class QueryGenerator:
                 "set_except": SetOperator.EXCEPT,
             }[feature_id]
             return self._set_operation(manifest, rows, operation, chain=False)
+        if feature_id == "set_branch_local_top_n":
+            if directed_variant == "scalar_branch_local_top_n":
+                return self._scalar_branch_local_top_n()
+            return self._set_branch_local_top_n(manifest, rows)
         if feature_id == "set_table_values":
             if directed_variant == "values_only":
                 return self._values_only(limit=False)
@@ -1009,6 +1015,54 @@ class QueryGenerator:
             base.ast.scope,
         )
         return _BuiltQuery(ast, base.complexity, frozenset({"parenthesized"}))
+
+    def _nested_parenthesized_top_n(
+        self,
+        manifest: SchemaManifest,
+        rows: Mapping[str, int],
+    ) -> _BuiltQuery:
+        table = manifest.tables[0]
+        unique = frozenset({frozenset({1})})
+        select = SelectQuery(
+            (Projection(self._id(table, "t"), "id"),),
+            TableRelation(table.name, "t"),
+        )
+        inner = ParenthesizedQuery(
+            select,
+            order_by=(1,),
+            limit=5,
+            unique_projection_sets=unique,
+            max_rows=rows[table.name],
+        )
+        middle = ParenthesizedQuery(
+            inner,
+            order_by=(1,),
+            limit=3,
+            unique_projection_sets=unique,
+            max_rows=min(rows[table.name], 5),
+        )
+        ast = self._ast(
+            middle,
+            projection_count=1,
+            max_rows=min(rows[table.name], 3),
+            unique_sets=unique,
+            limit=2,
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=1,
+                depth=3,
+                ctes=0,
+                branches=1,
+                projection=1,
+                predicates=0,
+                scanned=rows[table.name],
+                intermediate=min(rows[table.name], 5),
+                output=min(rows[table.name], 2),
+            ),
+            frozenset({"nested_parenthesized_order_limit", "parenthesized_query"}),
+        )
 
     def _join(
         self,
@@ -1533,6 +1587,84 @@ class QueryGenerator:
             output=all_rows,
         )
         return _BuiltQuery(ast, complexity, frozenset({f"set_{operator.value.lower()}"}))
+
+    def _set_branch_local_top_n(
+        self,
+        manifest: SchemaManifest,
+        rows: Mapping[str, int],
+    ) -> _BuiltQuery:
+        tables = list(manifest.tables[:2])
+        while len(tables) < 2:
+            tables.append(manifest.tables[0])
+        branches = tuple(
+            ParenthesizedQuery(
+                SelectQuery(
+                    (Projection(self._id(table, f"s{index}"), "id"),),
+                    TableRelation(table.name, f"s{index}"),
+                ),
+                order_by=(1,),
+                limit=2,
+                unique_projection_sets=frozenset({frozenset({1})}),
+                max_rows=rows[table.name],
+            )
+            for index, table in enumerate(tables)
+        )
+        local_rows = sum(min(rows[table.name], 2) for table in tables)
+        ast = self._ast(
+            SetQuery(branches, SetOperator.UNION),
+            projection_count=1,
+            max_rows=local_rows,
+            unique_sets=frozenset({frozenset({1})}),
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=2,
+                depth=2,
+                ctes=0,
+                branches=2,
+                projection=1,
+                predicates=0,
+                scanned=sum(rows[table.name] for table in tables),
+                intermediate=local_rows,
+                output=local_rows,
+            ),
+            frozenset({"branch_local_order_limit", "parenthesized_query"}),
+        )
+
+    def _scalar_branch_local_top_n(self) -> _BuiltQuery:
+        branches = tuple(
+            ParenthesizedQuery(
+                SelectQuery(
+                    (Projection(Literal(value, SqlType.NUMERIC), "id"),),
+                ),
+                order_by=(1,),
+                limit=1,
+                max_rows=1,
+            )
+            for value in (1, 2)
+        )
+        ast = self._ast(
+            SetQuery(branches, SetOperator.UNION),
+            projection_count=1,
+            max_rows=2,
+            unique_sets=frozenset({frozenset({1})}),
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=0,
+                depth=2,
+                ctes=0,
+                branches=2,
+                projection=1,
+                predicates=0,
+                scanned=0,
+                intermediate=2,
+                output=2,
+            ),
+            frozenset({"branch_local_order_limit", "parenthesized_query"}),
+        )
 
     def _set_values(self, manifest: SchemaManifest, rows: Mapping[str, int]) -> _BuiltQuery:
         table = manifest.tables[0]

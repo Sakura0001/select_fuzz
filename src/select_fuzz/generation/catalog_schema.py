@@ -336,8 +336,10 @@ REVIEWED_VARIANT_IDS = frozenset(
         "scene_spatial",
         "scene_temporary",
         "select_parenthesized",
+        "select_nested_parenthesized_top_n",
         "select_query_specification",
         "set_except",
+        "set_branch_local_top_n",
         "set_intersect",
         "set_table_values",
         "set_union",
@@ -353,7 +355,7 @@ REVIEWED_VARIANT_IDS = frozenset(
         "window_inline_named",
     }
 )
-REVIEWED_CATALOG_SHA256 = "09eef310d18f83e9da45a504fcd35533427486cbc04b6d32b030ce06bee56748"
+REVIEWED_CATALOG_SHA256 = "93ce862b4ec6474c1c1dc9dceb29a9e5b33be6e7e6c002c447782c9d3af05007"
 
 SQL_KEYWORDS = frozenset(
     {

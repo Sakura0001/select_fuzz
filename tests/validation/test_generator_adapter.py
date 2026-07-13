@@ -140,7 +140,7 @@ def test_actionable_discovered_shapes_have_real_dynamic_witnesses(
         ),
         (
             "SELECT 1 INTERSECT SELECT 1 EXCEPT SELECT 2",
-            Reachability.BLOCKED_EVIDENCE,
+            Reachability.SUPPORTED,
         ),
         ("SELECT * FROM (SELECT id FROM t) AS d", Reachability.SUPPORTED),
         (
@@ -244,19 +244,21 @@ def test_table_in_subquery_is_not_claimed_by_an_exists_witness() -> None:
 
 
 @pytest.mark.parametrize(
-    "sql",
+    ("sql", "expected_shape_node"),
     [
-        "(TABLE one_col) ORDER BY 1",
-        "SELECT (TABLE one_col) AS x ORDER BY 1",
+        ("(TABLE one_col) ORDER BY 1", "parenthesized_query"),
+        ("SELECT (TABLE one_col) AS x ORDER BY 1", "subquery"),
     ],
 )
-def test_generic_table_subquery_is_not_claimed_by_an_exists_witness(sql: str) -> None:
+def test_generic_table_subquery_is_not_claimed_by_an_exists_witness(
+    sql: str, expected_shape_node: str
+) -> None:
     adapter = ProductionGeneratorAdapter()
     signature = SignatureExtractor("8.0.41").extract(sql)
     capability = adapter.find_capability(signature)
     result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
 
-    assert "subquery" in signature.nodes
+    assert expected_shape_node in signature.nodes
     assert "subquery_exists" not in signature.nodes
     assert result.status is Reachability.GAP
 
@@ -274,6 +276,83 @@ def test_table_values_union_distinct_uses_a_distinct_witness() -> None:
     assert "set_union_distinct" in witness.signature.nodes
     assert "set_union_all" not in witness.signature.nodes
     assert result.status is Reachability.SUPPORTED
+
+
+def test_branch_local_top_n_routes_to_an_isomorphic_directed_witness() -> None:
+    adapter = ProductionGeneratorAdapter()
+    signature = SignatureExtractor("8.0.41").extract(
+        "(SELECT id FROM t ORDER BY 1 LIMIT 2) UNION "
+        "(SELECT id FROM u ORDER BY 1 LIMIT 2) ORDER BY 1"
+    )
+    capability = adapter.find_capability(signature)
+    result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
+
+    assert capability.feature_id == "validation_set_branch_local_top_n"
+    assert result.status is Reachability.SUPPORTED, result.reasons
+
+
+def test_right_branch_local_top_n_routes_to_the_directed_witness() -> None:
+    adapter = ProductionGeneratorAdapter()
+    signature = SignatureExtractor("8.0.41").extract(
+        "SELECT id FROM t UNION "
+        "(SELECT id FROM u ORDER BY 1 LIMIT 2) ORDER BY 1"
+    )
+    capability = adapter.find_capability(signature)
+    result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
+
+    assert capability.feature_id == "validation_set_branch_local_top_n"
+    assert result.status is Reachability.SUPPORTED, result.reasons
+
+
+def test_nested_parenthesized_top_n_routes_to_an_isomorphic_witness() -> None:
+    adapter = ProductionGeneratorAdapter()
+    signature = SignatureExtractor("8.0.41").extract(
+        "((SELECT id FROM t ORDER BY 1 LIMIT 5) ORDER BY 1 LIMIT 3) "
+        "ORDER BY 1 LIMIT 2"
+    )
+    capability = adapter.find_capability(signature)
+    result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
+
+    assert capability.feature_id == "validation_nested_parenthesized_top_n"
+    assert result.status is Reachability.SUPPORTED, result.reasons
+
+
+def test_parenthesized_top_n_with_scalar_subquery_remains_a_composite_gap() -> None:
+    adapter = ProductionGeneratorAdapter()
+    signature = SignatureExtractor("8.0.41").extract(
+        "(SELECT (SELECT id FROM v ORDER BY 1 LIMIT 1) ORDER BY 1 LIMIT 1) "
+        "UNION SELECT 2 ORDER BY 1"
+    )
+    capability = adapter.find_capability(signature)
+    result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
+
+    assert "subquery" in signature.nodes
+    assert result.status is Reachability.GAP
+
+
+def test_wrapped_set_branch_local_top_n_routes_to_the_directed_witness() -> None:
+    adapter = ProductionGeneratorAdapter()
+    signature = SignatureExtractor("8.0.41").extract(
+        "((SELECT 1 AS id ORDER BY 1 LIMIT 1) UNION SELECT 2 AS id) ORDER BY 1"
+    )
+    capability = adapter.find_capability(signature)
+    result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
+
+    assert capability.feature_id == "validation_scalar_set_branch_local_top_n"
+    assert result.status is Reachability.SUPPORTED, result.reasons
+
+
+def test_nested_parenthesized_top_n_in_derived_subquery_remains_a_composite_gap() -> None:
+    adapter = ProductionGeneratorAdapter()
+    signature = SignatureExtractor("8.0.41").extract(
+        "SELECT id FROM (((SELECT 1 AS id ORDER BY 1 LIMIT 5) "
+        "ORDER BY 1 LIMIT 3)) AS d ORDER BY 1"
+    )
+    capability = adapter.find_capability(signature)
+    result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
+
+    assert {"nested_parenthesized_order_limit", "subquery"} <= set(signature.nodes)
+    assert result.status is Reachability.GAP
 
 
 @pytest.mark.parametrize(

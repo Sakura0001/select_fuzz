@@ -35,7 +35,7 @@ uses a duplicate-key-rejecting `yaml.SafeLoader` and exact key allowlists at the
 catalog, source, feature, variant, and evidence levels. Unknown keys and unknown
 categories fail validation instead of being ignored.
 
-The checked-in snapshot contains 23 source records, 19 feature records, and 62
+The checked-in snapshot contains 23 source records, 19 feature records, and 64
 variant records. Every feature and variant has the same executable metadata shape:
 
 - A stable `snake_case` ID and a strict category (feature only).
@@ -62,15 +62,15 @@ The independent `REVIEWED_CATALOG_SHA256` lock catches otherwise schema-valid ed
 weights, hashes, locator patterns, evidence, versions, or ordering semantics. A review
 that intentionally changes any catalog value must update this code-owned digest.
 
-Loading is not generator support. `FeatureCatalog` round-trips all 62 reviewed variant
+Loading is not generator support. `FeatureCatalog` round-trips all 64 reviewed variant
 rows, while `capability_status` is derived from the internal generator registry.
 Only explicitly registered variants are returned as scheduling targets; every other
-loaded row is exposed as a `catalogued_gap`. The initial registry is intentionally
-empty until renderers and their tests land, so this catalog cannot claim 62/62
-generator reachability. Registration is necessary but not sufficient: the variant's
-own evidence and its parent feature evidence must all reference `verified` source
-locks. `refresh_required` evidence is reported as an evidence-lock gap and is never
-scheduled.
+loaded row is exposed as a `catalogued_gap`. The current registry contains all 64
+reviewed variants with typed renderers and tests, but registration is not sufficient
+for production scheduling: the variant's own evidence and its parent feature evidence
+must all reference `verified` source locks. At this snapshot 31 variants are
+evidence-ready; `refresh_required` evidence is reported as an evidence-lock gap and is
+never scheduled.
 
 ## Initial coverage
 
@@ -150,10 +150,12 @@ script/style/noscript/SVG content, decodes character references, applies NFC, co
 whitespace, and hashes UTF-8 visible text. Locator matching runs against the same
 normalized body, so page chrome cannot satisfy evidence.
 
-As of this snapshot, the two exact-tag sources plus the 8.0.19 and 8.0.41 release
-notes are `verified`. The 8.0.41 normalized body has SHA-256
+As of this snapshot, the two exact-tag sources plus the 8.0.19, 8.0.22, 8.0.31,
+and 8.0.41 release notes are `verified`. The 8.0.31 normalized body has SHA-256
+`35b88b00431217e20b23bdd635ca48f807cb22083163159dc5f1298f55b081f8`; the
+8.0.41 normalized body has SHA-256
 `a48124031d81275a43585468e5e26f8c2842729284f05671374b8dd3925d59f4`.
-The other 19 documentation records are explicitly `refresh_required` with null hashes
+The other 17 documentation records are explicitly `refresh_required` with null hashes
 because network permission was unavailable after the stable scope was introduced.
 This is an intentional fail-closed state: the verifier refuses to report success until
 those pages are fetched, inspected, and locked under `docs_body_text_v1`.
@@ -265,7 +267,7 @@ and exact-version release-note claims. Negative mutations prove rejection of:
 - unknown categories or schema keys; and
 - variants with missing evidence.
 
-The round-trip table test compares all 62 loaded production records across ID, family,
+The round-trip table test compares all 64 loaded production records across ID, family,
 minimum version, profiles, guards, and evidence. Separate capability tests prove that
 loaded rows remain gaps until their IDs are present in the generator registry. Source
 lock fixture tests cover exact-byte hashing, literal and regex matches and misses,

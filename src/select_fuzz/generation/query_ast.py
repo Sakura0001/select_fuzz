@@ -543,6 +543,64 @@ class ValuesQuery(QueryBody):
 @dataclass(frozen=True, slots=True)
 class ParenthesizedQuery(QueryBody):
     body: QueryBody
+    order_by: tuple[int, ...] = ()
+    descending: frozenset[int] = frozenset()
+    limit: int | None = None
+    offset: int | None = None
+    unique_projection_sets: frozenset[frozenset[int]] = frozenset()
+    max_rows: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "order_by", tuple(self.order_by))
+        if self.order_by and self.limit is None:
+            raise ValueError("local ORDER BY requires LIMIT")
+        if len(set(self.order_by)) != len(self.order_by) or any(
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0
+            for value in self.order_by
+        ):
+            raise ValueError("local ORDER BY ordinals must be positive and unique")
+        if any(not isinstance(value, int) or isinstance(value, bool) for value in self.descending):
+            raise TypeError("local descending ordinals must be integers")
+        if not self.descending <= set(self.order_by):
+            raise ValueError("local descending ordinal is not ordered")
+        arity = _known_query_arity(self.body)
+        if self.order_by and (arity is None or any(value > arity for value in self.order_by)):
+            raise ValueError("local ORDER BY ordinal exceeds known projection")
+        legal = set() if arity is None else set(range(1, arity + 1))
+        if any(
+            not unique
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in unique)
+            or not set(unique) <= legal
+            for unique in self.unique_projection_sets
+        ):
+            raise ValueError("local unique projection set contains an invalid ordinal")
+        if self.max_rows is not None and (
+            not isinstance(self.max_rows, int)
+            or isinstance(self.max_rows, bool)
+            or self.max_rows < 0
+        ):
+            raise ValueError("local max_rows must be a nonnegative integer")
+        if self.limit is not None and (
+            not isinstance(self.limit, int) or isinstance(self.limit, bool) or self.limit < 0
+        ):
+            raise ValueError("local LIMIT must be a nonnegative integer")
+        if self.limit is not None and self.limit > _UNSIGNED_BIGINT_MAX:
+            raise ValueError("local LIMIT must fit an unsigned BIGINT")
+        if self.limit is not None and self.limit > 0:
+            ordered = frozenset(self.order_by)
+            proven = self.max_rows is not None and self.max_rows <= 1
+            proven = proven or any(unique <= ordered for unique in self.unique_projection_sets)
+            if not proven:
+                raise ValueError("local LIMIT requires a proven total order")
+        if self.offset is not None:
+            if not isinstance(self.offset, int) or isinstance(self.offset, bool):
+                raise TypeError("local OFFSET must be an integer")
+            if self.offset < 0:
+                raise ValueError("local OFFSET must be nonnegative")
+            if self.offset > _UNSIGNED_BIGINT_MAX:
+                raise ValueError("local OFFSET must fit an unsigned BIGINT")
+            if self.limit is None:
+                raise ValueError("local OFFSET requires LIMIT")
 
 
 def _known_query_arity(query: QueryBody) -> int | None:
@@ -588,7 +646,12 @@ class QueryScope:
         ):
             raise ValueError("projection_count must be positive")
         legal = set(range(1, self.projection_count + 1))
-        if any(not unique or not set(unique) <= legal for unique in self.unique_projection_sets):
+        if any(
+            not unique
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in unique)
+            or not set(unique) <= legal
+            for unique in self.unique_projection_sets
+        ):
             raise ValueError("unique projection set contains an invalid ordinal")
         if self.max_rows is not None and (
             not isinstance(self.max_rows, int)
@@ -612,10 +675,7 @@ class OrderBy:
             for value in self.ordinals
         ):
             raise ValueError("ORDER BY ordinals must be positive")
-        if any(
-            not isinstance(value, int) or isinstance(value, bool)
-            for value in self.descending
-        ):
+        if any(not isinstance(value, int) or isinstance(value, bool) for value in self.descending):
             raise TypeError("descending ordinals must be integers")
         if not self.descending <= set(self.ordinals):
             raise ValueError("descending ordinal is not ordered")
@@ -648,9 +708,7 @@ class QueryAst:
         if self.recursive and not self.ctes:
             raise ValueError("WITH RECURSIVE requires a CTE")
         if self.limit is not None and (
-            not isinstance(self.limit, int)
-            or isinstance(self.limit, bool)
-            or self.limit < 0
+            not isinstance(self.limit, int) or isinstance(self.limit, bool) or self.limit < 0
         ):
             raise ValueError("LIMIT must be a nonnegative integer")
         if self.limit is not None and self.limit > _UNSIGNED_BIGINT_MAX:

@@ -445,6 +445,39 @@ def test_derived_explicit_columns_is_an_independent_nonrandom_catalog_target() -
     assert " AS `d` (`dq1`" in generated.sql
 
 
+def test_set_branch_local_top_n_is_parenthesized_and_globally_ordered() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("set_branch_local_top_n", SchemaProfile.REGULAR_INNODB),
+        seed=17,
+        lane=QueryLane.VALID,
+    )
+
+    assert generated.sql.count("ORDER BY 1 LIMIT 2)") == 2
+    assert ") UNION (" in generated.sql
+    assert generated.sql.endswith("ORDER BY 1")
+    assert "set_branch_local_top_n" in generated.feature_tags
+    assert generated.complexity.estimated_output_rows <= 4
+    ReadOnlyValidator().validate_text(generated.sql)
+
+
+def test_nested_parenthesized_top_n_has_three_bounded_ordering_layers() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("select_nested_parenthesized_top_n", SchemaProfile.REGULAR_INNODB),
+        seed=17,
+        lane=QueryLane.VALID,
+    )
+
+    assert generated.sql.startswith("((SELECT")
+    assert generated.sql.count("ORDER BY 1") == 3
+    assert "LIMIT 5) ORDER BY 1 LIMIT 3) ORDER BY 1 LIMIT 2" in generated.sql
+    assert "select_nested_parenthesized_top_n" in generated.feature_tags
+    assert generated.complexity.depth == 3
+    assert generated.complexity.estimated_output_rows <= 2
+    ReadOnlyValidator().validate_text(generated.sql)
+
+
 def test_explicit_table_projection_over_budget_is_unreachable_before_render() -> None:
     columns = (ColumnDef("id", "BIGINT UNSIGNED", False),) + tuple(
         ColumnDef(f"c{ordinal}", "INT", True) for ordinal in range(1, 13)

@@ -60,6 +60,24 @@ def normalize_catalog_nodes(spec: FeatureSpec) -> frozenset[str]:
         nodes.add("set_union")
     if feature_id == "set_union":
         nodes.add("set_union_distinct")
+    if feature_id == "set_branch_local_top_n":
+        nodes.update(
+            (
+                "branch_local_order_limit",
+                "limit",
+                "parenthesized_query",
+                "set_union",
+                "set_union_distinct",
+            )
+        )
+    if feature_id == "select_nested_parenthesized_top_n":
+        nodes.update(
+            (
+                "limit",
+                "nested_parenthesized_order_limit",
+                "parenthesized_query",
+            )
+        )
     if feature_id.startswith("set_intersect"):
         nodes.add("set_intersect")
     if feature_id.startswith("set_except"):
@@ -140,6 +158,53 @@ class ProductionGeneratorAdapter:
     def find_capability(self, signature: FeatureSignature) -> CatalogCapability:
         target = set(signature.nodes)
         requirements = set(signature.requirements)
+        if "nested_parenthesized_order_limit" in target:
+            evidence = self._specs["select_nested_parenthesized_top_n"]
+            return CatalogCapability(
+                feature_id="validation_nested_parenthesized_top_n",
+                nodes=frozenset(
+                    {
+                        "select",
+                        "order_by",
+                        "limit",
+                        "parenthesized_query",
+                        "nested_parenthesized_order_limit",
+                    }
+                ),
+                requirements=frozenset({"table", "unique_tiebreaker"}),
+                evidence_ready=evidence.evidence_lock_ready,
+                evidence_ids=tuple(sorted(evidence.unverified_evidence_sources)),
+            )
+        if "branch_local_order_limit" in target:
+            evidence = self._specs["set_branch_local_top_n"]
+            scalar = "scalar_literal" in requirements
+            return CatalogCapability(
+                feature_id=(
+                    "validation_scalar_set_branch_local_top_n"
+                    if scalar
+                    else "validation_set_branch_local_top_n"
+                ),
+                nodes=frozenset(
+                    {
+                        "select",
+                        "order_by",
+                        "limit",
+                        "parenthesized_query",
+                        "branch_local_order_limit",
+                        "set_union",
+                        "set_union_distinct",
+                    }
+                ),
+                requirements=frozenset(
+                    {
+                        "scalar_literal" if scalar else "table",
+                        "two_compatible_relations",
+                        "unique_tiebreaker",
+                    }
+                ),
+                evidence_ready=evidence.evidence_lock_ready,
+                evidence_ids=tuple(sorted(evidence.unverified_evidence_sources)),
+            )
         if "derived_explicit_columns" in target:
             evidence = self._specs["derived_explicit_columns"]
             return CatalogCapability(
@@ -433,6 +498,9 @@ class ProductionGeneratorAdapter:
             "validation_table_only": "table_explicit",
             "validation_table_values_union_all": "table_values_union",
             "validation_table_values_union_distinct": "table_values_union",
+            "validation_set_branch_local_top_n": "set_branch_local_top_n",
+            "validation_scalar_set_branch_local_top_n": "set_branch_local_top_n",
+            "validation_nested_parenthesized_top_n": "select_nested_parenthesized_top_n",
             "validation_table_subquery": "table_subquery_exists",
             "validation_scalar_limit_zero": "select_query_specification",
             "validation_table_limit_zero": "select_query_specification",
@@ -477,6 +545,8 @@ class ProductionGeneratorAdapter:
                 if feature_id == "validation_table_values_union_all"
                 else "table_values_union_distinct"
                 if feature_id == "validation_table_values_union_distinct"
+                else "scalar_branch_local_top_n"
+                if feature_id == "validation_scalar_set_branch_local_top_n"
                 else "table_subquery"
                 if feature_id == "validation_table_subquery"
                 else "limit_zero"

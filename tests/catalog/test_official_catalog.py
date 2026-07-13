@@ -60,7 +60,7 @@ def test_catalog_v2_contract_locks_the_reviewed_manifest_exactly() -> None:
     } == REVIEWED_VARIANT_IDS
     assert len(REVIEWED_SOURCE_IDS) == 23
     assert len(REVIEWED_FEATURE_IDS) == 19
-    assert len(REVIEWED_VARIANT_IDS) == 62
+    assert len(REVIEWED_VARIANT_IDS) == 64
     assert {feature["category"] for feature in features} == ALLOWED_CATEGORIES
     assert canonical_catalog_sha256(catalog) == REVIEWED_CATALOG_SHA256
 
@@ -73,6 +73,8 @@ def test_source_hash_scope_and_refresh_state_are_explicit() -> None:
         "grammar_8041",
         "parse_tree_8041",
         "release_8019",
+        "release_8022",
+        "release_8031",
         "release_8041",
     }
     for source in sources:
@@ -214,7 +216,7 @@ def test_every_evidence_locator_has_one_machine_verifiable_manifest() -> None:
     assert manifested == referenced
 
 
-def test_feature_catalog_round_trips_all_62_variant_rows() -> None:
+def test_feature_catalog_round_trips_all_64_variant_rows() -> None:
     document = _catalog()
     expected = []
     for feature in _features(document):
@@ -243,7 +245,7 @@ def test_feature_catalog_round_trips_all_62_variant_rows() -> None:
         for spec in loaded
     ]
 
-    assert len(actual) == 62
+    assert len(actual) == 64
     assert actual == expected
 
 
@@ -262,9 +264,9 @@ def test_feature_catalog_from_yaml_calls_the_production_validator(
 def test_loaded_catalog_is_distinct_from_generator_supported_registry() -> None:
     loaded = FeatureCatalog.from_yaml(CATALOG_PATH)
 
-    assert len(loaded) == 62
+    assert len(loaded) == 64
     assert loaded.signature_targets(version=(8, 0, 41)) == ()
-    assert len(loaded.catalogued_gaps(version=(8, 0, 41))) == 62
+    assert len(loaded.catalogued_gaps(version=(8, 0, 41))) == 64
     assert {spec.capability_status for spec in loaded} == {CapabilityStatus.CATALOGUED_GAP}
 
     registered = FeatureCatalog.from_yaml(

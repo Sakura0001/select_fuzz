@@ -26,6 +26,12 @@ from select_fuzz.config import (
     RunMode,
     load_config,
 )
+from select_fuzz.cleanup import (
+    CleanupReport,
+    CleanupService,
+    ManagedDatabaseError,
+    build_cleanup_service,
+)
 from select_fuzz.correctness import build_correctness_runner
 from select_fuzz.domain import RunRequest, deterministic_id
 from select_fuzz.doctor import build_doctor
@@ -66,6 +72,8 @@ DoctorFactory = Callable[[AppConfig], DoctorRunner]
 DOCTOR_FACTORY: DoctorFactory = build_doctor
 ReplayFactory = Callable[[AppConfig, Path], ReplayService]
 REPLAY_FACTORY: ReplayFactory = build_replay_service
+CleanupFactory = Callable[[AppConfig], CleanupService]
+CLEANUP_FACTORY: CleanupFactory = build_cleanup_service
 
 
 @app.command("run")
@@ -168,15 +176,6 @@ def run_command(
         for stored_signum, handler in previous_handlers.items():
             signal.signal(stored_signum, handler)
     typer.echo(json.dumps(asdict(summary), sort_keys=True, separators=(",", ":")))
-
-
-def _pending_command(name: str) -> Callable[[], None]:
-    def command() -> None:
-        typer.echo(f"{name} is not implemented yet")
-        raise typer.Exit(code=2)
-
-    command.__name__ = name
-    return command
 
 
 @app.command("doctor")
@@ -302,18 +301,55 @@ def serve_command(
     uvicorn.run(api, host="127.0.0.1", port=port, log_level="warning")
 
 
-for _command_name in ("cleanup",):
-    app.command(name=_command_name)(_pending_command(_command_name))
+@app.command("cleanup")
+def cleanup_command(
+    config: Path = typer.Option(..., "--config", exists=True, dir_okay=False),
+    databases: list[str] = typer.Option(..., "--database"),
+    execute: bool = typer.Option(False, "--execute"),
+) -> None:
+    """Plan or explicitly drop retained managed databases on all three nodes."""
+
+    try:
+        loaded = load_config(config)
+        report: CleanupReport = CLEANUP_FACTORY(loaded).run(
+            tuple(databases), execute=execute
+        )
+    except (ConfigLoadError, ManagedDatabaseError, ValueError) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from None
+    except Exception as error:
+        typer.echo(f"cleanup failed: {type(error).__name__}", err=True)
+        raise typer.Exit(code=1) from None
+    document = {
+        "databases": list(report.databases),
+        "execute": report.execute,
+        "nodes": [
+            {
+                "database": item.database,
+                "dropped": item.dropped,
+                "error_type": item.error_type,
+                "role": item.role.value,
+            }
+            for item in report.nodes
+        ],
+        "success": report.success,
+    }
+    typer.echo(json.dumps(document, sort_keys=True, separators=(",", ":")))
+    if not report.success:
+        raise typer.Exit(code=1)
 
 
 __all__ = [
     "DOCTOR_FACTORY",
+    "CLEANUP_FACTORY",
     "MODE_RUNNERS",
     "REPLAY_FACTORY",
     "DoctorFactory",
+    "CleanupFactory",
     "ModeFactory",
     "ModeRunner",
     "app",
+    "cleanup_command",
     "doctor_command",
     "run_command",
     "replay_command",

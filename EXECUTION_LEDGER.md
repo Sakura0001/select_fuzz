@@ -10,7 +10,7 @@
 - 大仓库根目录：`/Users/yuyu/Documents/select_fuzz 2`
 - 当前工作树：`/Users/yuyu/Documents/select_fuzz 2/.worktrees/mysql-parallel-query-fuzzer`
 - 当前分支：`codex/mysql-parallel-query-fuzzer`
-- 当前 HEAD：`21c6127 test: enforce release coverage and SQL gap gates`
+- 当前 HEAD：`954a3f3 docs: record release gate progress`
 - Git 远端：**未配置**。每次提交后执行 `git push` 都会得到 `No configured push destination`；不得猜测或私自创建远端。
 - 凭据规则：只从环境变量读取；不得把用户名密码/token 写入命令、代码、文档、日志或 Git 历史。
 - 本账本已随 Task 11 提交；本次记录 Task 11 提交/push 结果的增量将随 Task 12 提交。
@@ -561,6 +561,11 @@ git remote -v
 73. 主线程在合入第二轮 generator 与所有 coverage tests 后执行 fresh full release gate：`1111 passed, 11 skipped, 0 failed in 79.26s`；coverage JSON checker 实测 lines `92.23%`、branches `86.13%`，均超过 90/85；Ruff `All checks passed`；Mypy `81 source files`；`git diff --check` 通过。唯一 warning 为第三方 Starlette/httpx deprecation。
 74. 12h 运行中间状态（约 elapsed 1296.5s）：274 official sources、49 unique signatures、13 supported/6 blocked_evidence/30 gap、pending 6693。由于第二轮 generator 在进程启动后修改，计划等首个 30m checkpoint 写入后优雅停止并从同一 output/run_id 恢复，使 startup re-audit 使用新代码且不丢累计 elapsed。
 75. release-gate 切片精确暂存 29 files，staged diff-check 通过；secret scan 只命中 ledger 内已记录且已撤销的 `skip-grant-tables` 文字，无密码/token/private key。提交成功：`21c6127 test: enforce release coverage and SQL gap gates`。提交后立即 `git push`，仍只因 `No configured push destination` 失败。
+76. 执行账本增量单文件提交成功：`954a3f3 docs: record release gate progress`；随后立即 `git push`，仍为 `No configured push destination`。该 push 结果增量已再次落盘，待首个 30m checkpoint 后与 resume 证据一起提交。
+77. 前端最终 fresh gate：ESLint、TypeScript、production build 全绿；Vitest 26 passed，lines/statements 98.86%、branches 88.82%；真实 FastAPI/subprocess Playwright fault/recovery/accessibility `7 passed`。
+78. 正式 12h 首 checkpoint 已在 epoch 364、elapsed `1702.3663s` 持久化。旧 session 24648 收到 SIGINT 后优雅退出（exit 2 表示 operator stop，报告 `epochs=364 signatures=57 gaps=44 elapsed=1702.37s`），随后用完全相同 run_id/output/duration 恢复为 session 60586。startup re-audit 加载新 generator 后最新分类从 13 supported 提升到 23 supported，当前 11 blocked_evidence、23 gap；telemetry 已从 elapsed 1714s 继续，证明累计时间未清零。
+79. 补齐计划中的安全 cleanup：只接受 DatabaseNameFactory 的 `sf_c_...`/`sf_p_...` managed ID，默认 dry-run，显式 `--execute` 才在三节点逐一 DROP；任一失败只记录 exception type，凭据仅由环境变量解析。TDD 先因 module/CLI factory 缺失失败，最终 cleanup 单元/CLI 7 passed，真实 CLI dry-run 成功且无连接/删除。加入后 fresh full `1118 passed, 11 skipped`，lines 92.20%、branches 86.17%；Ruff/Mypy 82 files 全绿。
+80. 12h resume 中间状态 elapsed `1854.913s`：382 official sources、58 unique signatures，23 supported、11 blocked_evidence、24 gap；session 60586 继续运行。
 
 ## 10. 当前高风险审查清单
 

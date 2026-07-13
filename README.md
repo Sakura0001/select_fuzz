@@ -21,6 +21,7 @@ environment variables and must never be written into YAML or Git.
 ```bash
 UV_CACHE_DIR=.uv-cache uv sync --locked --all-groups
 npm --prefix frontend ci
+npm --prefix frontend run build
 export SELECT_FUZZ_MYSQL_USER='<local user>'
 export SELECT_FUZZ_MYSQL_PASSWORD='<set in shell only>'
 cp config/example.yaml config/local.yaml
@@ -63,6 +64,18 @@ uv run select-fuzz serve --config config/local.yaml --artifacts artifacts
 
 It binds to loopback only. The UI starts and stops both modes, streams events,
 and exposes findings, reports, and replay status.
+
+Databases are retained by default and are never cleaned automatically. The
+`cleanup` command accepts only generated `sf_c_...` or `sf_p_...` managed IDs,
+defaults to a non-mutating plan, and requires `--execute` to drop the explicit
+database from all three nodes:
+
+```bash
+uv run select-fuzz cleanup --config config/local.yaml \
+  --database '<exact managed database id>'
+uv run select-fuzz cleanup --config config/local.yaml \
+  --database '<exact managed database id>' --execute
+```
 
 ## Regression and validation
 

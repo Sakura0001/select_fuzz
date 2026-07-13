@@ -6,7 +6,8 @@ from threading import Event
 from typer.testing import CliRunner
 
 from select_fuzz.cli import MODE_RUNNERS, app
-from select_fuzz.config import PreflightIssue, PreflightReport
+from select_fuzz.cleanup import CleanupNodeResult, CleanupReport
+from select_fuzz.config import NodeRole, PreflightIssue, PreflightReport
 from select_fuzz.domain import RunRequest
 from select_fuzz.service import RunSummary
 from select_fuzz.replay import ReplayResult, ReplayStatus
@@ -349,3 +350,82 @@ def test_serve_cli_builds_loopback_app_with_real_supervision(
     assert result.exit_code == 0, result.output
     assert received["host"] == "127.0.0.1"
     assert received["port"] == 8877
+
+
+def test_cleanup_cli_defaults_to_plan_and_requires_explicit_execute(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[tuple[str, ...], bool]] = []
+
+    class Cleanup:
+        def run(self, databases: tuple[str, ...], *, execute: bool = False) -> CleanupReport:
+            calls.append((databases, execute))
+            return CleanupReport(
+                databases,
+                execute,
+                tuple(
+                    CleanupNodeResult(database, role, execute)
+                    for database in databases
+                    for role in NodeRole
+                ),
+            )
+
+    monkeypatch.setattr("select_fuzz.cli.CLEANUP_FACTORY", lambda config: Cleanup())
+    managed = "sf_p_20260713t112233_w0_r1_s0123456789_nabcdef12_q0"
+    planned = CliRunner().invoke(
+        app,
+        [
+            "cleanup",
+            "--config",
+            str(PROJECT_ROOT / "config" / "example.yaml"),
+            "--database",
+            managed,
+        ],
+    )
+    executed = CliRunner().invoke(
+        app,
+        [
+            "cleanup",
+            "--config",
+            str(PROJECT_ROOT / "config" / "example.yaml"),
+            "--database",
+            managed,
+            "--execute",
+        ],
+    )
+
+    assert planned.exit_code == 0, planned.output
+    assert '"execute":false' in planned.output
+    assert executed.exit_code == 0, executed.output
+    assert calls == [((managed,), False), ((managed,), True)]
+
+
+def test_cleanup_cli_returns_one_for_sanitized_partial_failure(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    managed = "sf_c_20260713t112233_w0_r1_s0123456789_nabcdef12_q0"
+
+    class Cleanup:
+        def run(self, databases: tuple[str, ...], *, execute: bool = False) -> CleanupReport:
+            return CleanupReport(
+                databases,
+                execute,
+                (
+                    CleanupNodeResult(
+                        databases[0], NodeRole.CUSTOM_ON, False, "RuntimeError"
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr("select_fuzz.cli.CLEANUP_FACTORY", lambda config: Cleanup())
+    result = CliRunner().invoke(
+        app,
+        [
+            "cleanup",
+            "--config",
+            str(PROJECT_ROOT / "config" / "example.yaml"),
+            "--database",
+            managed,
+            "--execute",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert '"error_type":"RuntimeError"' in result.output
+    assert "Traceback" not in result.output

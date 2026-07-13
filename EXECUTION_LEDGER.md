@@ -10,7 +10,7 @@
 - 大仓库根目录：`/Users/yuyu/Documents/select_fuzz 2`
 - 当前工作树：`/Users/yuyu/Documents/select_fuzz 2/.worktrees/mysql-parallel-query-fuzzer`
 - 当前分支：`codex/mysql-parallel-query-fuzzer`
-- 当前 HEAD：`954a3f3 docs: record release gate progress`
+- 当前 HEAD：`b4aac8e feat: add safe retained database cleanup`
 - Git 远端：**未配置**。每次提交后执行 `git push` 都会得到 `No configured push destination`；不得猜测或私自创建远端。
 - 凭据规则：只从环境变量读取；不得把用户名密码/token 写入命令、代码、文档、日志或 Git 历史。
 - 本账本已随 Task 11 提交；本次记录 Task 11 提交/push 结果的增量将随 Task 12 提交。
@@ -116,6 +116,7 @@ git remote -v
 | 完成 | `cbd2105` | performance mode / FastAPI+React control plane / regression corpus | 141 focused、3 opt-in skip；frontend coverage 98.86/88.82、Playwright 7/7 |
 | 完成 | `626997e` | resumable official-source SQL coverage validation | 179 generation/property/validation、2 opt-in skip；online cycle 2 为 9 signatures/3 evidence blocks |
 | 完成 | `21c6127` | release coverage / online-gap generator / CI / README | 1111 full、11 skipped；line 92.23%、branch 86.13%；exact 8.0.41 directed matrix 4/4 |
+| 完成 | `b4aac8e` | explicit retained database cleanup | 默认 dry-run、managed-ID lock、三节点 execute；1118 full、11 skipped |
 
 已知所有提交后的 `git push` 均失败，唯一原因是仓库没有远端。
 
@@ -566,6 +567,9 @@ git remote -v
 78. 正式 12h 首 checkpoint 已在 epoch 364、elapsed `1702.3663s` 持久化。旧 session 24648 收到 SIGINT 后优雅退出（exit 2 表示 operator stop，报告 `epochs=364 signatures=57 gaps=44 elapsed=1702.37s`），随后用完全相同 run_id/output/duration 恢复为 session 60586。startup re-audit 加载新 generator 后最新分类从 13 supported 提升到 23 supported，当前 11 blocked_evidence、23 gap；telemetry 已从 elapsed 1714s 继续，证明累计时间未清零。
 79. 补齐计划中的安全 cleanup：只接受 DatabaseNameFactory 的 `sf_c_...`/`sf_p_...` managed ID，默认 dry-run，显式 `--execute` 才在三节点逐一 DROP；任一失败只记录 exception type，凭据仅由环境变量解析。TDD 先因 module/CLI factory 缺失失败，最终 cleanup 单元/CLI 7 passed，真实 CLI dry-run 成功且无连接/删除。加入后 fresh full `1118 passed, 11 skipped`，lines 92.20%、branches 86.17%；Ruff/Mypy 82 files 全绿。
 80. 12h resume 中间状态 elapsed `1854.913s`：382 official sources、58 unique signatures，23 supported、11 blocked_evidence、24 gap；session 60586 继续运行。
+81. cleanup/README/账本精确暂存 6 files，staged diff-check 与 secret scan 全绿；提交成功 `b4aac8e feat: add safe retained database cleanup`。随后立即 `git push`，唯一失败原因仍为 `No configured push destination`。
+82. 为避免单次交互占用完整 12h，创建同任务 hourly heartbeat。第一次参数失败：status 需大写 `ACTIVE`；第二次失败：缺 `destination=thread`；第三次修正后成功，automation id `12-sql`。heartbeat 会读取本账本/SQLite/telemetry，进程早停则从 checkpoint 恢复，按 TDD 处理 actionable gap，满 43200s 后执行最终全门禁/提交/push 并停用自身。
+83. heartbeat 创建时正式 validation resume session 仍为 60586；不得因当前交互结束而把 12h 标为完成。下一次唤醒必须先验证进程/telemetry 持续增长与 elapsed。
 
 ## 10. 当前高风险审查清单
 

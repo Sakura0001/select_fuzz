@@ -90,7 +90,7 @@ def test_installed_wheel_loads_its_own_canonical_catalog(tmp_path: Path) -> None
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip() == "58"
+    assert completed.stdout.strip() == "62"
 
 
 def test_sdist_is_reproducible_source_not_a_workspace_snapshot(tmp_path: Path) -> None:

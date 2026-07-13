@@ -385,4 +385,4 @@ def test_official_catalog_v2_is_consumable_when_present() -> None:
 
     assert targets == {"select_query_specification"}
     assert evidence_gaps == {"cte_recursive"}
-    assert len(catalog.catalogued_gaps(version=(8, 0, 41))) == 56
+    assert len(catalog.catalogued_gaps(version=(8, 0, 41))) == 60

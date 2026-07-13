@@ -49,6 +49,7 @@ from select_fuzz.generation.query_ast import (
     Star,
     SubqueryExpression,
     SubqueryOperator,
+    TableQuery,
     TableRelation,
     UnaryExpression,
     UnaryOperator,
@@ -304,14 +305,10 @@ class QueryGenerator:
             )
         violations = built.complexity.violations(limits)
         if violations:
-            raise QueryBudgetExceeded(
-                "query exceeds hard " + ", ".join(violations) + " budget"
-            )
+            raise QueryBudgetExceeded("query exceeds hard " + ", ".join(violations) + " budget")
         sql = render_query_ast(built.ast)
         self.validator.validate_text(sql)
-        tags = frozenset(
-            {target.feature_id, f"lane_{chosen_lane.value}", *built.extra_tags}
-        )
+        tags = frozenset({target.feature_id, f"lane_{chosen_lane.value}", *built.extra_tags})
         return GeneratedQuery(
             ast=built.ast,
             sql=sql,
@@ -383,9 +380,7 @@ class QueryGenerator:
         if target.capability_status is not CapabilityStatus.GENERATOR_SUPPORTED:
             raise UnsupportedQueryFeature(target.feature_id)
         if not target.evidence_lock_ready:
-            raise EvidenceGateError(
-                f"official evidence lock is not ready for {target.feature_id}"
-            )
+            raise EvidenceGateError(f"official evidence lock is not ready for {target.feature_id}")
         if target.min_version > self.version:
             raise UnsupportedQueryFeature(
                 f"{target.feature_id} requires MySQL {target.min_version}"
@@ -433,6 +428,18 @@ class QueryGenerator:
                 return self._scalar_literal()
             if directed_variant == "scalar_aggregate":
                 return self._scalar_aggregate()
+            if directed_variant == "limit_zero":
+                return self._limit_zero()
+            if directed_variant == "limit_zero_offset":
+                return self._limit_zero(offset=1)
+            if directed_variant == "table_limit_zero":
+                return self._table_limit_zero(manifest, rows)
+            if directed_variant == "table_limit_zero_offset":
+                return self._table_limit_zero(manifest, rows, offset=1)
+            if directed_variant == "scalar_offset_limit":
+                return self._scalar_offset_limit()
+            if directed_variant in {"offset_limit", "table_offset_limit"}:
+                return self._offset_limit(manifest, rows)
             return self._simple(manifest, rows, top_n=require_top_n, free_random=free_random)
         if feature_id == "select_parenthesized":
             return self._parenthesized(manifest, rows)
@@ -456,10 +463,20 @@ class QueryGenerator:
             )
         if feature_id == "subquery_quantified":
             return self._quantified_subquery(manifest, rows, rng)
-        if feature_id == "derived_regular":
-            return self._derived(manifest, rows, lateral=False)
+        if feature_id in {"derived_regular", "derived_explicit_columns"}:
+            explicit_columns = (
+                feature_id == "derived_explicit_columns"
+                or directed_variant == "explicit_columns"
+                or (directed_variant is None and bool(rng.getrandbits(1)))
+            )
+            return self._derived(
+                manifest,
+                rows,
+                lateral=False,
+                explicit_columns=explicit_columns,
+            )
         if feature_id == "lateral_correlated":
-            return self._derived(manifest, rows, lateral=True)
+            return self._derived(manifest, rows, lateral=True, explicit_columns=False)
         if feature_id == "cte_nonrecursive":
             return self._cte(manifest, rows, recursive=False)
         if feature_id == "cte_recursive":
@@ -479,6 +496,21 @@ class QueryGenerator:
             if directed_variant == "values_limit":
                 return self._values_only(limit=True)
             return self._set_values(manifest, rows)
+        if feature_id == "table_explicit":
+            return self._explicit_table(
+                manifest,
+                rows,
+                max_projection=budget.max_projection,
+            )
+        if feature_id == "table_values_union":
+            return self._explicit_table_values(
+                manifest,
+                rows,
+                max_projection=budget.max_projection,
+                all_rows=directed_variant != "table_values_union_distinct",
+            )
+        if feature_id == "table_subquery_exists":
+            return self._explicit_table_subquery(manifest, rows)
         if feature_id in {
             "grouping_aggregate_having",
             "grouping_with_rollup",
@@ -665,6 +697,7 @@ class QueryGenerator:
         limit: int | None = None,
         windows: tuple[WindowOrder, ...] = (),
         descending: frozenset[int] = frozenset(),
+        offset: int | None = None,
     ) -> QueryAst:
         scope = QueryScope(projection_count, unique_sets, max_rows)
         return QueryAst(
@@ -675,6 +708,7 @@ class QueryGenerator:
             recursive,
             limit,
             windows,
+            offset,
         )
 
     @staticmethod
@@ -753,6 +787,153 @@ class QueryGenerator:
             frozenset({"scalar_literal", "aggregate"}),
         )
 
+    def _limit_zero(self, *, offset: int | None = None) -> _BuiltQuery:
+        body = SelectQuery((Projection(Literal(1, SqlType.NUMERIC), alias="q1"),))
+        ast = self._ast(
+            body,
+            projection_count=1,
+            max_rows=0,
+            limit=0,
+            offset=offset,
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=0,
+                depth=1,
+                ctes=0,
+                branches=1,
+                projection=1,
+                predicates=0,
+                scanned=0,
+                intermediate=1,
+                output=0,
+            ),
+            frozenset(
+                {"scalar_literal", "limit_zero"} | ({"offset"} if offset is not None else set())
+            ),
+        )
+
+    def _offset_limit(self, manifest: SchemaManifest, rows: Mapping[str, int]) -> _BuiltQuery:
+        table = manifest.tables[0]
+        projection, unique_sets = self._base_projection(table, "t")
+        if not unique_sets:
+            count = FunctionCall(FunctionName.COUNT, (Star(),), SqlType.NUMERIC)
+            body = SelectQuery(
+                (Projection(count, alias="row_count"),),
+                TableRelation(table.name, "t"),
+            )
+            ast = self._ast(
+                body,
+                projection_count=1,
+                max_rows=1,
+                unique_sets=frozenset({frozenset({1})}),
+                limit=1,
+                offset=1,
+            )
+            return _BuiltQuery(
+                ast,
+                self._complexity(
+                    tables=1,
+                    depth=1,
+                    ctes=0,
+                    branches=1,
+                    projection=1,
+                    predicates=0,
+                    scanned=rows[table.name],
+                    intermediate=1,
+                    output=0,
+                ),
+                frozenset({"aggregate", "offset"}),
+            )
+        maximum = min(1, max(0, rows[table.name] - 1))
+        ast = self._ast(
+            SelectQuery(projection, TableRelation(table.name, "t")),
+            projection_count=len(projection),
+            max_rows=maximum,
+            unique_sets=unique_sets,
+            limit=1,
+            offset=1,
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=1,
+                depth=1,
+                ctes=0,
+                branches=1,
+                projection=len(projection),
+                predicates=0,
+                scanned=rows[table.name],
+                intermediate=rows[table.name],
+                output=maximum,
+            ),
+            frozenset({"offset", "top_n"}),
+        )
+
+    def _scalar_offset_limit(self) -> _BuiltQuery:
+        body = SelectQuery((Projection(Literal(1, SqlType.NUMERIC), alias="q1"),))
+        ast = self._ast(
+            body,
+            projection_count=1,
+            max_rows=0,
+            unique_sets=frozenset({frozenset({1})}),
+            limit=1,
+            offset=1,
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=0,
+                depth=1,
+                ctes=0,
+                branches=1,
+                projection=1,
+                predicates=0,
+                scanned=0,
+                intermediate=1,
+                output=0,
+            ),
+            frozenset({"scalar_literal", "offset"}),
+        )
+
+    def _table_limit_zero(
+        self,
+        manifest: SchemaManifest,
+        rows: Mapping[str, int],
+        *,
+        offset: int | None = None,
+    ) -> _BuiltQuery:
+        table = manifest.tables[0]
+        count = FunctionCall(FunctionName.COUNT, (Star(),), SqlType.NUMERIC)
+        body = SelectQuery(
+            (Projection(count, alias="row_count"),),
+            TableRelation(table.name, "t"),
+        )
+        ast = self._ast(
+            body,
+            projection_count=1,
+            max_rows=0,
+            unique_sets=frozenset({frozenset({1})}),
+            limit=0,
+            offset=offset,
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=1,
+                depth=1,
+                ctes=0,
+                branches=1,
+                projection=1,
+                predicates=0,
+                scanned=rows[table.name],
+                intermediate=1,
+                output=0,
+            ),
+            frozenset({"aggregate", "limit_zero"} | ({"offset"} if offset is not None else set())),
+        )
+
     def _simple(
         self,
         manifest: SchemaManifest,
@@ -766,7 +947,9 @@ class QueryGenerator:
         projection, unique_sets = self._base_projection(table, "t")
         if top_n and not unique_sets:
             count_call = FunctionCall(FunctionName.COUNT, (Star(),), SqlType.NUMERIC)
-            body = SelectQuery((Projection(count_call, "row_count"),), TableRelation(table.name, "t"))
+            body = SelectQuery(
+                (Projection(count_call, "row_count"),), TableRelation(table.name, "t")
+            )
             ast = self._ast(body, projection_count=1, max_rows=1, limit=1)
             complexity = self._complexity(
                 tables=1,
@@ -1027,7 +1210,9 @@ class QueryGenerator:
         inner = manifest.tables[1] if len(manifest.tables) > 1 else outer
         minimum = FunctionCall(FunctionName.MIN, (self._id(inner, "u"),), SqlType.NUMERIC)
         inner_query = SelectQuery((Projection(minimum, "min_id"),), TableRelation(inner.name, "u"))
-        variant = "materialized" if materialized else directed or rng.choice(("scalar", "row", "exists"))
+        variant = (
+            "materialized" if materialized else directed or rng.choice(("scalar", "row", "exists"))
+        )
         if not materialized and variant not in {"scalar", "row", "exists"}:
             raise ValueError(f"unknown directed subquery result kind: {variant}")
         if materialized:
@@ -1051,9 +1236,7 @@ class QueryGenerator:
                 self._id(outer, "t"), BinaryOperator.EQ, scalar, SqlType.BOOLEAN
             )
         elif variant == "row":
-            maximum_call = FunctionCall(
-                FunctionName.MAX, (self._id(inner, "u"),), SqlType.NUMERIC
-            )
+            maximum_call = FunctionCall(FunctionName.MAX, (self._id(inner, "u"),), SqlType.NUMERIC)
             inner_query = SelectQuery(
                 (
                     Projection(minimum, "min_id"),
@@ -1107,9 +1290,7 @@ class QueryGenerator:
                 else rows[outer.name] + rows[inner.name]
             ),
             intermediate=(
-                correlated_work
-                if variant == "exists"
-                else max(rows[outer.name], rows[inner.name])
+                correlated_work if variant == "exists" else max(rows[outer.name], rows[inner.name])
             ),
             output=maximum,
         )
@@ -1130,7 +1311,9 @@ class QueryGenerator:
         projection, unique = self._base_projection(outer, "t")
         body = SelectQuery(projection, TableRelation(outer.name, "t"), predicate)
         maximum = rows[outer.name]
-        ast = self._ast(body, projection_count=len(projection), max_rows=maximum, unique_sets=unique)
+        ast = self._ast(
+            body, projection_count=len(projection), max_rows=maximum, unique_sets=unique
+        )
         complexity = self._complexity(
             tables=2,
             depth=2,
@@ -1145,7 +1328,12 @@ class QueryGenerator:
         return _BuiltQuery(ast, complexity, frozenset({f"quantified_{operator.value}"}))
 
     def _derived(
-        self, manifest: SchemaManifest, rows: Mapping[str, int], *, lateral: bool
+        self,
+        manifest: SchemaManifest,
+        rows: Mapping[str, int],
+        *,
+        lateral: bool,
+        explicit_columns: bool,
     ) -> _BuiltQuery:
         outer = manifest.tables[0]
         inner = manifest.tables[1] if len(manifest.tables) > 1 else outer
@@ -1179,26 +1367,38 @@ class QueryGenerator:
             )
             maximum = rows[outer.name]
             unique = (
-                frozenset({frozenset({1})})
-                if self._unique_key(outer) == ("id",)
-                else frozenset()
+                frozenset({frozenset({1})}) if self._unique_key(outer) == ("id",) else frozenset()
             )
             scanned = rows[outer.name] + rows[outer.name] * rows[inner.name]
             intermediate = rows[outer.name] * rows[inner.name]
         else:
             inner_projection, inner_unique = self._base_projection(inner, "u")
             derived_body = SelectQuery(inner_projection, TableRelation(inner.name, "u"))
-            relation = DerivedRelation(derived_body, "d")
+            derived_columns = (
+                tuple(f"dq{ordinal}" for ordinal in range(1, len(inner_projection) + 1))
+                if explicit_columns
+                else ()
+            )
+            relation = DerivedRelation(derived_body, "d", columns=derived_columns)
             projection = tuple(
-                Projection(ColumnRef("d", item.alias or "", item.expression.sql_type), item.alias)
-                for item in inner_projection
+                Projection(
+                    ColumnRef(
+                        "d",
+                        derived_columns[ordinal] if derived_columns else item.alias or "",
+                        item.expression.sql_type,
+                    ),
+                    item.alias,
+                )
+                for ordinal, item in enumerate(inner_projection)
             )
             maximum = rows[inner.name]
             unique = inner_unique
             scanned = rows[inner.name]
             intermediate = rows[inner.name]
         body = SelectQuery(projection, relation)
-        ast = self._ast(body, projection_count=len(projection), max_rows=maximum, unique_sets=unique)
+        ast = self._ast(
+            body, projection_count=len(projection), max_rows=maximum, unique_sets=unique
+        )
         complexity = self._complexity(
             tables=2 if lateral else 1,
             depth=2,
@@ -1210,7 +1410,10 @@ class QueryGenerator:
             intermediate=intermediate,
             output=maximum,
         )
-        return _BuiltQuery(ast, complexity, frozenset({"lateral" if lateral else "derived"}))
+        tags = {"lateral" if lateral else "derived"}
+        if explicit_columns:
+            tags.add("derived_explicit_columns")
+        return _BuiltQuery(ast, complexity, frozenset(tags))
 
     def _cte(
         self, manifest: SchemaManifest, rows: Mapping[str, int], *, recursive: bool
@@ -1315,9 +1518,7 @@ class QueryGenerator:
         all_rows = sum(rows[table.name] for table in tables)
         body = SetQuery(branches, operator, all=operator is SetOperator.UNION and chain)
         unique = (
-            frozenset()
-            if operator is SetOperator.UNION and chain
-            else frozenset({frozenset({1})})
+            frozenset() if operator is SetOperator.UNION and chain else frozenset({frozenset({1})})
         )
         ast = self._ast(body, projection_count=1, max_rows=all_rows, unique_sets=unique)
         complexity = self._complexity(
@@ -1381,6 +1582,112 @@ class QueryGenerator:
             output=1,
         )
         return _BuiltQuery(ast, complexity, frozenset({"table_value_constructor"}))
+
+    def _explicit_table(
+        self,
+        manifest: SchemaManifest,
+        rows: Mapping[str, int],
+        *,
+        max_projection: int,
+    ) -> _BuiltQuery:
+        table = manifest.tables[0]
+        if len(table.columns) > max_projection:
+            raise TargetNotReachable("explicit TABLE exceeds projection budget")
+        maximum = rows[table.name]
+        key = self._unique_key(table)
+        unique_sets: frozenset[frozenset[int]] = frozenset()
+        if key is not None:
+            unique_sets = frozenset(
+                {frozenset(table.columns.index(table.column(name)) + 1 for name in key)}
+            )
+        ast = self._ast(
+            TableQuery(table.name),
+            projection_count=len(table.columns),
+            max_rows=maximum,
+            unique_sets=unique_sets,
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=1,
+                depth=1,
+                ctes=0,
+                branches=1,
+                projection=len(table.columns),
+                predicates=0,
+                scanned=maximum,
+                intermediate=maximum,
+                output=maximum,
+            ),
+            frozenset({"explicit_table"}),
+        )
+
+    def _explicit_table_values(
+        self,
+        manifest: SchemaManifest,
+        rows: Mapping[str, int],
+        *,
+        max_projection: int,
+        all_rows: bool,
+    ) -> _BuiltQuery:
+        table = manifest.tables[0]
+        if len(table.columns) > max_projection:
+            raise TargetNotReachable("explicit TABLE exceeds projection budget")
+        values = ValuesQuery(
+            (tuple(Literal(None, self._type(column)) for column in table.columns),)
+        )
+        maximum = rows[table.name] + 1
+        body = SetQuery((TableQuery(table.name), values), SetOperator.UNION, all=all_rows)
+        ast = self._ast(
+            body,
+            projection_count=len(table.columns),
+            max_rows=maximum,
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=1,
+                depth=1,
+                ctes=0,
+                branches=2,
+                projection=len(table.columns),
+                predicates=0,
+                scanned=rows[table.name],
+                intermediate=maximum,
+                output=maximum,
+            ),
+            frozenset({"explicit_table", "table_value_constructor"}),
+        )
+
+    def _explicit_table_subquery(
+        self, manifest: SchemaManifest, rows: Mapping[str, int]
+    ) -> _BuiltQuery:
+        table = manifest.tables[0]
+        body = SelectQuery(
+            (Projection(Literal(1, SqlType.NUMERIC), "q1"),),
+            predicate=SubqueryExpression(SubqueryOperator.EXISTS, TableQuery(table.name)),
+        )
+        ast = self._ast(
+            body,
+            projection_count=1,
+            max_rows=1,
+            unique_sets=frozenset({frozenset({1})}),
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=1,
+                depth=2,
+                ctes=0,
+                branches=1,
+                projection=1,
+                predicates=1,
+                scanned=rows[table.name],
+                intermediate=rows[table.name],
+                output=1,
+            ),
+            frozenset({"explicit_table", "subquery_exists"}),
+        )
 
     def _scalar_intersect_except(self) -> _BuiltQuery:
         first = SelectQuery((Projection(Literal(1, SqlType.NUMERIC), "q1"),))
@@ -1500,9 +1807,7 @@ class QueryGenerator:
         key = self._unique_key(table)
         if key is None:
             count = FunctionCall(FunctionName.COUNT, (Star(),), SqlType.NUMERIC)
-            derived = SelectQuery(
-                (Projection(count, "row_count"),), TableRelation(table.name, "t")
-            )
+            derived = SelectQuery((Projection(count, "row_count"),), TableRelation(table.name, "t"))
             value = ColumnRef("d", "row_count", SqlType.NUMERIC)
             order = WindowOrder((value,), proven_unique=False, max_rows=1)
             spec = WindowSpec((), order, (1, 1) if frame else None, "w0" if not frame else None)
@@ -1563,7 +1868,9 @@ class QueryGenerator:
             intermediate=maximum,
             output=output,
         )
-        return _BuiltQuery(ast, complexity, frozenset({"window_frame" if frame else "window_named"}))
+        return _BuiltQuery(
+            ast, complexity, frozenset({"window_frame" if frame else "window_named"})
+        )
 
     def _json_table(
         self,
@@ -1606,7 +1913,9 @@ class QueryGenerator:
             unique = frozenset({frozenset({1})})
             tables = 1
         body = SelectQuery(projection, relation)
-        ast = self._ast(body, projection_count=len(projection), max_rows=maximum, unique_sets=unique)
+        ast = self._ast(
+            body, projection_count=len(projection), max_rows=maximum, unique_sets=unique
+        )
         complexity = self._complexity(
             tables=tables,
             depth=1,
@@ -1664,9 +1973,7 @@ class QueryGenerator:
             expression = FunctionCall(
                 FunctionName.JSON_SCHEMA_VALID,
                 (
-                    CastExpression(
-                        Literal('{"type":"array"}', SqlType.TEXT), "JSON", SqlType.JSON
-                    ),
+                    CastExpression(Literal('{"type":"array"}', SqlType.TEXT), "JSON", SqlType.JSON),
                     document,
                 ),
                 SqlType.BOOLEAN,
@@ -1741,7 +2048,9 @@ class QueryGenerator:
             intermediate=maximum,
             output=maximum,
         )
-        return _BuiltQuery(ast, complexity, frozenset({"case_searched" if searched else "case_simple"}))
+        return _BuiltQuery(
+            ast, complexity, frozenset({"case_searched" if searched else "case_simple"})
+        )
 
     def _optimizer_hint(
         self, manifest: SchemaManifest, rows: Mapping[str, int], feature_id: str
@@ -1772,7 +2081,9 @@ class QueryGenerator:
                 TableRelation(table.name, "t"),
                 optimizer_hint="INDEX(t ix_id_desc)",
             )
-            ast = self._ast(body, projection_count=len(projection), max_rows=maximum, unique_sets=unique)
+            ast = self._ast(
+                body, projection_count=len(projection), max_rows=maximum, unique_sets=unique
+            )
         else:
             inner_projection, unique = self._base_projection(table, "t")
             derived = SelectQuery(inner_projection, TableRelation(table.name, "t"))
@@ -1786,7 +2097,9 @@ class QueryGenerator:
                 DerivedRelation(derived, "d"),
                 optimizer_hint="DERIVED_CONDITION_PUSHDOWN(d)",
             )
-            ast = self._ast(body, projection_count=len(projection), max_rows=maximum, unique_sets=unique)
+            ast = self._ast(
+                body, projection_count=len(projection), max_rows=maximum, unique_sets=unique
+            )
         complexity = self._complexity(
             tables=1,
             depth=2 if feature_id.endswith("pushdown") else 1,
@@ -1816,7 +2129,9 @@ class QueryGenerator:
             ),
         )
         maximum = rows[table.name]
-        ast = self._ast(body, projection_count=len(projection), max_rows=maximum, unique_sets=unique)
+        ast = self._ast(
+            body, projection_count=len(projection), max_rows=maximum, unique_sets=unique
+        )
         complexity = self._complexity(
             tables=1,
             depth=1,
@@ -1865,9 +2180,7 @@ class QueryGenerator:
         )
         return _BuiltQuery(ast, complexity, frozenset({"deterministic_function"}))
 
-    def _profile_function(
-        self, manifest: SchemaManifest, rows: Mapping[str, int]
-    ) -> _BuiltQuery:
+    def _profile_function(self, manifest: SchemaManifest, rows: Mapping[str, int]) -> _BuiltQuery:
         if manifest.profile is SchemaProfile.FULLTEXT_INNODB:
             return self._fulltext(manifest, rows)
         if manifest.profile is SchemaProfile.SPATIAL_INNODB:
@@ -1888,7 +2201,9 @@ class QueryGenerator:
         body = SelectQuery(
             projection,
             TableRelation(table.name, "t"),
-            BinaryExpression(score, BinaryOperator.GT, Literal(0, SqlType.NUMERIC), SqlType.BOOLEAN),
+            BinaryExpression(
+                score, BinaryOperator.GT, Literal(0, SqlType.NUMERIC), SqlType.BOOLEAN
+            ),
         )
         maximum = rows[table.name]
         unique = frozenset({frozenset({1})}) if self._unique_key(table) == ("id",) else frozenset()
@@ -1941,9 +2256,7 @@ class QueryGenerator:
             frozenset({"spatial"}),
         )
 
-    def _union_charset(
-        self, manifest: SchemaManifest, rows: Mapping[str, int]
-    ) -> _BuiltQuery:
+    def _union_charset(self, manifest: SchemaManifest, rows: Mapping[str, int]) -> _BuiltQuery:
         table = manifest.tables[0]
         payload = table.column("payload")
         branch_one = SelectQuery(
@@ -1984,9 +2297,7 @@ class QueryGenerator:
         table = manifest.tables[0]
         has_primary = any(index.primary for index in table.indexes)
         has_descending = any(
-            part.direction.value == "DESC"
-            for index in table.indexes
-            for part in index.parts
+            part.direction.value == "DESC" for index in table.indexes for part in index.parts
         )
         if not has_primary or not has_descending:
             raise TargetNotReachable(
@@ -1994,9 +2305,13 @@ class QueryGenerator:
             )
         identity = self._id(table, "t")
         predicate = BinaryExpression(
-            BinaryExpression(identity, BinaryOperator.EQ, Literal(1, SqlType.NUMERIC), SqlType.BOOLEAN),
+            BinaryExpression(
+                identity, BinaryOperator.EQ, Literal(1, SqlType.NUMERIC), SqlType.BOOLEAN
+            ),
             BinaryOperator.OR,
-            BinaryExpression(identity, BinaryOperator.GT, Literal(5, SqlType.NUMERIC), SqlType.BOOLEAN),
+            BinaryExpression(
+                identity, BinaryOperator.GT, Literal(5, SqlType.NUMERIC), SqlType.BOOLEAN
+            ),
             SqlType.BOOLEAN,
         )
         projection, unique = self._base_projection(table, "t")
@@ -2125,9 +2440,7 @@ class QueryGenerator:
             frozenset({"antijoin", "nullable_key"}),
         )
 
-    def _distinct_not_in(
-        self, manifest: SchemaManifest, rows: Mapping[str, int]
-    ) -> _BuiltQuery:
+    def _distinct_not_in(self, manifest: SchemaManifest, rows: Mapping[str, int]) -> _BuiltQuery:
         outer = manifest.tables[0]
         inner = manifest.tables[1] if len(manifest.tables) > 1 else outer
         subquery = SelectQuery(
@@ -2135,9 +2448,7 @@ class QueryGenerator:
             TableRelation(inner.name, "u"),
             distinct=True,
         )
-        predicate = SubqueryExpression(
-            SubqueryOperator.NOT_IN, subquery, self._id(outer, "t")
-        )
+        predicate = SubqueryExpression(SubqueryOperator.NOT_IN, subquery, self._id(outer, "t"))
         projection, unique = self._base_projection(outer, "t")
         maximum = rows[outer.name]
         ast = self._ast(
@@ -2171,7 +2482,9 @@ class QueryGenerator:
             TableRelation(table.name, "t"),
             optimizer_hint="NO_RANGE_OPTIMIZATION(t)",
         )
-        ast = self._ast(body, projection_count=len(projection), max_rows=maximum, unique_sets=unique)
+        ast = self._ast(
+            body, projection_count=len(projection), max_rows=maximum, unique_sets=unique
+        )
         return _BuiltQuery(
             ast,
             self._complexity(
@@ -2262,7 +2575,9 @@ class QueryGenerator:
         predicate = JsonMemberOf(Literal(1, SqlType.NUMERIC), document)
         projection = (
             Projection(self._id(table, "t"), "id"),
-            Projection(FunctionCall(FunctionName.JSON_TYPE, (document,), SqlType.TEXT), "json_type"),
+            Projection(
+                FunctionCall(FunctionName.JSON_TYPE, (document,), SqlType.TEXT), "json_type"
+            ),
         )
         maximum = rows[table.name]
         unique = frozenset({frozenset({1})}) if self._unique_key(table) == ("id",) else frozenset()
@@ -2338,10 +2653,14 @@ class QueryGenerator:
             )
             descending = frozenset({1})
         else:
-            index = next((item for item in table.indexes if item.kind is IndexKind.FUNCTIONAL), None)
+            index = next(
+                (item for item in table.indexes if item.kind is IndexKind.FUNCTIONAL), None
+            )
             if index is None:
                 raise TargetNotReachable("functional-index query requires a functional index")
-            expression_part = next((part.expression for part in index.parts if part.expression), None)
+            expression_part = next(
+                (part.expression for part in index.parts if part.expression), None
+            )
             if expression_part is None:
                 raise TargetNotReachable("functional index lacks its expression")
             if expression_part.cast_length is None:
@@ -2530,22 +2849,42 @@ class QueryBatchPlanner:
             selection_ordinal = ordinal
             if scheduler.planned_case_count:
                 selection_ordinal = scheduler.plan_start_ordinal + (
-                    (ordinal - scheduler.plan_start_ordinal)
-                    % scheduler.planned_case_count
+                    (ordinal - scheduler.plan_start_ordinal) % scheduler.planned_case_count
                 )
-            target = scheduler.choose(case_ordinal=selection_ordinal)
-            seed = tree.derive("query_case", ordinal, target.feature_id)
-            generated.append(
-                self.generator.generate(
-                    manifest,
-                    target=target,
-                    seed=seed,
-                    case_ordinal=ordinal,
-                    lane=lane,
-                    budget=budget,
-                    estimated_rows_by_table=estimated_rows_by_table,
-                )
-            )
+            attempts = max(1, scheduler.planned_case_count)
+            attempted_features: set[str] = set()
+            last_unreachable: TargetNotReachable | None = None
+            for attempt in range(attempts):
+                candidate_ordinal = selection_ordinal
+                if scheduler.planned_case_count:
+                    candidate_ordinal = scheduler.plan_start_ordinal + (
+                        (selection_ordinal - scheduler.plan_start_ordinal + attempt)
+                        % scheduler.planned_case_count
+                    )
+                target = scheduler.choose(case_ordinal=candidate_ordinal)
+                if target.feature_id in attempted_features:
+                    continue
+                attempted_features.add(target.feature_id)
+                seed = tree.derive("query_case", ordinal, target.feature_id)
+                try:
+                    query = self.generator.generate(
+                        manifest,
+                        target=target,
+                        seed=seed,
+                        case_ordinal=ordinal,
+                        lane=lane,
+                        budget=budget,
+                        estimated_rows_by_table=estimated_rows_by_table,
+                    )
+                except TargetNotReachable as error:
+                    last_unreachable = error
+                    continue
+                generated.append(query)
+                break
+            else:
+                raise TargetNotReachable(
+                    "no scheduled query target is reachable for the generated schema"
+                ) from last_unreachable
         return tuple(generated)
 
 

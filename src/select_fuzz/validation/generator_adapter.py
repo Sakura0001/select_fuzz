@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
-
 from select_fuzz.generation.catalog import FeatureSpec
 from select_fuzz.generation.query import QueryGenerator
 from select_fuzz.generation.schema import SchemaGenerator, SchemaLimits
@@ -27,6 +25,7 @@ _NODE_MAP = {
     "function_expression": "function_expression",
     "case_expression": "case_expression",
     "explicit_partition": "partition_selection",
+    "explicit_table": "explicit_table",
     "anti_join": "anti_join",
     "hint_comment": "optimizer_hint",
     "window_clause": "window",
@@ -43,11 +42,7 @@ _NODE_MAP = {
 
 
 def normalize_catalog_nodes(spec: FeatureSpec) -> frozenset[str]:
-    nodes = {
-        _NODE_MAP.get(node, node)
-        for node in spec.ast_nodes
-        if node != "predicate_expression"
-    }
+    nodes = {_NODE_MAP.get(node, node) for node in spec.ast_nodes if node != "predicate_expression"}
     nodes.add("select")
     nodes.add("order_by")
     feature_id = spec.feature_id
@@ -63,6 +58,8 @@ def normalize_catalog_nodes(spec: FeatureSpec) -> frozenset[str]:
         nodes.add("cte_recursive" if "recursive" in feature_id else "cte")
     if feature_id.startswith("set_union"):
         nodes.add("set_union")
+    if feature_id == "set_union":
+        nodes.add("set_union_distinct")
     if feature_id.startswith("set_intersect"):
         nodes.add("set_intersect")
     if feature_id.startswith("set_except"):
@@ -73,6 +70,8 @@ def normalize_catalog_nodes(spec: FeatureSpec) -> frozenset[str]:
         nodes.add("having")
     if "derived_table" in nodes:
         nodes.add("subquery")
+    if feature_id == "derived_explicit_columns":
+        nodes.add("derived_explicit_columns")
     if feature_id.startswith("join_inner"):
         nodes.add("join_inner")
     if "window" in feature_id:
@@ -119,25 +118,6 @@ class ProductionGeneratorAdapter:
         self.catalog = self.query_generator.feature_catalog()
         self._specs = {spec.feature_id: spec for spec in self.catalog}
 
-    @classmethod
-    def reload_from_disk(cls) -> ProductionGeneratorAdapter:
-        """Invalidate import caches and rebuild generator classes after an external fix."""
-
-        importlib.invalidate_caches()
-        import select_fuzz.generation.catalog as catalog_module
-        import select_fuzz.generation.schema as schema_module
-        import select_fuzz.generation.schema_rules as schema_rules_module
-        import select_fuzz.generation.query as query_module
-
-        importlib.reload(catalog_module)
-        schema_module = importlib.reload(schema_module)
-        importlib.reload(schema_rules_module)
-        query_module = importlib.reload(query_module)
-        return cls(
-            query_generator=query_module.QueryGenerator(),
-            schema_generator=schema_module.SchemaGenerator(),
-        )
-
     def signature_for_feature(self, feature_id: str) -> FeatureSignature:
         spec = self._specs[feature_id]
         return FeatureSignature(
@@ -160,15 +140,75 @@ class ProductionGeneratorAdapter:
     def find_capability(self, signature: FeatureSignature) -> CatalogCapability:
         target = set(signature.nodes)
         requirements = set(signature.requirements)
+        if "derived_explicit_columns" in target:
+            evidence = self._specs["derived_explicit_columns"]
+            return CatalogCapability(
+                feature_id="validation_derived_explicit_columns",
+                nodes=frozenset(
+                    {
+                        "select",
+                        "order_by",
+                        "derived_table",
+                        "derived_explicit_columns",
+                        "subquery",
+                    }
+                ),
+                requirements=frozenset({"table", "unique_tiebreaker"}),
+                evidence_ready=evidence.evidence_lock_ready,
+                evidence_ids=tuple(sorted(evidence.unverified_evidence_sources)),
+            )
+        if "explicit_table" in target:
+            if "table_value_constructor" in target:
+                evidence = self._specs["table_values_union"]
+                distinct = "set_union_distinct" in target
+                feature_id = (
+                    "validation_table_values_union_distinct"
+                    if distinct
+                    else "validation_table_values_union_all"
+                )
+                nodes = {
+                    "select",
+                    "order_by",
+                    "explicit_table",
+                    "table_value_constructor",
+                    "set_union",
+                    "set_union_distinct" if distinct else "set_union_all",
+                }
+                capability_requirements = {
+                    "table",
+                    "two_compatible_relations",
+                    "unique_tiebreaker",
+                }
+            elif "subquery_exists" in target:
+                evidence = self._specs["table_subquery_exists"]
+                feature_id = "validation_table_subquery"
+                nodes = {
+                    "select",
+                    "order_by",
+                    "explicit_table",
+                    "subquery",
+                    "subquery_exists",
+                }
+                capability_requirements = {"table", "unique_tiebreaker"}
+            else:
+                evidence = self._specs["table_explicit"]
+                feature_id = "validation_table_only"
+                nodes = {"select", "order_by", "explicit_table"}
+                capability_requirements = {"table", "unique_tiebreaker"}
+            return CatalogCapability(
+                feature_id=feature_id,
+                nodes=frozenset(nodes),
+                requirements=frozenset(capability_requirements),
+                evidence_ready=evidence.evidence_lock_ready,
+                evidence_ids=tuple(sorted(evidence.unverified_evidence_sources)),
+            )
         if "table_value_constructor" in target:
             nodes = {"select", "order_by", "table_value_constructor"}
             if "limit" in target:
                 nodes.add("limit")
             return CatalogCapability(
                 feature_id=(
-                    "validation_values_limit"
-                    if "limit" in target
-                    else "validation_values_only"
+                    "validation_values_limit" if "limit" in target else "validation_values_only"
                 ),
                 nodes=frozenset(nodes),
                 requirements=frozenset({"scalar_literal", "unique_tiebreaker"}),
@@ -184,19 +224,13 @@ class ProductionGeneratorAdapter:
                 nodes.update(("subquery", "subquery_exists"))
             return CatalogCapability(
                 feature_id=(
-                    "validation_join_left_subquery"
-                    if composite
-                    else "validation_join_left"
+                    "validation_join_left_subquery" if composite else "validation_join_left"
                 ),
                 nodes=frozenset(nodes),
-                requirements=frozenset(
-                    {"table", "two_compatible_relations", "unique_tiebreaker"}
-                ),
+                requirements=frozenset({"table", "two_compatible_relations", "unique_tiebreaker"}),
                 evidence_ready=self._specs["join_outer_natural"].evidence_lock_ready,
                 evidence_ids=tuple(
-                    sorted(
-                        self._specs["join_outer_natural"].unverified_evidence_sources
-                    )
+                    sorted(self._specs["join_outer_natural"].unverified_evidence_sources)
                 ),
             )
         if "join" in target and "type_cast" in target:
@@ -238,9 +272,7 @@ class ProductionGeneratorAdapter:
                         "subquery_exists",
                     }
                 ),
-                requirements=frozenset(
-                    {"table", "two_compatible_relations", "unique_tiebreaker"}
-                ),
+                requirements=frozenset({"table", "two_compatible_relations", "unique_tiebreaker"}),
                 evidence_ready=evidence.evidence_lock_ready,
                 evidence_ids=tuple(sorted(evidence.unverified_evidence_sources)),
             )
@@ -248,20 +280,14 @@ class ProductionGeneratorAdapter:
             specs = (self._specs["set_intersect"], self._specs["set_except"])
             return CatalogCapability(
                 feature_id="validation_scalar_intersect_except",
-                nodes=frozenset(
-                    {"select", "order_by", "set_intersect", "set_except"}
-                ),
+                nodes=frozenset({"select", "order_by", "set_intersect", "set_except"}),
                 requirements=frozenset(
                     {"scalar_literal", "two_compatible_relations", "unique_tiebreaker"}
                 ),
                 evidence_ready=all(spec.evidence_lock_ready for spec in specs),
                 evidence_ids=tuple(
                     sorted(
-                        {
-                            source
-                            for spec in specs
-                            for source in spec.unverified_evidence_sources
-                        }
+                        {source for spec in specs for source in spec.unverified_evidence_sources}
                     )
                 ),
             )
@@ -279,8 +305,51 @@ class ProductionGeneratorAdapter:
                 ),
                 nodes=frozenset(nodes),
                 requirements=frozenset(
-                    ({"scalar_literal"} if scalar else {"table"})
-                    | {"unique_tiebreaker"}
+                    ({"scalar_literal"} if scalar else {"table"}) | {"unique_tiebreaker"}
+                ),
+                evidence_ready=evidence.evidence_lock_ready,
+                evidence_ids=tuple(sorted(evidence.unverified_evidence_sources)),
+            )
+        if "limit_zero" in target and "offset" in target:
+            evidence = self._specs["select_query_specification"]
+            scalar = "scalar_literal" in requirements
+            return CatalogCapability(
+                feature_id=(
+                    "validation_scalar_offset_limit_zero"
+                    if scalar
+                    else "validation_table_offset_limit_zero"
+                ),
+                nodes=frozenset({"select", "order_by", "limit", "limit_zero", "offset"}),
+                requirements=frozenset(
+                    ({"scalar_literal"} if scalar else {"table"}) | {"unique_tiebreaker"}
+                ),
+                evidence_ready=evidence.evidence_lock_ready,
+                evidence_ids=tuple(sorted(evidence.unverified_evidence_sources)),
+            )
+        if "limit_zero" in target:
+            evidence = self._specs["select_query_specification"]
+            scalar = "scalar_literal" in requirements
+            return CatalogCapability(
+                feature_id=(
+                    "validation_scalar_limit_zero" if scalar else "validation_table_limit_zero"
+                ),
+                nodes=frozenset({"select", "order_by", "limit", "limit_zero"}),
+                requirements=frozenset(
+                    ({"scalar_literal"} if scalar else {"table"}) | {"unique_tiebreaker"}
+                ),
+                evidence_ready=evidence.evidence_lock_ready,
+                evidence_ids=tuple(sorted(evidence.unverified_evidence_sources)),
+            )
+        if "offset" in target:
+            evidence = self._specs["select_query_specification"]
+            scalar = "scalar_literal" in requirements
+            return CatalogCapability(
+                feature_id=(
+                    "validation_scalar_offset_limit" if scalar else "validation_table_offset_limit"
+                ),
+                nodes=frozenset({"select", "order_by", "limit", "offset"}),
+                requirements=frozenset(
+                    ({"scalar_literal"} if scalar else {"table"}) | {"unique_tiebreaker"}
                 ),
                 evidence_ready=evidence.evidence_lock_ready,
                 evidence_ids=tuple(sorted(evidence.unverified_evidence_sources)),
@@ -299,9 +368,7 @@ class ProductionGeneratorAdapter:
                         "function_expression",
                     }
                 ),
-                requirements=frozenset(
-                    {"scalar_literal", "grouping_legal", "unique_tiebreaker"}
-                ),
+                requirements=frozenset({"scalar_literal", "grouping_legal", "unique_tiebreaker"}),
                 evidence_ready=evidence.evidence_lock_ready,
                 evidence_ids=tuple(sorted(evidence.unverified_evidence_sources)),
             )
@@ -341,9 +408,7 @@ class ProductionGeneratorAdapter:
                 evidence_ready=evidence.evidence_lock_ready,
                 evidence_ids=tuple(sorted(evidence.unverified_evidence_sources)),
             )
-        candidates = [
-            self.capability_for_feature(spec.feature_id) for spec in self._specs.values()
-        ]
+        candidates = [self.capability_for_feature(spec.feature_id) for spec in self._specs.values()]
         return max(
             candidates,
             key=lambda capability: (
@@ -365,6 +430,17 @@ class ProductionGeneratorAdapter:
             "validation_join_left_subquery": "join_outer_natural",
             "validation_values_only": "set_table_values",
             "validation_values_limit": "set_table_values",
+            "validation_table_only": "table_explicit",
+            "validation_table_values_union_all": "table_values_union",
+            "validation_table_values_union_distinct": "table_values_union",
+            "validation_table_subquery": "table_subquery_exists",
+            "validation_scalar_limit_zero": "select_query_specification",
+            "validation_table_limit_zero": "select_query_specification",
+            "validation_scalar_offset_limit_zero": "select_query_specification",
+            "validation_table_offset_limit_zero": "select_query_specification",
+            "validation_scalar_offset_limit": "select_query_specification",
+            "validation_table_offset_limit": "select_query_specification",
+            "validation_derived_explicit_columns": "derived_explicit_columns",
             "validation_join_cast": "join_inner_cross_straight",
             "validation_join_inner_subquery": "join_inner_cross_straight",
             "validation_scalar_intersect_except": "set_intersect",
@@ -395,6 +471,28 @@ class ProductionGeneratorAdapter:
                 if feature_id == "validation_values_only"
                 else "values_limit"
                 if feature_id == "validation_values_limit"
+                else "table_only"
+                if feature_id == "validation_table_only"
+                else "table_values_union"
+                if feature_id == "validation_table_values_union_all"
+                else "table_values_union_distinct"
+                if feature_id == "validation_table_values_union_distinct"
+                else "table_subquery"
+                if feature_id == "validation_table_subquery"
+                else "limit_zero"
+                if feature_id == "validation_scalar_limit_zero"
+                else "table_limit_zero"
+                if feature_id == "validation_table_limit_zero"
+                else "limit_zero_offset"
+                if feature_id == "validation_scalar_offset_limit_zero"
+                else "table_limit_zero_offset"
+                if feature_id == "validation_table_offset_limit_zero"
+                else "scalar_offset_limit"
+                if feature_id == "validation_scalar_offset_limit"
+                else "table_offset_limit"
+                if feature_id == "validation_table_offset_limit"
+                else "explicit_columns"
+                if feature_id == "validation_derived_explicit_columns"
                 else "inner_cast"
                 if feature_id == "validation_join_cast"
                 else "inner_subquery"

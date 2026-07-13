@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
+from select_fuzz.generation import query_ast as ast_nodes
 from select_fuzz.generation.query_ast import (
     CaseExpression,
     CastExpression,
@@ -109,6 +110,18 @@ TABLE = TableRelation("items", "t")
         ),
         (lambda: JoinRelation(TABLE, TABLE, JoinKind.INNER), ValueError),
         (lambda: DerivedRelation(SELECT, "d", lateral=1), TypeError),
+        (lambda: DerivedRelation(SELECT, "d", columns=("Bad-Name",)), ValueError),
+        (lambda: DerivedRelation(SELECT, "d", columns=("renamed", "renamed")), ValueError),
+        (lambda: DerivedRelation(SELECT, "d", columns=("renamed", "extra")), ValueError),
+        (
+            lambda: DerivedRelation(
+                getattr(ast_nodes, "TableQuery")("items"),
+                "d",
+                columns=("renamed",),
+            ),
+            ValueError,
+        ),
+        (lambda: getattr(ast_nodes, "TableQuery")("Bad-Name"), ValueError),
         (lambda: SelectQuery(()), ValueError),
         (lambda: SelectQuery((Projection(NUMBER),), with_rollup=True), ValueError),
         (
@@ -157,12 +170,17 @@ def test_order_proofs_cover_cardinality_uniqueness_and_out_of_scope_paths() -> N
     )
 
 
+def test_derived_relation_accepts_an_exact_explicit_column_list() -> None:
+    relation = DerivedRelation(SELECT, "d", columns=["renamed"])  # type: ignore[arg-type]
+
+    assert relation.columns == ("renamed",)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "error"),
     [
         ({"recursive": 1}, TypeError),
         ({"recursive": True}, ValueError),
-        ({"limit": 0}, ValueError),
         ({"limit": True}, ValueError),
         ({"limit": 1}, ValueError),
     ],
@@ -172,6 +190,44 @@ def test_query_ast_rejects_invalid_global_contracts(
 ) -> None:
     with pytest.raises(error):
         QueryAst(SELECT, OrderBy((1,)), QueryScope(1), **kwargs)
+
+
+def test_query_ast_accepts_limit_zero_and_validates_offset_contract() -> None:
+    empty = QueryAst(SELECT, OrderBy((1,)), QueryScope(1), limit=0)
+    paged = QueryAst(
+        SELECT,
+        OrderBy((1,)),
+        QueryScope(1, frozenset({frozenset({1})})),
+        limit=1,
+        offset=0,
+    )
+
+    assert empty.limit == 0
+    assert paged.offset == 0
+    with pytest.raises(ValueError, match="OFFSET requires LIMIT"):
+        QueryAst(SELECT, OrderBy((1,)), QueryScope(1), offset=1)
+    with pytest.raises(ValueError, match="nonnegative"):
+        QueryAst(SELECT, OrderBy((1,)), QueryScope(1), limit=0, offset=-1)
+    with pytest.raises(TypeError, match="integer"):
+        QueryAst(SELECT, OrderBy((1,)), QueryScope(1), limit=0, offset=True)
+
+
+def test_query_ast_caps_limit_and_offset_at_mysql_unsigned_bigint() -> None:
+    maximum = 2**64 - 1
+    scope = QueryScope(1, max_rows=1)
+
+    assert QueryAst(SELECT, OrderBy((1,)), scope, limit=maximum).limit == maximum
+    assert QueryAst(
+        SELECT,
+        OrderBy((1,)),
+        scope,
+        limit=1,
+        offset=maximum,
+    ).offset == maximum
+    with pytest.raises(ValueError, match="unsigned BIGINT"):
+        QueryAst(SELECT, OrderBy((1,)), scope, limit=maximum + 1)
+    with pytest.raises(ValueError, match="unsigned BIGINT"):
+        QueryAst(SELECT, OrderBy((1,)), scope, limit=1, offset=maximum + 1)
 
 
 def test_query_ast_rejects_out_of_scope_and_nondeterministic_window_orders() -> None:

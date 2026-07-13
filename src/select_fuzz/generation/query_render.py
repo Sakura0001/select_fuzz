@@ -29,6 +29,7 @@ from select_fuzz.generation.query_ast import (
     Star,
     SubqueryExpression,
     SubqueryOperator,
+    TableQuery,
     TableRelation,
     UnaryExpression,
     UnaryOperator,
@@ -178,9 +179,14 @@ def render_relation(relation: Relation) -> str:
         return f"{quote_identifier(relation.name)} AS {quote_identifier(relation.alias)}"
     if isinstance(relation, DerivedRelation):
         lateral = "LATERAL " if relation.lateral else ""
+        columns = ""
+        if relation.columns:
+            columns = " (" + ", ".join(
+                quote_identifier(column) for column in relation.columns
+            ) + ")"
         return (
             f"{lateral}({render_query_body(relation.query)}) "
-            f"AS {quote_identifier(relation.alias)}"
+            f"AS {quote_identifier(relation.alias)}{columns}"
         )
     if isinstance(relation, JsonTableRelation):
         return (
@@ -228,6 +234,8 @@ def render_query_body(query: QueryBody) -> str:
                 for window in query.named_windows
             )
         return rendered
+    if isinstance(query, TableQuery):
+        return f"TABLE {quote_identifier(query.table)}"
     if isinstance(query, SetQuery):
         operator = query.operator.value + (" ALL" if query.all else "")
         return f" {operator} ".join(_render_set_branch(branch) for branch in query.branches)
@@ -269,6 +277,8 @@ def render_query_ast(query: QueryAst) -> str:
     rendered += " ORDER BY " + ", ".join(order)
     if query.limit is not None:
         rendered += f" LIMIT {query.limit}"
+        if query.offset is not None:
+            rendered += f" OFFSET {query.offset}"
     return rendered
 
 

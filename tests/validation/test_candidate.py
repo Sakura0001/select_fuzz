@@ -55,9 +55,7 @@ def test_signature_extracts_cte_window_set_json_and_requirements() -> None:
         "SELECT JSON_EXTRACT(doc, '$.a') FROM t UNION ALL SELECT doc FROM u ORDER BY 1"
     )
 
-    assert {"select", "cte", "window", "window_partition", "window_order"} <= set(
-        window.nodes
-    )
+    assert {"select", "cte", "window", "window_partition", "window_order"} <= set(window.nodes)
     assert {"table", "unique_tiebreaker"} <= set(window.requirements)
     assert {"set_union_all", "json_function", "order_by"} <= set(set_json.nodes)
 
@@ -76,8 +74,7 @@ def test_signature_extraction_reuses_candidate_safety_envelope() -> None:
             {"join", "join_left", "aggregate", "group_by", "rollup", "having", "limit"},
         ),
         (
-            "SELECT CAST(a AS DECIMAL(10,2)) FROM t WHERE EXISTS "
-            "(SELECT 1 FROM u WHERE u.id=t.id)",
+            "SELECT CAST(a AS DECIMAL(10,2)) FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.id=t.id)",
             {"type_cast", "subquery", "subquery_exists"},
         ),
         (
@@ -90,3 +87,127 @@ def test_signature_extraction_reuses_candidate_safety_envelope() -> None:
 def test_signature_covers_major_query_shape_families(sql: str, expected: set[str]) -> None:
     signature = SignatureExtractor("8.0.41").extract(sql)
     assert expected <= set(signature.nodes)
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("TABLE t ORDER BY 1", {"explicit_table", "order_by"}),
+        (
+            "TABLE t UNION VALUES ROW(1) ORDER BY 1",
+            {"explicit_table", "table_value_constructor", "set_union"},
+        ),
+        (
+            "SELECT 1 WHERE EXISTS (TABLE t) ORDER BY 1",
+            {"explicit_table", "subquery", "subquery_exists"},
+        ),
+    ],
+)
+def test_signature_extracts_explicit_table_query_blocks(sql: str, expected: set[str]) -> None:
+    signature = SignatureExtractor("8.0.41").extract(sql)
+    assert expected <= set(signature.nodes)
+    assert "table" in signature.requirements
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("SELECT 1 ORDER BY 1 LIMIT 0", {"limit", "limit_zero"}),
+        (
+            "SELECT id FROM t ORDER BY 1 LIMIT 2 OFFSET 1",
+            {"limit", "offset"},
+        ),
+    ],
+)
+def test_signature_extracts_limit_boundary_shapes(sql: str, expected: set[str]) -> None:
+    signature = SignatureExtractor("8.0.41").extract(sql)
+    assert expected <= set(signature.nodes)
+
+
+def test_signature_distinguishes_limit_zero_from_comma_offset_and_text() -> None:
+    comma_offset = SignatureExtractor("8.0.41").extract("SELECT id FROM t ORDER BY 1 LIMIT 0, 10")
+    text_literal = SignatureExtractor("8.0.41").extract("SELECT 'LIMIT 0' AS q1 ORDER BY 1")
+
+    assert {"limit", "offset"} <= set(comma_offset.nodes)
+    assert "limit_zero" not in comma_offset.nodes
+    assert "limit" not in text_literal.nodes
+    assert "limit_zero" not in text_literal.nodes
+
+
+def test_signature_marks_zero_row_count_in_both_offset_syntaxes() -> None:
+    comma = SignatureExtractor("8.0.41").extract("SELECT id FROM t ORDER BY 1 LIMIT 10, 0")
+    keyword = SignatureExtractor("8.0.41").extract("SELECT id FROM t ORDER BY 1 LIMIT 0 OFFSET 10")
+
+    assert {"limit", "limit_zero", "offset"} <= set(comma.nodes)
+    assert {"limit", "limit_zero", "offset"} <= set(keyword.nodes)
+
+
+def test_signature_preserves_real_optimizer_hint_but_not_quoted_hint_text() -> None:
+    real = SignatureExtractor("8.0.41").extract(
+        "SELECT /*+ INDEX(t ix_id_desc) */ id FROM t ORDER BY 1"
+    )
+    text = SignatureExtractor("8.0.41").extract(
+        "SELECT '/*+ INDEX(t ix_id_desc) */' AS q1 ORDER BY 1"
+    )
+
+    assert "optimizer_hint" in real.nodes
+    assert "optimizer_hint" not in text.nodes
+
+
+def test_signature_finds_explicit_table_on_the_right_of_union_all() -> None:
+    signature = SignatureExtractor("8.0.41").extract("SELECT 1 UNION ALL TABLE one_col ORDER BY 1")
+
+    assert {"set_union", "set_union_all", "explicit_table"} <= set(signature.nodes)
+    assert "table" in signature.requirements
+
+
+def test_signature_distinguishes_union_distinct_from_union_all() -> None:
+    distinct = SignatureExtractor("8.0.41").extract(
+        "TABLE one_col UNION DISTINCT VALUES ROW(1) ORDER BY 1"
+    )
+    all_rows = SignatureExtractor("8.0.41").extract(
+        "TABLE one_col UNION ALL VALUES ROW(1) ORDER BY 1"
+    )
+
+    assert "set_union_distinct" in distinct.nodes
+    assert "set_union_all" not in distinct.nodes
+    assert "set_union_all" in all_rows.nodes
+    assert "set_union_distinct" not in all_rows.nodes
+
+
+@pytest.mark.parametrize(
+    "operator",
+    [
+        "UNION DISTINCT",
+        "INTERSECT ALL",
+        "EXCEPT DISTINCT",
+    ],
+)
+def test_signature_finds_explicit_table_after_set_operator_modifiers(
+    operator: str,
+) -> None:
+    signature = SignatureExtractor("8.0.41").extract(
+        f"SELECT 1 {operator} TABLE one_col ORDER BY 1"
+    )
+
+    assert "explicit_table" in signature.nodes
+
+
+def test_signature_extracts_derived_table_explicit_column_list() -> None:
+    signature = SignatureExtractor("8.0.41").extract(
+        "SELECT d.x1 FROM (SELECT id FROM t) AS d (x1) ORDER BY 1"
+    )
+
+    assert {"derived_table", "derived_explicit_columns"} <= set(signature.nodes)
+    assert {"table", "unique_tiebreaker"} <= set(signature.requirements)
+
+
+@pytest.mark.parametrize("body", ["VALUES ROW(1)", "TABLE one_col"])
+def test_signature_extracts_explicit_columns_for_all_derived_body_kinds(
+    body: str,
+) -> None:
+    signature = SignatureExtractor("8.0.41").extract(
+        f"SELECT d.x1 FROM ({body}) AS d (x1) ORDER BY 1"
+    )
+
+    assert {"derived_table", "derived_explicit_columns"} <= set(signature.nodes)

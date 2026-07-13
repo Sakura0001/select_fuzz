@@ -6,7 +6,7 @@ import time
 import mysql.connector
 import pytest
 
-from select_fuzz.generation.query import QueryGenerator, QueryLane
+from select_fuzz.generation.query import QueryGenerator, QueryLane, TargetNotReachable
 from select_fuzz.generation.schema import SchemaGenerator, SchemaLimits, SchemaProfile
 from select_fuzz.generation.setup import SetupBundleBuilder
 from select_fuzz.performance.models import ScaleKnobs
@@ -184,20 +184,29 @@ def test_every_evidence_ready_query_variant_executes_on_three_exact_8041_sockets
     try:
         covered: set[str] = set()
         for ordinal, target in enumerate(targets):
-            seed = 8_041_000 + ordinal
-            schema = schema_generator.generate(
-                target,
-                seed=seed,
-                limits=SchemaLimits(max_tables=3, max_columns=7),
-            )
+            for attempt in range(32):
+                seed = 8_041_000 + ordinal * 32 + attempt
+                schema = schema_generator.generate(
+                    target,
+                    seed=seed,
+                    limits=SchemaLimits(max_tables=3, max_columns=7),
+                )
+                try:
+                    generated = query_generator.generate(
+                        schema,
+                        target=target,
+                        seed=seed + 2,
+                        lane=QueryLane.VALID,
+                        estimated_rows_by_table={
+                            table.name: 8 for table in schema.tables
+                        },
+                    )
+                except TargetNotReachable:
+                    continue
+                break
+            else:
+                pytest.fail(f"no reachable schema for {target.feature_id}")
             bundle = setup_builder.build(schema, seed=seed + 1, rows_per_table=8)
-            generated = query_generator.generate(
-                schema,
-                target=target,
-                seed=seed + 2,
-                lane=QueryLane.VALID,
-                estimated_rows_by_table={table.name: 8 for table in schema.tables},
-            )
             database = f"sf_all_shapes_{ordinal}_{time.time_ns():x}"[-64:]
             outcomes: list[tuple[tuple[object, ...], ...]] = []
             for connection in connections:
@@ -234,6 +243,17 @@ def test_online_gap_directed_variants_execute_on_three_exact_8041_sockets() -> N
         ("subquery_result_kinds", "scalar_limit"),
         ("subquery_result_kinds", "table_limit"),
         ("grouping_with_rollup", "scalar_rollup"),
+        ("table_explicit", "table_only"),
+        ("table_values_union", "table_values_union"),
+        ("table_values_union", "table_values_union_distinct"),
+        ("table_subquery_exists", "table_subquery"),
+        ("select_query_specification", "limit_zero"),
+        ("select_query_specification", "table_limit_zero"),
+        ("select_query_specification", "scalar_offset_limit"),
+        ("select_query_specification", "table_offset_limit"),
+        ("select_query_specification", "limit_zero_offset"),
+        ("select_query_specification", "table_limit_zero_offset"),
+        ("derived_explicit_columns", "explicit_columns"),
     )
     schema_generator = SchemaGenerator()
     setup_builder = SetupBundleBuilder()
@@ -278,6 +298,17 @@ def test_online_gap_directed_variants_execute_on_three_exact_8041_sockets() -> N
         assert "scalar_aggregate" in executed
         assert "left_subquery" in executed
         assert "inner_subquery" in executed
+        assert "table_only" in executed
+        assert "table_values_union" in executed
+        assert "table_values_union_distinct" in executed
+        assert "table_subquery" in executed
+        assert "limit_zero" in executed
+        assert "table_limit_zero" in executed
+        assert "scalar_offset_limit" in executed
+        assert "table_offset_limit" in executed
+        assert "limit_zero_offset" in executed
+        assert "table_limit_zero_offset" in executed
+        assert "explicit_columns" in executed
     finally:
         for connection in connections:
             connection.close()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+from select_fuzz.generation.query_safety import _masked_sql
 from select_fuzz.validation.candidate import CandidateExtractor
 from select_fuzz.validation.models import FeatureSignature
 
@@ -15,7 +16,11 @@ class SignatureExtractor:
 
     def extract(self, sql: str) -> FeatureSignature:
         candidate = self._safety.from_text(sql)
-        upper = re.sub(r"\s+", " ", candidate.sql.upper())
+        upper = re.sub(
+            r"\s+",
+            " ",
+            _masked_sql(candidate.sql, preserve_optimizer_hints=True).upper(),
+        )
         nodes: set[str] = {"select"}
         requirements: set[str] = set()
 
@@ -26,6 +31,7 @@ class SignatureExtractor:
             (r"\bPARTITION\s+BY\b", "window_partition"),
             (r"\bOVER\s*\([^)]*\bORDER\s+BY\b", "window_order"),
             (r"\bUNION\s+ALL\b", "set_union_all"),
+            (r"\bUNION(?:\s+DISTINCT)?\b(?!\s+ALL\b)", "set_union_distinct"),
             (r"\bUNION\b", "set_union"),
             (r"\bINTERSECT\s+ALL\b", "set_intersect_all"),
             (r"\bINTERSECT\b", "set_intersect"),
@@ -40,6 +46,11 @@ class SignatureExtractor:
             (r"\bHAVING\b", "having"),
             (r"\bORDER\s+BY\b", "order_by"),
             (r"\bLIMIT\b", "limit"),
+            (
+                r"(?:\bLIMIT\s+0+\b(?!\s*,)|\bLIMIT\s+\d+\s*,\s*0+\b)",
+                "limit_zero",
+            ),
+            (r"(?:\bOFFSET\s+\d+\b|\bLIMIT\s+\d+\s*,\s*\d+)", "offset"),
             (r"\bJSON_[A-Z0-9_]+\s*\(", "json_function"),
             (r"\bJSON_OBJECT\s*\(", "json_object"),
             (r"\bJSON_EXTRACT\s*\(", "json_extract"),
@@ -57,11 +68,24 @@ class SignatureExtractor:
                 "function_expression",
             ),
             (r"^\s*VALUES\b", "table_value_constructor"),
-            (r"\bFROM\s*\(\s*SELECT\b", "derived_table"),
+            (r"\bFROM\s*\(\s*(?:SELECT|VALUES|TABLE)\b", "derived_table"),
             (r"/\*\+", "optimizer_hint"),
             (r"\bPARTITION\s*\(", "partition_selection"),
             (r"\bMATCH\s*\([^)]*\)\s+AGAINST\s*\(", "fulltext_predicate"),
             (r"\bST_[A-Z0-9_]+\s*\(", "spatial_function"),
+            (
+                r"(?:^|\(|\b(?:UNION|INTERSECT|EXCEPT)"
+                r"(?:\s+(?:ALL|DISTINCT))?\s+)\s*TABLE\s+",
+                "explicit_table",
+            ),
+            (r"\bVALUES\s+ROW\s*\(", "table_value_constructor"),
+            (r"\(\s*(?:TABLE|VALUES)\b", "subquery"),
+            (r"\bIN\s*\(\s*TABLE\b", "subquery_in_table"),
+            (
+                r"\bFROM\s*\(\s*(?:SELECT|VALUES|TABLE)\b.*\)\s+(?:AS\s+)?"
+                r"(?:0|[A-Z_][A-Z0-9_]*)\s*\(\s*(?:0|[A-Z_][A-Z0-9_]*)",
+                "derived_explicit_columns",
+            ),
         )
         for pattern, node in patterns:
             if re.search(pattern, upper):
@@ -69,7 +93,7 @@ class SignatureExtractor:
         if "cte" in nodes or "cte_recursive" in nodes:
             nodes.discard("subquery")
 
-        if re.search(r"\bFROM\s+[`A-Z_]", upper):
+        if re.search(r"\bFROM\s+(?:0|[A-Z_])", upper) or "explicit_table" in nodes:
             requirements.add("table")
         else:
             requirements.add("scalar_literal")

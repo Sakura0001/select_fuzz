@@ -160,6 +160,7 @@ ALLOWED_AST_NODES = frozenset(
         "common_table_expression",
         "derived_table",
         "explicit_partition",
+        "explicit_table",
         "frame_clause",
         "function_expression",
         "grouping_clause",
@@ -292,6 +293,7 @@ REVIEWED_VARIANT_IDS = frozenset(
         "case_simple",
         "cte_nonrecursive",
         "cte_recursive",
+        "derived_explicit_columns",
         "derived_regular",
         "function_aggregate",
         "function_deterministic_scalar",
@@ -339,6 +341,9 @@ REVIEWED_VARIANT_IDS = frozenset(
         "set_intersect",
         "set_table_values",
         "set_union",
+        "table_explicit",
+        "table_subquery_exists",
+        "table_values_union",
         "subquery_quantified",
         "subquery_result_kinds",
         "type_numeric_boundaries",
@@ -348,7 +353,7 @@ REVIEWED_VARIANT_IDS = frozenset(
         "window_inline_named",
     }
 )
-REVIEWED_CATALOG_SHA256 = "1abacd3401cd95554bc2ef1c362ccd32e0a4c3e9a5263727f4ef0bb9084c53d7"
+REVIEWED_CATALOG_SHA256 = "09eef310d18f83e9da45a504fcd35533427486cbc04b6d32b030ce06bee56748"
 
 SQL_KEYWORDS = frozenset(
     {

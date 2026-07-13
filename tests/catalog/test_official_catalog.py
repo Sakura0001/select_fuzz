@@ -23,9 +23,7 @@ from select_fuzz.generation.catalog_schema import (
 )
 
 
-CATALOG_PATH = (
-    Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.41-query-shapes.yaml"
-)
+CATALOG_PATH = Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.41-query-shapes.yaml"
 
 
 def _catalog() -> Mapping[str, object]:
@@ -58,29 +56,28 @@ def test_catalog_v2_contract_locks_the_reviewed_manifest_exactly() -> None:
     assert {source["source_id"] for source in sources} == REVIEWED_SOURCE_IDS
     assert {feature["feature_id"] for feature in features} == REVIEWED_FEATURE_IDS
     assert {
-        variant["variant_id"]
-        for feature in features
-        for variant in _variants(feature)
+        variant["variant_id"] for feature in features for variant in _variants(feature)
     } == REVIEWED_VARIANT_IDS
     assert len(REVIEWED_SOURCE_IDS) == 23
     assert len(REVIEWED_FEATURE_IDS) == 19
-    assert len(REVIEWED_VARIANT_IDS) == 58
+    assert len(REVIEWED_VARIANT_IDS) == 62
     assert {feature["category"] for feature in features} == ALLOWED_CATEGORIES
     assert canonical_catalog_sha256(catalog) == REVIEWED_CATALOG_SHA256
 
 
 def test_source_hash_scope_and_refresh_state_are_explicit() -> None:
     sources = _sources(_catalog())
-    verified = {
-        source["source_id"] for source in sources if source["lock_state"] == "verified"
-    }
+    verified = {source["source_id"] for source in sources if source["lock_state"] == "verified"}
 
-    assert verified == {"grammar_8041", "parse_tree_8041", "release_8041"}
+    assert verified == {
+        "grammar_8041",
+        "parse_tree_8041",
+        "release_8019",
+        "release_8041",
+    }
     for source in sources:
         expected_scope = (
-            "response_bytes"
-            if source["kind"] == "exact_source"
-            else "docs_body_text_v1"
+            "response_bytes" if source["kind"] == "exact_source" else "docs_body_text_v1"
         )
         assert source["hash_scope"] == expected_scope
         if source["lock_state"] == "verified":
@@ -187,9 +184,7 @@ def test_reviewed_catalog_digest_rejects_shape_valid_semantic_edits() -> None:
 
 def test_regex_locator_must_not_match_empty_text() -> None:
     catalog = _mutated_catalog()
-    release = next(
-        source for source in _sources(catalog) if source["source_id"] == "release_8001"
-    )
+    release = next(source for source in _sources(catalog) if source["source_id"] == "release_8001")
     release["locators"]["common_table_expressions"]["pattern"] = ".*"
 
     with pytest.raises(CatalogError, match="must not match empty text"):
@@ -198,9 +193,7 @@ def test_regex_locator_must_not_match_empty_text() -> None:
 
 def test_every_evidence_locator_has_one_machine_verifiable_manifest() -> None:
     catalog = _catalog()
-    source_locators = {
-        source["source_id"]: source["locators"] for source in _sources(catalog)
-    }
+    source_locators = {source["source_id"]: source["locators"] for source in _sources(catalog)}
     referenced: set[tuple[object, object]] = set()
 
     for feature in _features(catalog):
@@ -221,7 +214,7 @@ def test_every_evidence_locator_has_one_machine_verifiable_manifest() -> None:
     assert manifested == referenced
 
 
-def test_feature_catalog_round_trips_all_58_variant_rows() -> None:
+def test_feature_catalog_round_trips_all_62_variant_rows() -> None:
     document = _catalog()
     expected = []
     for feature in _features(document):
@@ -233,10 +226,7 @@ def test_feature_catalog_round_trips_all_58_variant_rows() -> None:
                     tuple(int(part) for part in variant["min_version"].split(".")),
                     frozenset(variant["profiles"]),
                     frozenset(variant["guards"]),
-                    tuple(
-                        (item["source_id"], item["locator"])
-                        for item in variant["evidence"]
-                    ),
+                    tuple((item["source_id"], item["locator"]) for item in variant["evidence"]),
                 )
             )
 
@@ -253,7 +243,7 @@ def test_feature_catalog_round_trips_all_58_variant_rows() -> None:
         for spec in loaded
     ]
 
-    assert len(actual) == 58
+    assert len(actual) == 62
     assert actual == expected
 
 
@@ -272,21 +262,18 @@ def test_feature_catalog_from_yaml_calls_the_production_validator(
 def test_loaded_catalog_is_distinct_from_generator_supported_registry() -> None:
     loaded = FeatureCatalog.from_yaml(CATALOG_PATH)
 
-    assert len(loaded) == 58
+    assert len(loaded) == 62
     assert loaded.signature_targets(version=(8, 0, 41)) == ()
-    assert len(loaded.catalogued_gaps(version=(8, 0, 41))) == 58
-    assert {
-        spec.capability_status for spec in loaded
-    } == {CapabilityStatus.CATALOGUED_GAP}
+    assert len(loaded.catalogued_gaps(version=(8, 0, 41))) == 62
+    assert {spec.capability_status for spec in loaded} == {CapabilityStatus.CATALOGUED_GAP}
 
     registered = FeatureCatalog.from_yaml(
         CATALOG_PATH,
         generator_supported_ids=frozenset({"select_query_specification"}),
     )
-    assert [
-        spec.feature_id
-        for spec in registered.signature_targets(version=(8, 0, 41))
-    ] == ["select_query_specification"]
+    assert [spec.feature_id for spec in registered.signature_targets(version=(8, 0, 41))] == [
+        "select_query_specification"
+    ]
     assert (
         registered.directed_target("select_query_specification").capability_status
         is CapabilityStatus.GENERATOR_SUPPORTED
@@ -304,9 +291,9 @@ def test_refresh_required_parent_or_variant_evidence_cannot_be_scheduled() -> No
     assert spec.capability_status is CapabilityStatus.GENERATOR_SUPPORTED
     assert not spec.evidence_lock_ready
     assert registered.signature_targets(version=(8, 0, 41)) == ()
-    assert [
-        gap.feature_id for gap in registered.evidence_lock_gaps(version=(8, 0, 41))
-    ] == ["cte_recursive"]
+    assert [gap.feature_id for gap in registered.evidence_lock_gaps(version=(8, 0, 41))] == [
+        "cte_recursive"
+    ]
 
 
 def test_generator_registry_rejects_an_unreviewed_variant() -> None:

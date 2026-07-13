@@ -60,6 +60,7 @@ sources:
       common_table_expr: {match_kind: literal, pattern: "common_table_expr:"}
       derived_table: {match_kind: literal, pattern: "derived_table:"}
       expr: {match_kind: literal, pattern: "expr:"}
+      explicit_table: {match_kind: literal, pattern: "explicit_table:"}
       flatten_equal_set_ops: {match_kind: literal, pattern: "flatten_equal_set_ops"}
       function_call_generic: {match_kind: literal, pattern: "function_call_generic:"}
       function_call_keyword: {match_kind: literal, pattern: "function_call_keyword:"}
@@ -184,8 +185,8 @@ sources:
     version: "8.0.19"
     url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-19.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
+    lock_state: verified
+    content_sha256: ace7b004cee0b437dcaed24c513e92178f1627c578c66a0f3f65d7cb021461d3
     checked_at: "2026-07-12"
     locators:
       explicit_table_values:
@@ -493,6 +494,14 @@ features:
         weight: 4
         evidence:
           - {source_id: grammar_8041, locator: derived_table}
+      - variant_id: derived_explicit_columns
+        min_version: "5.7.0"
+        ast_nodes: [derived_table, query_specification]
+        guards: [alias_required, arity_equal, bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: derived_table}
       - variant_id: lateral_correlated
         min_version: "8.0.14"
         ast_nodes: [lateral_derived_table, joined_table, subquery_expression]
@@ -579,6 +588,35 @@ features:
         weight: 2
         evidence:
           - {source_id: grammar_8041, locator: table_value_constructor}
+          - {source_id: release_8019, locator: explicit_table_values}
+      - variant_id: table_explicit
+        min_version: "8.0.19"
+        ast_nodes: [explicit_table]
+        guards: [bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: explicit_table}
+          - {source_id: release_8019, locator: explicit_table_values}
+      - variant_id: table_values_union
+        min_version: "8.0.19"
+        ast_nodes: [set_operation, explicit_table, table_value_constructor]
+        guards: [arity_equal, compatible_types, bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: explicit_table}
+          - {source_id: grammar_8041, locator: table_value_constructor}
+          - {source_id: release_8019, locator: explicit_table_values}
+      - variant_id: table_subquery_exists
+        min_version: "8.0.19"
+        ast_nodes: [query_specification, subquery_expression, explicit_table, predicate_expression]
+        guards: [bounded_cardinality, stable_ordering]
+        profiles: [regular_innodb]
+        weight: 2
+        evidence:
+          - {source_id: grammar_8041, locator: explicit_table}
+          - {source_id: grammar_8041, locator: subquery}
           - {source_id: release_8019, locator: explicit_table_values}
 
   - feature_id: grouping_rollup_family

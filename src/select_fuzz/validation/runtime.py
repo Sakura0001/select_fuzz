@@ -32,6 +32,7 @@ from select_fuzz.validation.models import (
     TelemetrySample,
 )
 from select_fuzz.validation.reachability import CapabilityAuditor
+from select_fuzz.validation.reaudit_worker import run_isolated_reaudit
 from select_fuzz.validation.regression_hook import ExternalRegressionHook
 from select_fuzz.validation.report import build_coverage_report, write_validation_report
 from select_fuzz.validation.signature import SignatureExtractor
@@ -95,6 +96,7 @@ class ProductionValidationHooks:
         self.auditor = CapabilityAuditor(extractor=self.signature_extractor)
         self._cached: dict[str, Path] = {}
         self._claimed_urls: dict[SourceCandidate, str] = {}
+        self._reaudit_timeout_s = regression_timeout_s
         self._regression = (
             None
             if not regression_commands
@@ -137,9 +139,7 @@ class ProductionValidationHooks:
         self.discovery.complete(queued_url)
         self._claimed_urls.pop(source, None)
 
-    def fail(
-        self, source: SourceCandidate, error: Exception, context: HookContext
-    ) -> None:
+    def fail(self, source: SourceCandidate, error: Exception, context: HookContext) -> None:
         queued_url = self._claimed_urls.get(source, source.url)
         self.discovery.retry(queued_url, error=type(error).__name__)
         self._claimed_urls.pop(source, None)
@@ -157,9 +157,7 @@ class ProductionValidationHooks:
         signatures = {self.signature_extractor.extract(item.sql) for item in candidates}
         return tuple(sorted(signatures, key=lambda item: item.key))
 
-    def audit(
-        self, signature: FeatureSignature, context: HookContext
-    ) -> ReachabilityResult:
+    def audit(self, signature: FeatureSignature, context: HookContext) -> ReachabilityResult:
         if not context.active():
             return ReachabilityResult(
                 signature.key, Reachability.GAP, ("validation deadline reached",)
@@ -180,16 +178,16 @@ class ProductionValidationHooks:
                 Reachability.GAP,
                 ("operator regression command is not configured",),
             )
-        return self._regression.run(
-            gap, allow_code_change=allow_code_change, context=context
-        )
+        return self._regression.run(gap, allow_code_change=allow_code_change, context=context)
 
     def _reaudit_gap(self, gap: GapRecord) -> ReachabilityResult:
-        self.adapter = ProductionGeneratorAdapter.reload_from_disk()
         signatures = {item.key: item for item in self.ledger.list_signatures()}
         signature = signatures[gap.signature_key]
-        capability = self.adapter.find_capability(signature)
-        return self.auditor.audit(signature, capability, generator=self.adapter, budget=32)
+        return run_isolated_reaudit(
+            signature,
+            budget=32,
+            timeout_s=self._reaudit_timeout_s,
+        )
 
 
 def _resource_sample(
@@ -201,9 +199,7 @@ def _resource_sample(
         open_fds = len(os.listdir("/dev/fd"))
     except OSError:
         open_fds = 0
-    return TelemetrySample(
-        run_id, epoch, elapsed, rss, active_count(), open_fds, mysql_connections
-    )
+    return TelemetrySample(run_id, epoch, elapsed, rss, active_count(), open_fds, mysql_connections)
 
 
 def run_production_validation(
@@ -216,9 +212,7 @@ def run_production_validation(
     mysql_connection_probe: Callable[[], int] | None = None,
 ) -> ProductionValidationResult:
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    ledger = ValidationLedger(
-        config.output_dir / "state.db", config.output_dir / "events.jsonl"
-    )
+    ledger = ValidationLedger(config.output_dir / "state.db", config.output_dir / "events.jsonl")
     discovery = PersistentSourceDiscovery(ledger, catalog_path=config.catalog_path)
     for url in config.seed_urls:
         ledger.enqueue_source(url, discovered_from="operator_seed")
@@ -283,9 +277,7 @@ def run_production_validation(
         started_fault = time.monotonic()
         command = fault_commands.get(event.kind.value)
         probe_command = fault_probes.get(event.kind.value)
-        _record_fault(
-            fault_path, event, event_id=event_id, status="started", recovery_s=0.0
-        )
+        _record_fault(fault_path, event, event_id=event_id, status="started", recovery_s=0.0)
         status = "not_configured"
         try:
             if fault_injector is not None:
@@ -321,9 +313,7 @@ def run_production_validation(
         except Exception:
             status = "injection_failed"
         recovery_s = time.monotonic() - started_fault
-        _record_fault(
-            fault_path, event, event_id=event_id, status=status, recovery_s=recovery_s
-        )
+        _record_fault(fault_path, event, event_id=event_id, status=status, recovery_s=recovery_s)
         persisted_faults[event_id] = status
         if status != "recovered":
             fault_failures.append(f"{event.kind.value}:{status}")

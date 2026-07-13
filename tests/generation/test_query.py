@@ -359,6 +359,193 @@ def test_values_limit_is_bounded_by_a_proven_ordinal_order() -> None:
     assert generated.ast.order_by.proves_total_order(generated.ast.scope)
 
 
+@pytest.mark.parametrize(
+    ("feature_id", "variant", "needles"),
+    [
+        ("table_explicit", "table_only", ("TABLE `t0` ORDER BY 1, 2, 3, 4, 5",)),
+        (
+            "table_values_union",
+            "table_values_union",
+            ("TABLE `t0` UNION ALL VALUES ROW(", "ORDER BY 1, 2, 3, 4, 5"),
+        ),
+        (
+            "table_subquery_exists",
+            "table_subquery",
+            ("EXISTS (TABLE `t0`)", "ORDER BY 1"),
+        ),
+    ],
+)
+def test_explicit_table_directed_variants_are_closed_bounded_queries(
+    feature_id: str, variant: str, needles: tuple[str, ...]
+) -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target(feature_id, SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant=variant,
+    )
+
+    assert all(needle in generated.sql for needle in needles)
+    assert generated.complexity.within(QueryBudget())
+    assert generated.complexity.estimated_output_rows <= 201
+    ReadOnlyValidator().validate_text(generated.sql)
+
+
+def test_normal_set_table_values_schedule_stays_with_its_catalog_signature() -> None:
+    target = _target("set_table_values", SchemaProfile.REGULAR_INNODB)
+    generated_sql = {
+        QueryGenerator()
+        .generate(
+            _regular_manifest(),
+            target=target,
+            seed=seed,
+            lane=QueryLane.VALID,
+        )
+        .sql
+        for seed in range(64)
+    }
+
+    assert generated_sql
+    assert all(sql.startswith("SELECT") and " UNION ALL VALUES " in sql for sql in generated_sql)
+
+
+@pytest.mark.parametrize(
+    ("feature_id", "needle"),
+    [
+        ("table_explicit", "TABLE `t0`"),
+        ("table_values_union", "TABLE `t0` UNION ALL VALUES ROW("),
+        ("table_subquery_exists", "EXISTS (TABLE `t0`)"),
+    ],
+)
+def test_normal_explicit_table_features_match_their_catalog_debt(
+    feature_id: str, needle: str
+) -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target(feature_id, SchemaProfile.REGULAR_INNODB),
+        seed=17,
+        lane=QueryLane.VALID,
+    )
+
+    assert needle in generated.sql
+    assert generated.target_feature_id == feature_id
+    assert feature_id in generated.feature_tags
+
+
+def test_derived_explicit_columns_is_an_independent_nonrandom_catalog_target() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("derived_explicit_columns", SchemaProfile.REGULAR_INNODB),
+        seed=17,
+        lane=QueryLane.VALID,
+    )
+
+    assert "derived_explicit_columns" in generated.feature_tags
+    assert " AS `d` (`dq1`" in generated.sql
+
+
+def test_explicit_table_projection_over_budget_is_unreachable_before_render() -> None:
+    columns = (ColumnDef("id", "BIGINT UNSIGNED", False),) + tuple(
+        ColumnDef(f"c{ordinal}", "INT", True) for ordinal in range(1, 13)
+    )
+    manifest = SchemaManifest(
+        profile=SchemaProfile.REGULAR_INNODB,
+        target_feature_id="table_explicit",
+        seed=7,
+        tables=(TableDef("t0", False, columns, (_primary(),)),),
+    )
+
+    with pytest.raises(TargetNotReachable, match="projection budget"):
+        QueryGenerator().generate(
+            manifest,
+            target=_target("table_explicit", SchemaProfile.REGULAR_INNODB),
+            seed=0,
+            lane=QueryLane.VALID,
+        )
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    [
+        ("limit_zero", "SELECT 1 AS `q1` ORDER BY 1 LIMIT 0"),
+        ("offset_limit", "LIMIT 1 OFFSET 1"),
+        ("limit_zero_offset", "SELECT 1 AS `q1` ORDER BY 1 LIMIT 0 OFFSET 1"),
+        (
+            "table_limit_zero_offset",
+            "COUNT(*) AS `row_count` FROM `t0` AS `t` ORDER BY 1 LIMIT 0 OFFSET 1",
+        ),
+    ],
+)
+def test_limit_boundary_directed_variants_are_bounded_and_deterministic(
+    variant: str, expected: str
+) -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("select_query_specification", SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant=variant,
+        estimated_rows_by_table={"t0": 8, "t1": 8},
+    )
+
+    assert expected in generated.sql
+    assert generated.complexity.estimated_output_rows <= 1
+    assert generated.ast.order_by.proves_total_order(generated.ast.scope)
+    ReadOnlyValidator().validate_text(generated.sql)
+
+
+def test_offset_directed_variant_keeps_table_domain_without_a_unique_key() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(unique=False),
+        target=_target("select_query_specification", SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant="offset_limit",
+    )
+
+    assert generated.sql == (
+        "SELECT COUNT(*) AS `row_count` FROM `t0` AS `t` ORDER BY 1 LIMIT 1 OFFSET 1"
+    )
+    assert generated.complexity.estimated_output_rows == 0
+    assert generated.ast.order_by.proves_total_order(generated.ast.scope)
+
+
+def test_derived_explicit_columns_directed_variant_renames_the_outer_scope() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("derived_regular", SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant="explicit_columns",
+    )
+
+    assert "AS `d` (`dq1`, `dq2`)" in generated.sql
+    assert generated.sql.startswith("SELECT `d`.`dq1` AS `q1`, `d`.`dq2` AS `q2`")
+    assert "derived_explicit_columns" in generated.feature_tags
+    assert generated.ast.order_by.proves_total_order(generated.ast.scope)
+    assert generated.complexity.within(QueryBudget())
+    ReadOnlyValidator().validate_text(generated.sql)
+
+
+def test_normal_derived_schedule_reaches_implicit_and_explicit_column_lists() -> None:
+    target = _target("derived_regular", SchemaProfile.REGULAR_INNODB)
+    generated_sql = {
+        QueryGenerator()
+        .generate(
+            _regular_manifest(),
+            target=target,
+            seed=seed,
+            lane=QueryLane.VALID,
+        )
+        .sql
+        for seed in range(32)
+    }
+
+    assert any("AS `d` (`dq1`, `dq2`)" in sql for sql in generated_sql)
+    assert any("AS `d` (`dq1`, `dq2`)" not in sql for sql in generated_sql)
+
+
 def test_join_cast_variant_uses_a_real_typed_projection() -> None:
     generated = QueryGenerator().generate(
         _regular_manifest(),
@@ -576,13 +763,8 @@ def test_all_catalog_variants_have_a_registered_renderer() -> None:
 
     registered = QueryGenerator.feature_catalog()
     assert {spec.feature_id for spec in registered} == catalog_ids
-    assert {
-        spec.feature_id
-        for spec in registered.signature_targets(version=(8, 0, 41))
-    } == {
-        spec.feature_id
-        for spec in registered
-        if spec.evidence_lock_ready
+    assert {spec.feature_id for spec in registered.signature_targets(version=(8, 0, 41))} == {
+        spec.feature_id for spec in registered if spec.evidence_lock_ready
     }
 
 
@@ -665,6 +847,52 @@ def test_adjustable_queries_per_round_follow_coverage_debt(tmp_path: Path) -> No
     assert len(batch) == 5
     assert {query.target_feature_id for query in batch} == {"case_searched"}
     assert [query.case_ordinal for query in batch] == [0, 1, 2, 3, 4]
+
+
+def test_batch_planner_skips_a_schema_incompatible_debt_target() -> None:
+    unreachable = _target(
+        "regression_8041_desc_pk_index_merge",
+        SchemaProfile.REGULAR_INNODB,
+    )
+    reachable = _target(
+        "select_query_specification",
+        SchemaProfile.REGULAR_INNODB,
+    )
+
+    class _SequenceScheduler:
+        plan_start_ordinal = 0
+        planned_case_count = 2
+
+        def choose(self, *, case_ordinal: int) -> FeatureSpec:
+            return (unreachable, reachable)[case_ordinal]
+
+    original = _regular_manifest(tables=1).tables[0]
+    manifest = SchemaManifest(
+        SchemaProfile.REGULAR_INNODB,
+        "case_simple",
+        1,
+        (
+            TableDef(
+                original.name,
+                original.temporary,
+                original.columns,
+                (_primary(),),
+            ),
+        ),
+    )
+
+    batch = QueryBatchPlanner(QueryGenerator()).plan(
+        manifest,
+        scheduler=_SequenceScheduler(),  # type: ignore[arg-type]
+        run_seed=100,
+        start_case_ordinal=0,
+        queries_per_round=1,
+        lane=QueryLane.VALID,
+    )
+
+    assert len(batch) == 1
+    assert batch[0].target_feature_id == "select_query_specification"
+    assert batch[0].case_ordinal == 0
 
 
 def test_hard_intermediate_row_budget_rejects_cross_product() -> None:

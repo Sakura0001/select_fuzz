@@ -148,9 +148,19 @@ _CTE_WITH_COLUMNS = re.compile(
     r"\)\s+AS\s*\(",
     re.IGNORECASE,
 )
+_DERIVED_WITH_COLUMNS = re.compile(
+    r"`[a-z][a-z0-9_]*`\s*\(\s*"
+    r"`[a-z][a-z0-9_]*`\s*(?:,\s*`[a-z][a-z0-9_]*`\s*)*\)",
+    re.IGNORECASE,
+)
+_DERIVED_ALIAS_PREFIX = re.compile(r"\)\s+(?:AS\s+)?$", re.IGNORECASE)
+_UNQUOTED_DERIVED_WITH_COLUMNS = re.compile(
+    r"\)\s+(?:AS\s+)?([A-Z_][A-Z0-9_]*)\s*\(\s*"
+    r"[A-Z_][A-Z0-9_]*\s*(?:,\s*[A-Z_][A-Z0-9_]*\s*)*\)"
+)
 
 
-def _masked_sql(sql: str) -> str:
+def _masked_sql(sql: str, *, preserve_optimizer_hints: bool = False) -> str:
     """Replace quoted/comment payload with spaces while preserving token offsets."""
 
     masked = list(sql)
@@ -187,11 +197,14 @@ def _masked_sql(sql: str) -> str:
         if sql.startswith("/*", index):
             if sql.startswith("/*!", index):
                 raise UnsafeQuery("executable version comments are forbidden")
+            is_optimizer_hint = preserve_optimizer_hints and sql.startswith("/*+", index)
             end = sql.find("*/", index + 2)
             if end < 0:
                 raise UnsafeQuery("unterminated block comment")
             for offset in range(index, end + 2):
                 masked[offset] = " "
+            if is_optimizer_hint:
+                masked[index : index + 3] = "/*+"
             index = end + 2
             continue
         if char == "#" or (
@@ -219,7 +232,12 @@ class ReadOnlyValidator:
         if not sql.strip():
             raise UnsafeQuery("query must not be empty")
         for quoted_call in _QUOTED_CALL.finditer(sql):
-            if _CTE_WITH_COLUMNS.match(sql, quoted_call.start()) is None:
+            is_cte_columns = _CTE_WITH_COLUMNS.match(sql, quoted_call.start()) is not None
+            is_derived_columns = (
+                _DERIVED_WITH_COLUMNS.match(sql, quoted_call.start()) is not None
+                and _DERIVED_ALIAS_PREFIX.search(sql[: quoted_call.start()]) is not None
+            )
+            if not is_cte_columns and not is_derived_columns:
                 raise UnsafeQuery("quoted stored functions are forbidden")
         masked = _masked_sql(sql)
         semicolons = [index for index, char in enumerate(masked) if char == ";"]
@@ -242,6 +260,9 @@ class ReadOnlyValidator:
         if re.search(r"\b[A-Z_][A-Z0-9_]*\s*\.\s*[A-Z_][A-Z0-9_]*\s*\(", upper):
             raise UnsafeQuery("schema-qualified stored functions are forbidden")
         call_tokens = set(re.findall(r"\b([A-Z_][A-Z0-9_]*)\s*\(", upper))
+        call_tokens.difference_update(
+            match.group(1) for match in _UNQUOTED_DERIVED_WITH_COLUMNS.finditer(upper)
+        )
         unknown_calls = sorted(call_tokens - _ALLOWED_CALL_TOKENS)
         if unknown_calls:
             raise UnsafeQuery(f"function is outside the closed allowlist: {unknown_calls[0]}")

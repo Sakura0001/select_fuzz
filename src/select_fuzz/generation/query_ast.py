@@ -9,6 +9,7 @@ import re
 
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
+_UNSIGNED_BIGINT_MAX = 2**64 - 1
 
 
 def require_identifier(value: str, label: str = "identifier") -> None:
@@ -440,11 +441,23 @@ class DerivedRelation(Relation):
     query: QueryBody
     alias: str
     lateral: bool = False
+    columns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         require_identifier(self.alias, "derived table alias")
         if not isinstance(self.lateral, bool):
             raise TypeError("lateral must be a boolean")
+        object.__setattr__(self, "columns", tuple(self.columns))
+        for column in self.columns:
+            require_identifier(column, "derived table column")
+        if len({column.casefold() for column in self.columns}) != len(self.columns):
+            raise ValueError("derived table columns must be unique")
+        if self.columns:
+            arity = _known_query_arity(self.query)
+            if arity is None:
+                raise ValueError("explicit derived columns require a known query arity")
+            if len(self.columns) != arity:
+                raise ValueError("derived table column count must match query arity")
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,6 +504,16 @@ class SelectQuery(QueryBody):
 
 
 @dataclass(frozen=True, slots=True)
+class TableQuery(QueryBody):
+    """MySQL 8.0.19+ explicit TABLE query block."""
+
+    table: str
+
+    def __post_init__(self) -> None:
+        require_identifier(self.table, "explicit table name")
+
+
+@dataclass(frozen=True, slots=True)
 class SetQuery(QueryBody):
     branches: tuple[QueryBody, ...]
     operator: SetOperator
@@ -520,6 +543,22 @@ class ValuesQuery(QueryBody):
 @dataclass(frozen=True, slots=True)
 class ParenthesizedQuery(QueryBody):
     body: QueryBody
+
+
+def _known_query_arity(query: QueryBody) -> int | None:
+    """Return an arity only when the closed AST proves it without schema lookup."""
+
+    if isinstance(query, SelectQuery):
+        return len(query.projection)
+    if isinstance(query, ValuesQuery):
+        return len(query.rows[0])
+    if isinstance(query, ParenthesizedQuery):
+        return _known_query_arity(query.body)
+    if isinstance(query, SetQuery):
+        arities = {_known_query_arity(branch) for branch in query.branches}
+        if len(arities) == 1:
+            return next(iter(arities))
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -599,6 +638,7 @@ class QueryAst:
     recursive: bool = False
     limit: int | None = None
     window_orders: tuple[WindowOrder, ...] = ()
+    offset: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ctes", tuple(self.ctes))
@@ -610,10 +650,25 @@ class QueryAst:
         if self.limit is not None and (
             not isinstance(self.limit, int)
             or isinstance(self.limit, bool)
-            or self.limit <= 0
+            or self.limit < 0
         ):
-            raise ValueError("LIMIT must be a positive integer")
-        if self.limit is not None and not self.order_by.proves_total_order(self.scope):
+            raise ValueError("LIMIT must be a nonnegative integer")
+        if self.limit is not None and self.limit > _UNSIGNED_BIGINT_MAX:
+            raise ValueError("LIMIT must fit an unsigned BIGINT")
+        if self.offset is not None:
+            if not isinstance(self.offset, int) or isinstance(self.offset, bool):
+                raise TypeError("OFFSET must be an integer")
+            if self.offset < 0:
+                raise ValueError("OFFSET must be nonnegative")
+            if self.offset > _UNSIGNED_BIGINT_MAX:
+                raise ValueError("OFFSET must fit an unsigned BIGINT")
+            if self.limit is None:
+                raise ValueError("OFFSET requires LIMIT")
+        if (
+            self.limit is not None
+            and self.limit > 0
+            and not self.order_by.proves_total_order(self.scope)
+        ):
             raise ValueError("LIMIT requires a proven total order")
         if any(value > self.scope.projection_count for value in self.order_by.ordinals):
             raise ValueError("ORDER BY ordinal exceeds projection")
@@ -672,6 +727,7 @@ __all__ = [
     "Star",
     "SubqueryExpression",
     "SubqueryOperator",
+    "TableQuery",
     "TableRelation",
     "UnaryExpression",
     "UnaryOperator",

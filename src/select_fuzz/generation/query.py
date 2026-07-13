@@ -340,10 +340,12 @@ class QueryGenerator:
             shape = "top_n"
         else:
             shape = rng.choice(
-                ("simple", "parenthesized", "case", "function", "grouping")
+                ("simple", "scalar_literal", "parenthesized", "case", "function", "grouping")
             )
             if shape == "simple":
                 built = self._simple(manifest, rows, top_n=False, free_random=True)
+            elif shape == "scalar_literal":
+                built = self._scalar_literal()
             elif shape == "parenthesized":
                 built = self._parenthesized(manifest, rows)
             elif shape == "case":
@@ -427,6 +429,8 @@ class QueryGenerator:
         if require_top_n and feature_id != "select_query_specification":
             raise TargetNotReachable("directed top-N is a SELECT query-specification shape")
         if feature_id == "select_query_specification":
+            if directed_variant == "scalar_literal":
+                return self._scalar_literal()
             return self._simple(manifest, rows, top_n=require_top_n, free_random=free_random)
         if feature_id == "select_parenthesized":
             return self._parenthesized(manifest, rows)
@@ -680,6 +684,32 @@ class QueryGenerator:
             scanned,
             intermediate,
             output,
+        )
+
+    def _scalar_literal(self) -> _BuiltQuery:
+        body = SelectQuery(
+            (Projection(Literal(1, SqlType.NUMERIC), alias="q1"),),
+        )
+        ast = self._ast(
+            body,
+            projection_count=1,
+            max_rows=1,
+            unique_sets=frozenset({frozenset({1})}),
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=0,
+                depth=1,
+                ctes=0,
+                branches=1,
+                projection=1,
+                predicates=0,
+                scanned=0,
+                intermediate=1,
+                output=1,
+            ),
+            frozenset({"scalar_literal"}),
         )
 
     def _simple(

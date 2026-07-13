@@ -230,8 +230,8 @@ class ReadOnlyValidator:
         masked = masked[: semicolons[0]] if semicolons else masked
         upper = masked.upper()
         words = re.findall(r"[A-Z_][A-Z0-9_]*", upper)
-        if not words or words[0] not in {"SELECT", "WITH"}:
-            raise UnsafeQuery("only SELECT or WITH ... SELECT is allowed")
+        if not words or words[0] not in {"SELECT", "WITH", "TABLE", "VALUES"}:
+            raise UnsafeQuery("only read-only query expressions are allowed")
         if words[0] == "WITH" and "SELECT" not in words:
             raise UnsafeQuery("WITH query must contain SELECT")
         forbidden = _FORBIDDEN_STATEMENT_WORDS & set(words)

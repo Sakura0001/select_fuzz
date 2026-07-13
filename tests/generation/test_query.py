@@ -272,6 +272,21 @@ def test_top_n_uses_a_proven_total_order_even_without_a_schema_unique_key() -> N
     assert generated.complexity.estimated_output_rows <= 1
 
 
+def test_directed_scalar_literal_is_a_bounded_tableless_select() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(tables=1),
+        target=_target("select_query_specification", SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant="scalar_literal",
+    )
+
+    assert generated.sql == "SELECT 1 AS `q1` ORDER BY 1"
+    assert generated.complexity.tables == 0
+    assert generated.complexity.estimated_output_rows == 1
+    assert "scalar_literal" in generated.feature_tags
+
+
 @pytest.mark.parametrize(
     ("feature_id", "needle"),
     [

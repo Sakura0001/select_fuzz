@@ -82,6 +82,94 @@ def test_discovered_relation_and_ordering_requirements_match_real_catalog(
 
 
 @pytest.mark.parametrize(
+    ("sql", "expected_status"),
+    [
+        ("SELECT COUNT(*)", Reachability.SUPPORTED),
+        ("SELECT t.id FROM t LEFT JOIN u ON t.id = u.id", Reachability.SUPPORTED),
+        (
+            "SELECT t.id FROM t LEFT JOIN u ON t.id = u.id "
+            "WHERE EXISTS (SELECT 1 FROM u)",
+            Reachability.SUPPORTED,
+        ),
+        ("VALUES ROW(1)", Reachability.BLOCKED_EVIDENCE),
+        (
+            "SELECT * FROM JSON_TABLE('[1]', '$[*]' "
+            "COLUMNS(value INT PATH '$')) AS jt",
+            Reachability.BLOCKED_EVIDENCE,
+        ),
+    ],
+)
+def test_actionable_discovered_shapes_have_real_dynamic_witnesses(
+    sql: str, expected_status: Reachability
+) -> None:
+    adapter = ProductionGeneratorAdapter()
+    signature = SignatureExtractor("8.0.41").extract(sql)
+    capability = adapter.find_capability(signature)
+
+    result = CapabilityAuditor().audit(
+        signature,
+        capability,
+        generator=adapter,
+        budget=3,
+    )
+
+    assert result.status is expected_status, (
+        signature.nodes,
+        signature.requirements,
+        capability.feature_id,
+        result.reasons,
+    )
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected_status"),
+    [
+        ("VALUES ROW(1) LIMIT 1", Reachability.BLOCKED_EVIDENCE),
+        (
+            "SELECT CAST(t.id AS SIGNED) FROM t INNER JOIN u ON t.id = u.id",
+            Reachability.SUPPORTED,
+        ),
+        (
+            "SELECT 1 INTERSECT SELECT 1 EXCEPT SELECT 2",
+            Reachability.BLOCKED_EVIDENCE,
+        ),
+        ("SELECT * FROM (SELECT id FROM t) AS d", Reachability.SUPPORTED),
+        (
+            "SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u) ORDER BY 1 LIMIT 1",
+            Reachability.SUPPORTED,
+        ),
+        ("SELECT (SELECT 1) LIMIT 1", Reachability.SUPPORTED),
+        ("SELECT 1 GROUP BY 1 WITH ROLLUP", Reachability.SUPPORTED),
+        (
+            "SELECT t.id FROM t INNER JOIN u ON t.id = u.id "
+            "WHERE EXISTS (SELECT 1 FROM u)",
+            Reachability.SUPPORTED,
+        ),
+    ],
+)
+def test_discovered_composite_shapes_use_real_directed_variants(
+    sql: str, expected_status: Reachability
+) -> None:
+    adapter = ProductionGeneratorAdapter()
+    signature = SignatureExtractor("8.0.41").extract(sql)
+    capability = adapter.find_capability(signature)
+
+    result = CapabilityAuditor().audit(
+        signature,
+        capability,
+        generator=adapter,
+        budget=3,
+    )
+
+    assert result.status is expected_status, (
+        signature.nodes,
+        signature.requirements,
+        capability.feature_id,
+        result.reasons,
+    )
+
+
+@pytest.mark.parametrize(
     "sql",
     [
         "SELECT id FROM t LIMIT 10",

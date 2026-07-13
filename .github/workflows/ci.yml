@@ -19,5 +19,33 @@ jobs:
           python-version: "3.11"
       - run: uv sync --locked --all-groups
       - run: uv run ruff check .
-      - run: uv run mypy src
-      - run: uv run pytest -q
+      - run: uv run mypy src scripts/validation_12h.py scripts/check_coverage.py
+      - run: uv run pytest -q --cov=select_fuzz --cov-branch --cov-report=term --cov-report=json:coverage.json
+      - run: uv run python scripts/check_coverage.py coverage.json --min-lines 90 --min-branches 85
+
+  frontend:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+          version: "0.11.8"
+          python-version: "3.11"
+      - run: uv sync --locked --all-groups
+        working-directory: ${{ github.workspace }}
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:coverage
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e

@@ -431,6 +431,8 @@ class QueryGenerator:
         if feature_id == "select_query_specification":
             if directed_variant == "scalar_literal":
                 return self._scalar_literal()
+            if directed_variant == "scalar_aggregate":
+                return self._scalar_aggregate()
             return self._simple(manifest, rows, top_n=require_top_n, free_random=free_random)
         if feature_id == "select_parenthesized":
             return self._parenthesized(manifest, rows)
@@ -439,6 +441,12 @@ class QueryGenerator:
         if feature_id == "join_outer_natural":
             return self._join(manifest, rows, rng, outer=True, directed=directed_variant)
         if feature_id in {"subquery_result_kinds", "regression_8041_subquery_materialization"}:
+            if directed_variant in {"table_limit", "scalar_limit"}:
+                return self._subquery_limit(
+                    manifest,
+                    rows,
+                    scalar=directed_variant == "scalar_limit",
+                )
             return self._subquery(
                 manifest,
                 rows,
@@ -457,6 +465,8 @@ class QueryGenerator:
         if feature_id == "cte_recursive":
             return self._cte(manifest, rows, recursive=True)
         if feature_id in {"set_union", "set_intersect", "set_except"}:
+            if directed_variant == "scalar_intersect_except":
+                return self._scalar_intersect_except()
             operation = {
                 "set_union": SetOperator.UNION,
                 "set_intersect": SetOperator.INTERSECT,
@@ -464,12 +474,18 @@ class QueryGenerator:
             }[feature_id]
             return self._set_operation(manifest, rows, operation, chain=False)
         if feature_id == "set_table_values":
+            if directed_variant == "values_only":
+                return self._values_only(limit=False)
+            if directed_variant == "values_limit":
+                return self._values_only(limit=True)
             return self._set_values(manifest, rows)
         if feature_id in {
             "grouping_aggregate_having",
             "grouping_with_rollup",
             "function_aggregate",
         }:
+            if directed_variant == "scalar_rollup":
+                return self._scalar_rollup()
             return self._grouping(
                 manifest,
                 rows,
@@ -712,6 +728,31 @@ class QueryGenerator:
             frozenset({"scalar_literal"}),
         )
 
+    def _scalar_aggregate(self) -> _BuiltQuery:
+        count = FunctionCall(FunctionName.COUNT, (Star(),), SqlType.NUMERIC)
+        body = SelectQuery((Projection(count, alias="row_count"),))
+        ast = self._ast(
+            body,
+            projection_count=1,
+            max_rows=1,
+            unique_sets=frozenset({frozenset({1})}),
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=0,
+                depth=1,
+                ctes=0,
+                branches=1,
+                projection=1,
+                predicates=0,
+                scanned=0,
+                intermediate=1,
+                output=1,
+            ),
+            frozenset({"scalar_literal", "aggregate"}),
+        )
+
     def _simple(
         self,
         manifest: SchemaManifest,
@@ -810,9 +851,18 @@ class QueryGenerator:
                 "cross": JoinKind.CROSS,
                 "straight": JoinKind.STRAIGHT,
             }
-        if directed is not None and directed not in choices:
+        subquery = directed in {"left_subquery", "inner_subquery"}
+        cast_projection = directed == "inner_cast"
+        directed_kind = (
+            "left"
+            if directed == "left_subquery"
+            else "inner"
+            if directed in {"inner_subquery", "inner_cast"}
+            else directed
+        )
+        if directed_kind is not None and directed_kind not in choices:
             raise ValueError(f"unknown directed join variant: {directed}")
-        variant = directed or rng.choice(sorted(choices))
+        variant = directed_kind or rng.choice(sorted(choices))
         kind = choices[variant]
         equality = BinaryExpression(
             self._id(left, "t"),
@@ -827,10 +877,25 @@ class QueryGenerator:
             kind,
             None if natural or kind is JoinKind.CROSS else equality,
         )
-        predicate = equality if kind is JoinKind.CROSS else None
+        predicate: Expression | None = equality if kind is JoinKind.CROSS else None
+        if subquery:
+            correlated = SelectQuery(
+                (Projection(Literal(1, SqlType.NUMERIC), "one"),),
+                TableRelation(right.name, "v"),
+                BinaryExpression(
+                    self._id(right, "v"),
+                    BinaryOperator.EQ,
+                    self._id(left, "t"),
+                    SqlType.BOOLEAN,
+                ),
+            )
+            predicate = SubqueryExpression(SubqueryOperator.EXISTS, correlated)
+        right_projection: Expression = self._id(right, "u")
+        if cast_projection:
+            right_projection = CastExpression(right_projection, "SIGNED", SqlType.NUMERIC)
         projection = (
             Projection(self._id(left, "t"), "left_id"),
-            Projection(self._id(right, "u"), "right_id"),
+            Projection(right_projection, "right_id"),
         )
         product = rows[left.name] * rows[right.name]
         key_left = self._unique_key(left) == ("id",)
@@ -843,14 +908,12 @@ class QueryGenerator:
             else:
                 estimate = min(rows[left.name], rows[right.name])
         else:
-            preserved = (
-                rows[left.name]
-                if kind in {JoinKind.LEFT, JoinKind.NATURAL_LEFT}
-                else rows[right.name]
-                if kind in {JoinKind.RIGHT, JoinKind.NATURAL_RIGHT}
-                else 0
-            )
-            estimate = product + preserved
+            if kind in {JoinKind.LEFT, JoinKind.NATURAL_LEFT}:
+                estimate = rows[left.name] * max(1, rows[right.name])
+            elif kind in {JoinKind.RIGHT, JoinKind.NATURAL_RIGHT}:
+                estimate = rows[right.name] * max(1, rows[left.name])
+            else:
+                estimate = product
         # CROSS evaluates the full Cartesian intermediate even when WHERE bounds output.
         intermediate = product if kind is JoinKind.CROSS else estimate
         if key_left and key_right and kind in {JoinKind.RIGHT, JoinKind.NATURAL_RIGHT}:
@@ -866,18 +929,90 @@ class QueryGenerator:
             max_rows=estimate,
             unique_sets=unique_sets,
         )
+        correlated_work = rows[left.name] * rows[right.name] if subquery else 0
         complexity = self._complexity(
             tables=2,
-            depth=1,
+            depth=2 if subquery else 1,
             ctes=0,
             branches=1,
             projection=2,
-            predicates=1,
-            scanned=rows[left.name] + rows[right.name],
-            intermediate=intermediate,
+            predicates=2 if subquery else 1,
+            scanned=rows[left.name] + rows[right.name] + correlated_work,
+            intermediate=max(intermediate, correlated_work),
             output=estimate,
         )
-        return _BuiltQuery(ast, complexity, frozenset({f"join_{variant}"}))
+        tag = (
+            f"join_{directed}"
+            if directed in {"left_subquery", "inner_subquery", "inner_cast"}
+            else f"join_{variant}"
+        )
+        return _BuiltQuery(ast, complexity, frozenset({tag}))
+
+    def _subquery_limit(
+        self,
+        manifest: SchemaManifest,
+        rows: Mapping[str, int],
+        *,
+        scalar: bool,
+    ) -> _BuiltQuery:
+        inner = manifest.tables[1] if len(manifest.tables) > 1 else manifest.tables[0]
+        if scalar:
+            inner_query = SelectQuery((Projection(Literal(1, SqlType.NUMERIC), "one"),))
+            expression = SubqueryExpression(
+                SubqueryOperator.SCALAR,
+                inner_query,
+                sql_type=SqlType.NUMERIC,
+            )
+            body = SelectQuery((Projection(expression, "q1"),))
+            tables = 0
+            scanned = 0
+            intermediate = 1
+            tags = frozenset({"scalar_subquery", "top_n"})
+        else:
+            outer = manifest.tables[0]
+            inner_query = SelectQuery(
+                (Projection(Literal(1, SqlType.NUMERIC), "one"),),
+                TableRelation(inner.name, "u"),
+                BinaryExpression(
+                    self._id(inner, "u"),
+                    BinaryOperator.EQ,
+                    self._id(outer, "t"),
+                    SqlType.BOOLEAN,
+                ),
+            )
+            predicate = SubqueryExpression(SubqueryOperator.EXISTS, inner_query)
+            count = FunctionCall(FunctionName.COUNT, (Star(),), SqlType.NUMERIC)
+            body = SelectQuery(
+                (Projection(count, "row_count"),),
+                TableRelation(outer.name, "t"),
+                predicate,
+            )
+            tables = 2
+            scanned = rows[outer.name] + rows[outer.name] * rows[inner.name]
+            intermediate = rows[outer.name] * rows[inner.name]
+            tags = frozenset({"table_subquery", "top_n"})
+        ast = self._ast(
+            body,
+            projection_count=1,
+            max_rows=1,
+            unique_sets=frozenset({frozenset({1})}),
+            limit=1,
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=tables,
+                depth=2,
+                ctes=0,
+                branches=1,
+                projection=1,
+                predicates=0 if scalar else 1,
+                scanned=scanned,
+                intermediate=intermediate,
+                output=1,
+            ),
+            tags,
+        )
 
     def _subquery(
         self,
@@ -1203,9 +1338,15 @@ class QueryGenerator:
         select = SelectQuery(
             (Projection(self._id(table, "t"), "id"),), TableRelation(table.name, "t")
         )
-        values = ValuesQuery(((CastExpression(Literal(0, SqlType.NUMERIC), "UNSIGNED", SqlType.NUMERIC),),))
+        values = ValuesQuery(
+            ((CastExpression(Literal(0, SqlType.NUMERIC), "UNSIGNED", SqlType.NUMERIC),),)
+        )
         maximum = rows[table.name] + 1
-        ast = self._ast(SetQuery((select, values), SetOperator.UNION, True), projection_count=1, max_rows=maximum)
+        ast = self._ast(
+            SetQuery((select, values), SetOperator.UNION, True),
+            projection_count=1,
+            max_rows=maximum,
+        )
         complexity = self._complexity(
             tables=1,
             depth=1,
@@ -1218,6 +1359,86 @@ class QueryGenerator:
             output=maximum,
         )
         return _BuiltQuery(ast, complexity, frozenset({"table_value_constructor"}))
+
+    def _values_only(self, *, limit: bool) -> _BuiltQuery:
+        values = ValuesQuery(((Literal(0, SqlType.NUMERIC),),))
+        ast = self._ast(
+            values,
+            projection_count=1,
+            max_rows=1,
+            unique_sets=frozenset({frozenset({1})}),
+            limit=1 if limit else None,
+        )
+        complexity = self._complexity(
+            tables=0,
+            depth=1,
+            ctes=0,
+            branches=1,
+            projection=1,
+            predicates=0,
+            scanned=0,
+            intermediate=1,
+            output=1,
+        )
+        return _BuiltQuery(ast, complexity, frozenset({"table_value_constructor"}))
+
+    def _scalar_intersect_except(self) -> _BuiltQuery:
+        first = SelectQuery((Projection(Literal(1, SqlType.NUMERIC), "q1"),))
+        second = SelectQuery((Projection(Literal(1, SqlType.NUMERIC), "q1"),))
+        third = SelectQuery((Projection(Literal(2, SqlType.NUMERIC), "q1"),))
+        intersect = SetQuery((first, second), SetOperator.INTERSECT)
+        body = SetQuery((intersect, third), SetOperator.EXCEPT)
+        ast = self._ast(
+            body,
+            projection_count=1,
+            max_rows=1,
+            unique_sets=frozenset({frozenset({1})}),
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=0,
+                depth=2,
+                ctes=0,
+                branches=3,
+                projection=1,
+                predicates=0,
+                scanned=0,
+                intermediate=3,
+                output=1,
+            ),
+            frozenset({"set_intersect", "set_except", "scalar_literal"}),
+        )
+
+    def _scalar_rollup(self) -> _BuiltQuery:
+        group = Literal(1, SqlType.NUMERIC)
+        count = FunctionCall(FunctionName.COUNT, (Star(),), SqlType.NUMERIC)
+        body = SelectQuery(
+            (Projection(group, "group_key"), Projection(count, "row_count")),
+            grouping=(group,),
+            with_rollup=True,
+        )
+        ast = self._ast(
+            body,
+            projection_count=2,
+            max_rows=2,
+            unique_sets=frozenset({frozenset({1, 2})}),
+        )
+        return _BuiltQuery(
+            ast,
+            self._complexity(
+                tables=0,
+                depth=1,
+                ctes=0,
+                branches=1,
+                projection=2,
+                predicates=0,
+                scanned=0,
+                intermediate=2,
+                output=2,
+            ),
+            frozenset({"aggregate", "rollup", "scalar_literal"}),
+        )
 
     def _grouping(
         self,

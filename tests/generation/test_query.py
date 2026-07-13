@@ -287,6 +287,138 @@ def test_directed_scalar_literal_is_a_bounded_tableless_select() -> None:
     assert "scalar_literal" in generated.feature_tags
 
 
+def test_directed_scalar_aggregate_is_a_bounded_tableless_count() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(tables=1),
+        target=_target("select_query_specification", SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant="scalar_aggregate",
+    )
+
+    assert generated.sql == "SELECT COUNT(*) AS `row_count` ORDER BY 1"
+    assert generated.complexity.tables == 0
+    assert generated.complexity.estimated_output_rows == 1
+    assert generated.ast.order_by.proves_total_order(generated.ast.scope)
+
+
+@pytest.mark.parametrize(
+    ("variant", "needles"),
+    [
+        ("left", (" LEFT JOIN ",)),
+        ("left_subquery", (" LEFT JOIN ", "EXISTS (SELECT")),
+        ("inner_subquery", (" INNER JOIN ", "EXISTS (SELECT")),
+    ],
+)
+def test_directed_left_join_variants_are_bounded_and_deterministic(
+    variant: str, needles: tuple[str, ...]
+) -> None:
+    feature_id = (
+        "join_inner_cross_straight" if variant == "inner_subquery" else "join_outer_natural"
+    )
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target(feature_id, SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant=variant,
+    )
+
+    assert all(needle in generated.sql for needle in needles)
+    assert generated.complexity.within(QueryBudget())
+    assert generated.ast.order_by.proves_total_order(generated.ast.scope)
+    ReadOnlyValidator().validate_text(generated.sql)
+
+
+def test_set_table_values_is_a_real_tableless_values_query() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("set_table_values", SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant="values_only",
+    )
+
+    assert generated.sql == "VALUES ROW(0) ORDER BY 1"
+    assert generated.complexity.tables == 0
+    assert generated.complexity.estimated_output_rows == 1
+    assert generated.ast.order_by.proves_total_order(generated.ast.scope)
+
+
+def test_values_limit_is_bounded_by_a_proven_ordinal_order() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("set_table_values", SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant="values_limit",
+    )
+
+    assert generated.sql == "VALUES ROW(0) ORDER BY 1 LIMIT 1"
+    assert generated.ast.limit == 1
+    assert generated.ast.order_by.proves_total_order(generated.ast.scope)
+
+
+def test_join_cast_variant_uses_a_real_typed_projection() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("join_inner_cross_straight", SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant="inner_cast",
+    )
+
+    assert " INNER JOIN " in generated.sql
+    assert "CAST(" in generated.sql
+    assert generated.complexity.within(QueryBudget())
+    ReadOnlyValidator().validate_text(generated.sql)
+
+
+def test_scalar_intersect_except_is_a_real_nested_set_query() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("set_intersect", SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant="scalar_intersect_except",
+    )
+
+    assert " INTERSECT " in generated.sql
+    assert " EXCEPT " in generated.sql
+    assert generated.complexity.tables == 0
+    assert generated.complexity.within(QueryBudget())
+
+
+@pytest.mark.parametrize("variant", ["table_limit", "scalar_limit"])
+def test_subquery_limit_variants_have_a_proven_total_order(variant: str) -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("subquery_result_kinds", SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant=variant,
+    )
+
+    assert "(SELECT" in generated.sql
+    assert generated.ast.limit == 1
+    assert generated.ast.order_by.proves_total_order(generated.ast.scope)
+    assert generated.complexity.within(QueryBudget())
+
+
+def test_scalar_rollup_is_a_real_tableless_grouping_query() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("grouping_with_rollup", SchemaProfile.REGULAR_INNODB),
+        seed=2,
+        lane=QueryLane.VALID,
+        directed_variant="scalar_rollup",
+    )
+
+    assert " GROUP BY 1 WITH ROLLUP" in generated.sql
+    assert generated.complexity.tables == 0
+    assert generated.complexity.within(QueryBudget())
+
+
 @pytest.mark.parametrize(
     ("feature_id", "needle"),
     [

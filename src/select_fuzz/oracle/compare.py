@@ -112,6 +112,8 @@ def _has_perfect_matching(
     right_vectors: list[FloatVector],
     tolerances: tuple[FloatTolerance, ...],
     budget: _FuzzyComparisonBudget,
+    *,
+    graph_budget_reserved: bool = False,
 ) -> bool:
     if len(left_vectors) != len(right_vectors):
         return False
@@ -128,7 +130,8 @@ def _has_perfect_matching(
         ):
             return True
     scalar_comparisons = len(left) * len(right) * max(1, len(tolerances))
-    budget.consume(scalar_comparisons)
+    if not graph_budget_reserved:
+        budget.consume(scalar_comparisons)
     adjacency = [
         array(
             "I",
@@ -233,9 +236,55 @@ def _result_sets_equal(
         raise
     if left_groups.keys() != right_groups.keys():
         return False, "rows", "non-floating typed row groups differ"
+
+    # Reserve every graph-shaped comparison before building the first graph.
+    # Without this preflight, a later group can exhaust the shared budget only
+    # after an earlier O(n²) adjacency matrix has already been materialized.
+    # The ordered fast path is checked here so large near-equal result sets do
+    # not get rejected merely because their theoretical graph would be large.
+    graph_budget = 0
+    dimensions = max(1, len(tolerances))
+    for key in sorted(left_groups, key=repr):
+        left_vectors = left_groups[key]
+        right_vectors = right_groups[key]
+        if len(left_vectors) != len(right_vectors):
+            continue
+        left_sorted = sorted(left_vectors, key=_vector_sort_key)
+        right_sorted = sorted(right_vectors, key=_vector_sort_key)
+        if Counter(left_sorted) == Counter(right_sorted):
+            continue
+        left_unique = tuple(Counter(left_sorted))
+        right_unique = tuple(Counter(right_sorted))
+        if len(left_unique) * len(right_unique) <= 4_096:
+            if any(
+                not any(
+                    _vectors_close(left_vector, right_vector, tolerances)
+                    for right_vector in right_unique
+                )
+                for left_vector in left_unique
+            ) or any(
+                not any(
+                    _vectors_close(left_vector, right_vector, tolerances)
+                    for left_vector in left_unique
+                )
+                for right_vector in right_unique
+            ):
+                return False, "rows", "typed multiset has no tolerance-valid perfect matching"
+        if len(left_sorted) >= ORDERED_FAST_PATH_MIN_ROWS and all(
+            _vectors_close(left_vector, right_vector, tolerances)
+            for left_vector, right_vector in zip(left_sorted, right_sorted, strict=True)
+        ):
+            continue
+        graph_budget += len(left_sorted) * len(right_sorted) * dimensions
+    budget.consume(graph_budget)
+
     for key in sorted(left_groups, key=repr):
         if not _has_perfect_matching(
-            left_groups[key], right_groups[key], tolerances, budget
+            left_groups[key],
+            right_groups[key],
+            tolerances,
+            budget,
+            graph_budget_reserved=True,
         ):
             return False, "rows", "typed multiset has no tolerance-valid perfect matching"
     return True, "rows", "typed unordered multisets match"

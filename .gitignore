@@ -9,6 +9,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 .coverage.*
+/coverage.json
 htmlcov/
 .venv/
 .uv-cache/

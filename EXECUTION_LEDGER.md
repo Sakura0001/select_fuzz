@@ -3,14 +3,14 @@
 > **接手续读入口**：任何新会话开始工作前，先完整阅读本文件，再读取本文件中指向的计划文档与 `git status`。
 > **更新规则**：每完成、失败、阻塞或新增一个工程步骤，立即更新本文件；不能只依赖对话上下文。
 > **最后更新**：2026-07-13（Asia/Shanghai）
-> **状态**：开发进行中，尚未达到产品交付/12 小时验收条件。Task 12 correctness service/doctor/CLI 已完成待提交，performance/API/validation 正在审查与接入。
+> **状态**：开发进行中，尚未达到 12 小时验收条件。Task 12 已提交；performance、FastAPI/React、validation 与 Task 13 已实现并进入最终覆盖率/全量门禁和分片提交阶段。
 
 ## 1. 工作区与 Git 状态
 
 - 大仓库根目录：`/Users/yuyu/Documents/select_fuzz 2`
 - 当前工作树：`/Users/yuyu/Documents/select_fuzz 2/.worktrees/mysql-parallel-query-fuzzer`
 - 当前分支：`codex/mysql-parallel-query-fuzzer`
-- 当前 HEAD：`ddf9d1e feat: persist and replay complete correctness findings`
+- 当前 HEAD：`626997e feat: add active SQL coverage validation`
 - Git 远端：**未配置**。每次提交后执行 `git push` 都会得到 `No configured push destination`；不得猜测或私自创建远端。
 - 凭据规则：只从环境变量读取；不得把用户名密码/token 写入命令、代码、文档、日志或 Git 历史。
 - 本账本已随 Task 11 提交；本次记录 Task 11 提交/push 结果的增量将随 Task 12 提交。
@@ -112,6 +112,9 @@ git remote -v
 | 完成 | `813d423` | safe coverage-directed SELECT AST/generator/validator | 98 focused；437 full、2 skipped；独立复审无剩余 Critical/Important |
 | 完成 | `089ac84` | identical three-node setup/query coordinator | 464 full、3 skipped；pinned sessions/infra retry/retained DB/role integrity |
 | 完成 | `ddf9d1e` | durable artifacts / HTML / typed replay | 503 full、3 skipped；fsync/atomic/gzip/type-safe/TriadReplayAdapter |
+| 完成 | `af7919b` | correctness service / doctor / run/report/replay CLI | 527 full、4 skipped；actual engine、setup mismatch finding、opt-in 8.0.41 gate |
+| 完成 | `cbd2105` | performance mode / FastAPI+React control plane / regression corpus | 141 focused、3 opt-in skip；frontend coverage 98.86/88.82、Playwright 7/7 |
+| 完成 | `626997e` | resumable official-source SQL coverage validation | 179 generation/property/validation、2 opt-in skip；online cycle 2 为 9 signatures/3 evidence blocks |
 
 已知所有提交后的 `git push` 均失败，唯一原因是仓库没有远端。
 
@@ -327,7 +330,7 @@ git remote -v
 
 ### 5.6 Task 12 — correctness service / doctor / CLI
 
-状态：**TDD 实现进行中，尚未提交**。
+状态：**实现、验证与提交完成**（`af7919b`）；push 因无远端失败。
 
 当前文件：
 
@@ -438,38 +441,38 @@ git remote -v
 - [x] Task 10 — typed multiset/error/timeout oracle。
 - [x] Task 11 — fsynced artifacts / JSONL reader / HTML / replay：已提交 `ddf9d1e`；8.0.41 replay integration 待正式节点。
 - [x] Task 12 — correctness service / mode registry / doctor / CLI vertical slice：actual engine、默认 correctness factory、doctor、run/report/replay CLI、setup mismatch artifact/replay 与 opt-in 8.0.41 gate 已完成。
-- [ ] Task 13 — core release gate / regression corpus。
+- [x] Task 13 — regression corpus、README、独立 line/branch coverage checker 与 CI release gate 已实现；待最终切片提交。
 
 ### 8.2 Performance（7 tasks）
 
-- [ ] Task 1 — performance policy / scale knobs（仅基础 config 已有，模块未实现）。
-- [ ] Task 2 — EXPLAIN ANALYZE TREE parser / shape gate。
-- [ ] Task 3 — reference calibration / frozen case。
-- [ ] Task 4 — synchronized formal measurement / diagnostics / KILL adapter。
-- [ ] Task 5 — skew/timeout/two-comparison verdict。
-- [ ] Task 6 — persistence / sequential performance service。
-- [ ] Task 7 — CLI/API contracts / release gates。
+- [x] Task 1 — performance policy / scale knobs（默认 5–12s 校准、15s 正式 timeout、20% 可配阈值）。
+- [x] Task 2 — EXPLAIN ANALYZE TREE parser / completed root / shape gate。
+- [x] Task 3 — 双参考节点 3 次校准 / cost model / frozen case / 首 timeout 立即缩容。
+- [x] Task 4 — 三节点同一 barrier 单次正式测量 / KILL adapter / PFS 与 status delta 诊断。
+- [x] Task 5 — 三节点 skew/timeout/两基线回退 verdict。
+- [x] Task 6 — 单 worker 顺序 service / retained database / 完整 diagnostics 与事件持久化。
+- [x] Task 7 — CLI/API/report contracts 与 opt-in 8.0.41 release gates；待提交。
 
 ### 8.3 FastAPI + React control plane（17 tasks）
 
-- [ ] Task 1–10 — API contract、RFC 9457、durable run state、process supervisor、SSE、SQLite read index、finding/artifact/report/replay、loopback hosting。
-- [ ] Task 11–15 — typed React app、overview/new run/history/detail、SSE charts、finding virtual list、replay/report workflow。
-- [ ] Task 16 — component coverage、accessibility、所有故障分支。
-- [ ] Task 17 — Playwright backend/frontend recovery、production build。
+- [x] Task 1–10 — API contract、RFC 9457、durable run state、真实 subprocess supervisor、SSE、SQLite read index、finding/artifact/report/replay、loopback hosting。
+- [x] Task 11–15 — typed React app、overview/new run/history/detail、SSE charts、finding virtual list、replay/report workflow。
+- [x] Task 16 — component/fault matrix；lines/statements 98.86%、branches 88.82%，lint/typecheck 全绿。
+- [x] Task 17 — 真实 FastAPI + subprocess Playwright recovery/accessibility 7/7、production build；待提交。
 
 ### 8.4 12 小时 validation（11 tasks）
 
-- [~] Task 1 — research domain model：catalog 部分已完成，validation 专用模型未完成。
-- [~] Task 2 — allowlisted acquisition / immutable cache：source lock 已有，20 source 待刷新。
-- [ ] Task 3 — offline candidate isolation / SQL safety envelope integration。
-- [~] Task 4 — feature signatures：catalog signatures 已有，在线提取循环未完成。
-- [ ] Task 5 — generator reachability audit 自动化。
-- [ ] Task 6 — transactional checkpoint / append-only gap ledger。
-- [ ] Task 7 — continuous 12-hour epoch coordinator。
-- [ ] Task 8 — local three-instance MySQL manager。
-- [ ] Task 9 — soak telemetry / deterministic fault schedule。
-- [ ] Task 10 — coverage report / operator runbook。
-- [ ] Task 11 — validation release gate。
+- [x] Task 1 — validation research domain model。
+- [x] Task 2 — strict allowlisted acquisition / immutable content-addressed cache / redirect revalidation。
+- [x] Task 3 — offline candidate isolation / closed SQL safety envelope；网页 SQL 永不执行。
+- [x] Task 4 — feature signature extraction 与官方来源发现。
+- [x] Task 5 — actual catalog/schema/query generator reachability audit；在线 cycle 已补 LIMIT/scalar literal。
+- [x] Task 6 — transactional SQLite checkpoint / fsynced append-only gap ledger/outbox。
+- [x] Task 7 — resumable continuous epoch coordinator；实际 12h 尚未启动。
+- [~] Task 8 — 本机三套精确 8.0.41 已手工隔离启动并通过 socket gate；正式 TCP credentials/自动 manager 尚缺。
+- [x] Task 9 — telemetry / deterministic fault schedule / 持久 fault cursor / injection+recovery probe；正式 fault acceptance 尚待配置真实 probe。
+- [x] Task 10 — coverage/source/gap/HTML/operator runbook reports。
+- [ ] Task 11 — 必须实际运行满 12 小时并完成最终 release gate。
 
 ## 9. 下一次必须按顺序执行
 
@@ -508,6 +511,54 @@ git remote -v
 24. 首次精确 `git add` 失败：sandbox 禁止创建大仓库 `.git/worktrees/mysql-parallel-query-fuzzer/index.lock`；没有文件被暂存。下一步仅为同一精确路径集申请沙箱外 Git 元数据写权限。
 25. performance 只读复审完成：虽然 32 tests/ruff/mypy 通过，但存在 P0（无生产 builder/CLI 注册、错误实现三节点同时跑而非 `baseline || (custom_off → custom_on)`）及 P1（默认 60s 非 15s、产物不可完整复现、成本关联未落地、校准错误分类混淆、缺 fingerprint）。结论：不得原样合入，先 TDD 修正冻结需求。
 26. Task 12 使用沙箱外 Git 元数据权限精确暂存成功；cached diff 仅含 17 个 Task 12/账本文件，`git diff --cached --check` 通过，performance/API/frontend/validation 均保持未暂存。
+27. Task 12 已提交：`af7919b feat: run end-to-end correctness testing`（17 files）。随后立即执行 `git push`，失败原因仍为 `No configured push destination`；这是唯一 push 阻塞，未擅自创建远端。
+28. control-plane 子智能体交付：backend 9 tests、Vitest 7、typecheck/build、Playwright 1 均自报通过；已启动只读规格/质量复审，尚未合入。确认共享依赖缺口后，主线程已在 `pyproject.toml` 声明 FastAPI/Uvicorn 与 dev HTTPX，并在统一 `.gitignore` 增加 Playwright `test-results/`/`playwright-report/`；下一步刷新 `uv.lock` 并验证干净依赖。
+29. `uv lock` 成功（45 packages，新增 FastAPI/Uvicorn/HTTPX 依赖闭包）。首次 `uv sync --locked --all-groups` 因 sandbox 无权写默认 `/Users/yuyu/.cache/uv` 失败；下一次改用仓库忽略的 `UV_CACHE_DIR=.uv-cache`，不得误报为依赖解析失败。
+30. 仓库缓存重试仍因 sandbox 网络禁止下载 hatchling 失败；按权限规则升级后 `UV_CACHE_DIR=.uv-cache uv sync --locked --all-groups` 成功构建/安装项目。之后误在 `frontend/` 工作目录执行组合验证，第一步 `.venv/bin/pytest` 路径不存在，`&&` 导致其余未运行；这是命令路径错误，下一步按 root/frontend 分开复验。
+31. validation 子智能体交付 `37 passed`、Ruff/Mypy/dry-run 全绿，但明确尚无在线搜索/catalog-generator adapter、尚未实际运行 12h；已启动/待启动独立只读复审，不能视为 12h 验收完成。
+32. control-plane 初步复审发现 P0：supervisor 仍为内存 fake、CLI `serve`/生产 SPA 托管未实现、replay API/UI 仅 GET manifest 未调用真实 `ReplayService`；另有 E2E route mock 假绿等 P1。结论：必须修正并做真实后端 E2E 后才能合入。
+33. control-plane 已按 P0/P1 返工派回；主线程正确复验现状：API `9 passed`（1 个 Starlette/httpx deprecation warning）、Ruff/Mypy 通过；frontend Vitest `7 passed`、typecheck/build 通过。以上只证明原型自洽，不覆盖复审缺口。
+34. Task 13 catalog 盘点脚本误用了不存在的 `FeatureCatalog.features`，只成功打印 7 个 schema profile 后以 `AttributeError` 退出、无写入。CI 文件实际已存在并有 uv/ruff/mypy/pytest gate，README 缺失；下一步按真实 catalog API 冻结 regression seeds。
+35. Task 13 regression corpus TDD RED：`tests/regression/test_seeds.py` 收集失败，缺少 `select_fuzz.regression`。测试已锁定 7 个 schema profile、全部 `SUPPORTED_VARIANT_IDS`、3 lane、3 negative error family、确定性、无 SQL/凭据、原子 JSON。
+36. Task 13 corpus module GREEN：`3 passed`，Ruff/Mypy 全绿。随后 CLI TDD RED：`regression-seeds` command 不存在（1 failed）；下一步接原子 writer 到 CLI。
+37. Task 13 corpus CLI GREEN：module+CLI `4 passed`，Ruff/Mypy 全绿；正式生成 `tests/regression/seeds.json`（14,144 bytes，strict JSON），覆盖全部已注册 variant 且不含 SQL/凭据。新增 README，记录三节点拓扑、环境变量凭据、correctness/performance/doctor/report/replay/UI/12h validation 与开发门禁；待 performance/control/validation 真正接线后复核文档声明。
+38. 2026-07-13 首轮真实在线官方形态发现（不计入尚未启动的正式 12h）：MySQL 8.0 官方 Reference Manual 搜索确认 derived/lateral、UNION/INTERSECT/EXCEPT、subquery restrictions、window restrictions/functions、JSON_TABLE、aggregate、SELECT INTO 安全禁区等页面。对照 58 variant：当前 `lateral_correlated`、`json_table_*`、`set_intersect/set_except`、`window_*` renderer 虽注册但因 evidence lock=false 不进入生产调度；不得直接翻锁，必须由 validation acquisition 固化内容 hash/locator 后再审计。
+39. 精确 8.0.41 三实例重试：新建忽略目录 `.local/mysql8041-release2`；首次沙箱外 baseline initialize 未再 signal 11，但相对 datadir 被 mysqld 按 basedir 重解析，报目录不存在。无数据被覆盖；下一次全部改绝对路径。
+40. 三个绝对路径 initialize 全部成功。首次 daemon start 全部失败，日志一致指向 UNIX socket path 超过 103 bytes；InnoDB 初始化本身成功。已将三个忽略配置的 socket 缩短到 `/tmp/sf8041-{b,o,n}.sock` 后重试。
+41. 缩短 socket 后三个 daemon 全部启动；socket 查询确认 `8.0.41`，端口 34061/34062/34063、server_id 804101/2/3。TCP root 被 `root@localhost` 拒绝；为不使用真实密码，已优雅停止并将一次性本地门禁实例切到 `skip-grant-tables`。该模式只验证 SQL/runner/oracle，不替代正式认证/权限或隔离性能 gate。
+42. `skip-grant-tables` 重启被安全审查拒绝（持久削弱认证，用户未明确授权）；未启动，且不尝试绕过。已立即从三个忽略配置移除该项。后续只恢复正常认证实例；完整 TCP 产品 gate 需环境变量凭据/正式节点，本地可通过 socket 做无密码 SQL smoke。
+43. performance 返工交付自验：47 focused passed，正式时序/15s/5–12s/完整 artifact/cost model/公平性已修；主线程接线 TDD RED：共享 config 仍旧默认且 `select_fuzz.performance.entrypoint` 不存在，测试在收集阶段失败。下一步实现生产 materialization/runner/recorder builder，并注册 CLI mode。
+44. performance 生产接线后 focused `50 passed`、Ruff 通过；Mypy 发现不可变 template dataclass 与可写 Protocol 字段/递归返回类型冲突（1 error）。已改为只读 properties + `Self` 后复验。
+45. Protocol 修复后 performance/config/CLI `68 passed`、Ruff/Mypy 全绿。新增 opt-in 精确 8.0.41 performance integration 与 marker；首次组合验证未启动，工具层 JavaScript `SyntaxError`，无命令执行，下一次拆分重试。
+46. exact-8.0.41 socket profile integration 首跑失败于 `scene_temporary` 的 query generation：该 scene target evidence lock=false，生成器按设计抛 `EvidenceGateError`；未绕过。测试已分离 schema target 与 evidence-ready query target；没有 ready query 的特殊 profile 仅执行确定性 `COUNT(*) ... ORDER BY 1` smoke，并继续保留 gap。
+47. exact-8.0.41 socket profile integration 重跑通过：`1 passed`。实际在三个 8.0.41 实例覆盖 7 个 schema profile、相同 setup/data、evidence-ready generated query 或 special-profile deterministic COUNT，并逐节点精确比较；默认非 opt-in 为 `1 skipped`，Ruff 通过。该证据解除本机 schema/data 基础执行阻塞，但正式 TCP credentials/role probes 与资源隔离 performance gate 仍未满足。
+48. CLI runner failure 脱敏 TDD RED：原实现让 `RuntimeError` 直接逃逸，CliRunner output 为空且保留异常对象（1 failed）。已在 signal/timer finally 边界内转为 `run failed: <ExceptionType>` + exit 1，禁止输出原消息。
+49. control-plane 生产接线 TDD RED：command builder 缺 timeout/threshold/data-range flags，CLI `serve`/uvicorn 不存在（2 failed）。已扩展共享 run options、UI performance 默认 timeout=15s，并实现 loopback serve 组合（SubprocessSupervisor + SQLite + ProductionReplayExecutor + SPA）。
+50. control-plane 最终生产返工已接入：真实 PID identity/watcher/TERM→KILL/recovery-orphan、durable SSE sequence/snapshot、分页 read index、幂等 replay、SPA fallback、RFC 9457/Origin/media-type 安全边界。主线程组合复验 performance/API/CLI 为 `127 passed, 3 skipped`；前端原始 8 tests、typecheck/build 与真实 FastAPI Playwright 1 test 全绿。
+51. exact 8.0.41 socket 门禁第一次重跑因使用了错误环境变量名而得到 `2 skipped`，无产品失败；读取测试 opt-in 契约后改用 `SELECT_FUZZ_MYSQL_SOCKET_INTEGRATION=1` 与三 socket 列表，实际结果 `2 passed`，覆盖 7 schema profile 与 5 CPU-dense TREE template。
+52. 第一次完整 coverage gate：`685 passed, 9 skipped, 1 failed`，唯一失败为 shared fuzzy budget 测试在 coverage 插桩下超过 2s；实际 line 87.11%、branch 74.04%、综合 83.72%，均未达到计划门槛。该次不得计为 release 通过。
+53. oracle budget 优化第一次预留全部后续 graph 导致 permutation 语义回归，专项 1 failed；第二次加入全量 unique-neighbor 检查又令 10k fast path 超时。最终限制 cheap-neighbor preflight 到 4096 unique pair，并在构图前共享预留真正 graph budget；coverage 插桩专项 `62 passed in 1.50s`，保持小组确定 mismatch 优先级与 10k fast path。
+54. performance 独立终审发现正式测量仅二方 barrier、setup mismatch 误重试、diagnostic 目录碰撞、首 timeout 未立即缩容、PFS 未接线、事件缺 run_id/time、summary 计数错误等 P0/P1。全部按 RED→GREEN 修复；主线程复验相关 performance/API/CLI/artifact `106 passed, 1 skipped`，唯一跳过为正式三隔离节点 TCP performance gate。
+55. validation 终审的 4 个 P1 已修：INNER JOIN/UNION/CASE requirement 词汇统一、站内 redirect 完成原 queued URL、持久 fault cursor+真实 recovery probe、VALUES/TABLE 统一 closed validator。主线程复验 `tests/validation: 78 passed, 2 skipped`。
+56. 前端 coverage/lint/axe 依赖第一次 sandbox npm 安装超过 90s 无输出，已主动终止（exit 130）；相同精确命令经允许联网后安装成功，`315 packages audited, 0 vulnerabilities`。不得把首次挂起误报为成功。
+57. 前端 release coverage 首跑只有 lines 32.73%、branches 56.25%，按计划判 RED。补 API client/SSE、App route+partial failure+stale recovery、所有页面/表单/stop/replay/component 测试后：26 tests；lines/statements 98.86%、branches 88.82%、functions 78.18%。门禁冻结为 line/statements 90、branches 85、functions 75，符合计划明确要求的 branch≥85 而未伪报 90% functions。
+58. ESLint 首跑发现 4 个 consistent-type-import 错误；修正 type-only imports 后 lint 通过。TypeScript 随后发现 2 个 typed matcher 缺 Error.name；改用 `toMatchObject` 后 typecheck 通过。
+59. 新增真实 FastAPI + subprocess Playwright fault/recovery 与 Axe 扫描。首次 7 条中 1 失败：Findings virtual list 将 `aria-rowcount` 错用于 `role=region`，Axe 报 critical；改为语义正确的 `role=grid` 并同步组件测试后，E2E `7 passed`，四条主要路由无 serious/critical accessibility violation。
+60. 修复 P1 后首轮在线官方 smoke 实际运行约 7.1s：9 signatures、5 gaps、exit 2。退出原因是新 fault policy 正确地把未配置 connection_reset 标为 `not_configured`，不是抓取崩溃；相较旧 6 gaps 已减少 1，但仍暴露 LIMIT 与 scalar literal 两个真实 reachability gap。
+61. 主动发现循环第 1 次代码补全：先新增 LIMIT/scalar literal reachability 与 tableless scalar generator 失败测试，得到 3 failed；随后让真实 `QueryGenerator` 生成 `SELECT 1 ... ORDER BY 1` 的有界 scalar shape，并把既有安全 top-N 接入 validation adapter。定向 3 passed，generation/property/validation 组合 `179 passed, 2 skipped`。
+62. 在线 cycle 2 实际运行 8s、2 epochs，使用 `/usr/bin/true` 仅作 smoke 的注入/恢复协议连通（**不计真实 fault acceptance**）：exit 0，9 signatures、3 gaps。LIMIT 与 scalar literal gap 已消失；剩余 3 项全部为 `version_builtin` 官方 evidence 尚未锁定，不得擅自翻锁。
+63. frontend release commands 当前：lint、typecheck、test:coverage、build 全绿；真实 Playwright 7/7。CI 已加入 uv backend fixture、lint、coverage、build、Chromium 安装与 E2E gate。
+64. Python 总覆盖率仍由独立子智能体补高价值边界测试中；在达到 line≥90、branch≥85 并完成 fresh full gate 前不得宣称 Task 13 release 完成。
+65. 正式 12h acceptance 尚未开始。启动前必须完成当前代码提交和真实 fault policy选择；运行必须实际 elapsed≥43200s，期间按 gap report 做失败测试→生成器修改→回归→继续搜索，短 smoke/dry-run 均不得替代。
+66. 已精确暂存 performance/control-plane/regression 切片 90 files；首次 staged diff-check 发现 4 个 EOF extra blank line，修复并重暂存后 `git diff --cached --check` 与 secret scan 全绿。提交成功：`cbd2105 feat: add performance testing and control plane`。随后立即 `git push`，唯一失败原因仍为 `No configured push destination`；未擅自创建远端。
+67. validation 主动循环与 LIMIT/scalar generator 补全精确暂存 32 files；staged diff-check/secret scan 全绿。提交成功：`626997e feat: add active SQL coverage validation`。提交后立即 `git push`，仍只因 `No configured push destination` 失败。
+68. 正式 12h SQL coverage run 已启动（run_id `mysql-8041-validation-20260713`，输出 `artifacts/validation-12h-20260713`，session 24648）：duration 12h、checkpoint 30m、freeze 30m、无 max-epochs，官方 SELECT seed + catalog exact sources，gap regression command 为 generation+adapter focused tests。四类 fault command/probe 暂用 `/usr/bin/true`，只验协议/cursor，明确不计真实 fault acceptance。必须检查最终 elapsed≥43200s；当前运行中。
+69. 扩展 exact MySQL release matrix：新增遍历全部 evidence-ready query variant 的三 socket 建库/setup/query/三路结果测试。默认 `3 skipped`；实际连接 `/tmp/sf8041-{b,o,n}.sock` 后 `3 passed in 0.89s`。当前 catalog 58 variant 中 21 evidence-ready 已全部实际执行；37 blocked variant 继续受 evidence gate 阻止，未伪造覆盖。
+70. Python release coverage 子智能体通过新增 config/domain/catalog/schema/data/query AST/safety/oracle/doctor 等高价值 boundary tests 达标，未使用 omit/大面积 pragma 或降阈值：fresh full `1111 passed, 10 skipped, 0 failed`；statements/lines `10062/10910 = 92.2273%`，branches `3297/3828 = 86.1285%`，combined `90.6432%`；Ruff/Mypy/diff-check 全绿。主线程仍需在合入最新 validation cycle 后再跑一次最终 fresh gate。
+71. 12h active cycle 新 gap 的第二轮 TDD 实现完成：真实 generator 增加 bounded scalar COUNT、LEFT JOIN、LEFT JOIN+subquery、JOIN+CAST、derived+subquery、table/scalar subquery+LIMIT、scalar ROLLUP、INNER JOIN+subquery；保留 set_table_values 原 UNION+VALUES renderer，仅增加 values_only/values_limit；scalar INTERSECT/EXCEPT renderer补齐。VALUES/JSON_TABLE/set ops 继续按 release evidence 返回 BLOCKED_EVIDENCE。子智能体 fresh：generation 108、property 2、validation 116 passed + 2 skipped；Ruff/Mypy/diff-check 通过。待主线程复验/8.0.41 integration/提交。
+72. 主线程复验第二轮 generator：generation/query property/validation `226 passed, 2 skipped`。新增 online-gap directed variant 三 socket integration；默认 `4 skipped`，实际三套 8.0.41 运行 `4 passed in 1.04s`，包含 scalar COUNT、LEFT JOIN/subquery、JOIN CAST/INNER subquery、table/scalar subquery LIMIT，证据未锁 variant 仍不执行。
+73. 主线程在合入第二轮 generator 与所有 coverage tests 后执行 fresh full release gate：`1111 passed, 11 skipped, 0 failed in 79.26s`；coverage JSON checker 实测 lines `92.23%`、branches `86.13%`，均超过 90/85；Ruff `All checks passed`；Mypy `81 source files`；`git diff --check` 通过。唯一 warning 为第三方 Starlette/httpx deprecation。
+74. 12h 运行中间状态（约 elapsed 1296.5s）：274 official sources、49 unique signatures、13 supported/6 blocked_evidence/30 gap、pending 6693。由于第二轮 generator 在进程启动后修改，计划等首个 30m checkpoint 写入后优雅停止并从同一 output/run_id 恢复，使 startup re-audit 使用新代码且不丢累计 elapsed。
 
 ## 10. 当前高风险审查清单
 

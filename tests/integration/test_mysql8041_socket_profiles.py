@@ -163,3 +163,121 @@ def test_every_cpu_dense_template_parses_on_three_exact_8041_sockets() -> None:
     finally:
         for connection in connections:
             connection.close()
+
+
+@pytest.mark.mysql
+@pytest.mark.timeout(1800)
+def test_every_evidence_ready_query_variant_executes_on_three_exact_8041_sockets() -> None:
+    sockets = _sockets()
+    query_generator = QueryGenerator()
+    targets = tuple(
+        target
+        for target in query_generator.feature_catalog()
+        if target.evidence_lock_ready
+    )
+    schema_generator = SchemaGenerator()
+    setup_builder = SetupBundleBuilder()
+    connections = [
+        mysql.connector.connect(unix_socket=socket, user="root", autocommit=True)
+        for socket in sockets
+    ]
+    try:
+        covered: set[str] = set()
+        for ordinal, target in enumerate(targets):
+            seed = 8_041_000 + ordinal
+            schema = schema_generator.generate(
+                target,
+                seed=seed,
+                limits=SchemaLimits(max_tables=3, max_columns=7),
+            )
+            bundle = setup_builder.build(schema, seed=seed + 1, rows_per_table=8)
+            generated = query_generator.generate(
+                schema,
+                target=target,
+                seed=seed + 2,
+                lane=QueryLane.VALID,
+                estimated_rows_by_table={table.name: 8 for table in schema.tables},
+            )
+            database = f"sf_all_shapes_{ordinal}_{time.time_ns():x}"[-64:]
+            outcomes: list[tuple[tuple[object, ...], ...]] = []
+            for connection in connections:
+                cursor = connection.cursor()
+                cursor.execute(f"CREATE DATABASE `{database}`")
+                cursor.execute(f"USE `{database}`")
+                for statement in bundle.statements:
+                    cursor.execute(statement)
+                cursor.execute(generated.sql)
+                outcomes.append(tuple(tuple(row) for row in cursor.fetchall()))
+                cursor.close()
+            assert outcomes[0] == outcomes[1] == outcomes[2], target.feature_id
+            covered.add(target.feature_id)
+        assert covered == {target.feature_id for target in targets}
+    finally:
+        for connection in connections:
+            connection.close()
+
+
+@pytest.mark.mysql
+@pytest.mark.timeout(900)
+def test_online_gap_directed_variants_execute_on_three_exact_8041_sockets() -> None:
+    sockets = _sockets()
+    query_generator = QueryGenerator()
+    targets = {
+        target.feature_id: target for target in query_generator.feature_catalog()
+    }
+    requested = (
+        ("select_query_specification", "scalar_aggregate"),
+        ("join_outer_natural", "left"),
+        ("join_outer_natural", "left_subquery"),
+        ("join_inner_cross_straight", "inner_cast"),
+        ("join_inner_cross_straight", "inner_subquery"),
+        ("subquery_result_kinds", "scalar_limit"),
+        ("subquery_result_kinds", "table_limit"),
+        ("grouping_with_rollup", "scalar_rollup"),
+    )
+    schema_generator = SchemaGenerator()
+    setup_builder = SetupBundleBuilder()
+    connections = [
+        mysql.connector.connect(unix_socket=socket, user="root", autocommit=True)
+        for socket in sockets
+    ]
+    try:
+        executed: set[str] = set()
+        for ordinal, (feature_id, directed_variant) in enumerate(requested):
+            target = targets[feature_id]
+            if not target.evidence_lock_ready:
+                continue
+            seed = 8_042_000 + ordinal
+            schema = schema_generator.generate(
+                target,
+                seed=seed,
+                limits=SchemaLimits(max_tables=3, max_columns=7),
+            )
+            bundle = setup_builder.build(schema, seed=seed + 1, rows_per_table=8)
+            generated = query_generator.generate(
+                schema,
+                target=target,
+                seed=seed + 2,
+                lane=QueryLane.VALID,
+                directed_variant=directed_variant,
+                estimated_rows_by_table={table.name: 8 for table in schema.tables},
+            )
+            database = f"sf_gap_shapes_{ordinal}_{time.time_ns():x}"[-64:]
+            outcomes: list[tuple[tuple[object, ...], ...]] = []
+            for connection in connections:
+                cursor = connection.cursor()
+                cursor.execute(f"CREATE DATABASE `{database}`")
+                cursor.execute(f"USE `{database}`")
+                for statement in bundle.statements:
+                    cursor.execute(statement)
+                cursor.execute(generated.sql)
+                outcomes.append(tuple(tuple(row) for row in cursor.fetchall()))
+                cursor.close()
+            assert outcomes[0] == outcomes[1] == outcomes[2], directed_variant
+            executed.add(directed_variant)
+        assert "scalar_aggregate" in executed
+        assert "left_subquery" in executed
+        assert "inner_subquery" in executed
+    finally:
+        for connection in connections:
+            connection.close()

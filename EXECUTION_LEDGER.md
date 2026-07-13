@@ -607,6 +607,7 @@ git remote -v
 118. 修复后终审继续发现一个 TABLE 子查询假阳性：裸 `(TABLE one_col)` 与标量 `SELECT (TABLE one_col)` 只有 generic `subquery`，仍被 adapter 路由到 `EXISTS(TABLE)` witness。主线程新增两个精确 RED，得到 `2 failed`；随后把 EXISTS capability 收紧为签名必须实际包含 `subquery_exists`，generic/IN TABLE 均 fail-closed 为 GAP。focused validation `80 passed`，最终 plain full suite 明确 exit 0：`1177 passed, 11 skipped, 1 warning in 43.14s`；Ruff、Mypy 81 source files、diff-check 全绿。该审查修正同样不计入人工官网研究累计时长。
 119. 修复后独立只读终审最终 PASS，未发现剩余 P0/P1。精确 probes 确认 TABLE 的 scalar/parenthesized/ANY/IN 子查询均为 GAP，只有真实 EXISTS(TABLE) 为 SUPPORTED；UNION ALL/DISTINCT witness 同构；scalar/table LIMIT 0+OFFSET 同域；derived SELECT-body 显式列名 SUPPORTED 而未实现的 VALUES/TABLE body 保持 GAP；fresh-process re-audit 不破坏父进程 Enum。审查方 focused validation/runtime `90 passed`，未修改文件。
 120. 终审最后一行修复后重新执行 fresh full coverage，明确取得 exit 0：`1177 passed, 11 skipped, 1 warning in 79.01s`；lines `10333/11225 = 92.05%`，branches `3403/3954 = 86.06%`。因此最终覆盖率证据对应当前代码而非条目 118 前的中间状态；唯一 warning 仍为第三方 Starlette/httpx deprecation。
+121. 本轮 SQL shape/typed AST/generator/validator/fresh-process re-audit 与完整证据已精确暂存 22 files；staged diff-check 和 secret scan 全绿。提交成功：`35893e6 feat: expand MySQL query shape coverage`。随后立即执行 `git push`，唯一阻塞仍为 `fatal: No configured push destination`；未擅自创建远端或写入认证信息。本条作为 push 失败的持久交接记录另行提交，12 小时主动研究仍未完成且 automation `12-sql` 必须继续。
 
 ## 10. 当前高风险审查清单
 

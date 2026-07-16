@@ -27,6 +27,7 @@ test-results/
 !.env.example
 /config/local.yaml
 /config/local-8041.yaml
+/config/*-smoke.yaml
 
 # Local runtime state
 /.local/

@@ -81,7 +81,9 @@ git diff --check
 
 - YAML 与 CLI override 优先级。
 - 环境变量 secret 引用；序列化、异常和日志中不可出现 secret。
-- 三节点角色、host、port 和可选 role probe。
+- 三组主备六端点的角色、host、port 和可选 role probe；六端点连通性。
+- 独立 replica parameter 文件的严格结构、typed `SET SESSION` 与摘要。
+- 版本不一致报告错误但不作为硬门禁。
 - 正确性与性能模式互斥。
 - 关键权限缺失拒绝启动；配置差异只警告。
 
@@ -111,12 +113,20 @@ git diff --check
 - 边界、均匀、Zipf、低基数、高/低 NULL、唯一、相关列和 FK 分布。
 - 整数、DECIMAL、FLOAT/DOUBLE、BIT、时间、字符、二进制、ENUM/SET、LOB、JSON 和空间值。
 - 普通 LOB 单值不超过默认 64 KiB。
-- 三节点加载使用同一数据文件与摘要。
+- 三台主机加载使用同一数据文件与摘要，备机 marker 在 10 秒内追平。
+- 每 worker 独立每 10 个逻辑查询触发 DML；1–3 条、12–50 行和 2:1:1 权重。
+- 三主 DML success/error/affected rows 对比、同错回滚、任一不一致终止 round。
+- correctness/replay/performance 主写备读，以及 performance 不触发周期 DML。
+- performance 单 worker，每轮只物化一次，多条不同查询共享同一 schema/数据库/行数，并在三备机并发执行 `EXPLAIN ANALYZE`。
+- `rounds/<database>.sql` 只有头部注释、SQL 单行、DML 前后空行且无未来 SQL。
 
 ### 5.5 查询 AST 与安全
 
 - 每个 query block 的作用域、alias、类型与 NULLability。
-- Join、子查询、派生表、LATERAL、CTE、递归 CTE、集合运算、聚合、ROLLUP、窗口、JSON_TABLE 和 hints。
+- Join、子查询、派生表、LATERAL、CTE、递归 CTE、集合运算、聚合、ROLLUP、窗口和 hints。
+- Catalog 仍保留 JSON_TABLE/FULLTEXT/SPATIAL 的定向 renderer 与独立集成见证；默认生产
+  correctness scope 明确排除这 13 个 target。当前精确范围以
+  `docs/testing/query-generation-coverage-checklist.md` 为准。
 - `LIMIT`、top-N 和窗口顺序必须存在唯一 tie-breaker。
 - 拒绝多语句、DML、锁定读、INTO、当前时间、随机、文件、锁、SLEEP/BENCHMARK、用户变量、存储函数和 UDF。
 - 自由随机和负向变异仍受 15 秒、10,000 行和 32 MiB 保护。
@@ -124,7 +134,7 @@ git diff --check
 运行：
 
 ```bash
-uv run pytest -q tests/unit tests/property \
+uv run pytest -q tests \
   --hypothesis-show-statistics \
   --cov=select_fuzz --cov-report=term-missing --cov-fail-under=90
 ```
@@ -145,7 +155,9 @@ uv run pytest -q tests/unit tests/property \
 
 ### 6.2 错误结果
 
-- 三路相同 errno、SQLSTATE 和规范化消息：通过。
+- VALID lane 三路相同错误：`GENERATOR_FINDING`，不得记 pass 或 coverage。
+- NEGATIVE lane 仅在三路 errno + SQLSTATE 精确匹配 expected error 时记契约命中；
+  任一路身份不同优先记 `RESULT_MISMATCH`。
 - 两路成功一路错误：`RESULT_MISMATCH`。
 - errno 相同但 SQLSTATE/规范化消息不同：`RESULT_MISMATCH`。
 - 消息只含连接 ID 或 host 差异：规范化后通过，同时保留原文。
@@ -168,9 +180,9 @@ uv run pytest -q tests/unit tests/property \
 | 分区表 | RANGE、LIST、HASH、KEY、RANGE/LIST COLUMNS、唯一键约束、partition pruning |
 | FK 图 | 1:1、1:N、N:M、复合 FK、NULL FK、未匹配 outer join |
 | 临时表 | 固定三路 session、遮蔽持久表、连接丢失后整轮重建 |
-| FULLTEXT | natural/boolean 受控谓词、配置指纹、分区互斥 |
-| SPATIAL | 合法 SRID 0 geometry、关系布尔谓词、SPATIAL 索引 |
-| JSON | 标量路径、JSON_TABLE、生成列/函数索引、多值索引 |
+| FULLTEXT（独立 opt-in） | natural/boolean 受控谓词、配置指纹、分区互斥；不进入默认生产 scope |
+| SPATIAL（独立 opt-in） | 合法 SRID 0 geometry、关系布尔谓词、SPATIAL 索引；不进入默认生产 scope |
+| JSON（独立 opt-in） | 标量路径、JSON_TABLE、生成列/函数索引、多值索引；不进入默认生产 scope |
 | 大值 | 分层 LOB/JSON、结果 32 MiB 边界、max_allowed_packet 安全上限 |
 
 查询族实跑覆盖：
@@ -248,6 +260,12 @@ uv run python -m select_fuzz run --mode correctness \
 
 - 通过查询仅保存摘要和强哈希。
 - finding 保存三路完整压缩结果、错误、计划、配置、数据库名、seed 和 SQL。
+- 每个 fuzz worker 使用独立的 `sql/worker-NNN.jsonl`；每次 triad dispatch 在执行前
+  fsync `query_attempt_started`，分类后 fsync `query_attempt_finished`。
+- finished 记录必须包含完整 SQL、四类 seed、target/lane、三节点 status、errno、SQLSTATE、
+  message、耗时、行数和最终 verdict；infra retry 也必须逐次记录。
+- started 没有对应 finished 时表示进程终止时该 SQL 已进入 dispatch 边界，但是否到达全部
+  节点及其结果均未知，不得把它当作已完成执行，也不得静默丢弃。
 - 每个 JSONL 事件先追加并 fsync，再更新读模型。
 - 读模型删除后可从 JSONL 和用例目录完全重建。
 - 每个可能的写入边界终止进程并恢复。
@@ -257,8 +275,9 @@ uv run python -m select_fuzz run --mode correctness \
 执行：
 
 ```bash
-uv run pytest -q tests/unit/test_artifacts.py tests/integration/test_replay.py
-uv run python -m select_fuzz replay artifacts/findings/<case-id>/manifest.json
+uv run pytest -q tests/artifacts tests/integration/test_replay.py
+uv run select-fuzz replay --config config/local.yaml \
+  --artifacts artifacts --finding '<case-id>'
 ```
 
 ## 11. FastAPI 与 React 测试
@@ -312,10 +331,14 @@ npm --prefix frontend run e2e:real
 
 ## 12. 十分钟加速 Soak 与长稳态
 
-合并前十分钟加速运行：
+合并前先用精确三个 MySQL 8.0.41 Unix socket 运行生产链路 smoke/soak：
 
 ```bash
-uv run pytest -q -m soak tests/soak --soak-duration=600
+PYTHONPATH=src uv run python scripts/run_mysql8041_socket_soak.py \
+  --sockets /tmp/baseline.sock /tmp/custom-off.sock /tmp/custom-on.sock \
+  --duration-seconds 600 --queries-per-round 100 --workers 1 \
+  --artifact-root /tmp/select-fuzz-mysql8041-soak \
+  --run-id mysql8041-query-soak
 ```
 
 必须注入：节点断连、慢节点、KILL、worker 退出、控制面重启、SSE 断连、报告写入失败。

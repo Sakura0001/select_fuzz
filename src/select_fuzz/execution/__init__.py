@@ -7,6 +7,11 @@ from select_fuzz.execution.mysql import (
     MySQLConnectorFactory,
     NodeQueryRunner,
 )
+from select_fuzz.execution.mutation import (
+    MutationBatchResult,
+    MutationVerdict,
+    TriadMutationCoordinator,
+)
 from select_fuzz.execution.protocols import (
     BarrierLike,
     ConnectionFactory,
@@ -14,15 +19,32 @@ from select_fuzz.execution.protocols import (
     CursorLike,
     QuerySession,
 )
+from select_fuzz.execution.replication import (
+    MARKER_DDL_SQL,
+    MARKER_TABLE,
+    ReplicationBarrier,
+    ReplicationObservation,
+    ReplicationSetupBundle,
+    ReplicationWaitResult,
+    ReplicationWaitStatus,
+    marker_upsert_sql,
+    replication_sequence_from_sql,
+    with_replication_marker,
+)
 from select_fuzz.execution.setup import (
     INTERNAL_SETUP_ERRNO,
+    LockstepSetupResult,
+    LockstepSetupVerdict,
     MySQLSetupRunner,
     SetupBundleLike,
     SetupNodeResult,
+    SetupStatementNodeResult,
+    SetupStatementRecord,
     validate_database_name,
 )
 from select_fuzz.execution.timeout import KillHandle, KillQueryWatchdog
 from select_fuzz.execution.triad import (
+    BaselineExplainResult,
     DatabaseNameFactory,
     InfrastructureRetryPolicy,
     PreparedRound,
@@ -34,6 +56,7 @@ from select_fuzz.execution.triad import (
 
 __all__ = [
     "BarrierLike",
+    "BaselineExplainResult",
     "ConnectionFactory",
     "ControlConnectionFactory",
     "CursorLike",
@@ -45,16 +68,33 @@ __all__ = [
     "InfrastructureRetryPolicy",
     "KillHandle",
     "KillQueryWatchdog",
+    "LockstepSetupResult",
+    "LockstepSetupVerdict",
     "MySQLConnectorFactory",
     "MySQLSetupRunner",
+    "MutationBatchResult",
+    "MutationVerdict",
     "NodeQueryRunner",
     "PreparedRound",
     "PrepareStatus",
     "QueryLimits",
     "QuerySession",
+    "ReplicationBarrier",
+    "ReplicationObservation",
+    "ReplicationSetupBundle",
+    "ReplicationWaitResult",
+    "ReplicationWaitStatus",
     "SetupBundleLike",
     "SetupNodeResult",
+    "SetupStatementNodeResult",
+    "SetupStatementRecord",
     "TriadCoordinator",
     "TriadExecutionResult",
+    "TriadMutationCoordinator",
+    "MARKER_DDL_SQL",
+    "MARKER_TABLE",
+    "marker_upsert_sql",
+    "replication_sequence_from_sql",
+    "with_replication_marker",
     "validate_database_name",
 ]

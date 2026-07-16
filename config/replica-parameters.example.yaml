@@ -1,0 +1,8 @@
+version: 1
+replicas:
+  baseline:
+    session_variables: {}
+  custom_off:
+    session_variables: {}
+  custom_on:
+    session_variables: {}

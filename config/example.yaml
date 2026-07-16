@@ -1,22 +1,43 @@
 # Copy this file to config/local.yaml and keep real endpoints in that ignored file.
 mode: correctness
+full_thread_sql_log: false  # true: append every executed statement to sql/worker-NNN.sql
+replica_parameters_file: replica-parameters.example.yaml
+replica_sync_timeout_seconds: 10
 
 nodes:
   - role: baseline
-    host: 127.0.0.1
-    port: 3306
-    username_env: SELECT_FUZZ_MYSQL_USER
-    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    primary:
+      host: 127.0.0.1
+      port: 3306
+      username_env: SELECT_FUZZ_MYSQL_USER
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    replica:
+      host: 127.0.0.1
+      port: 3316
+      username_env: SELECT_FUZZ_MYSQL_USER
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
   - role: custom_off
-    host: 127.0.0.1
-    port: 3307
-    username_env: SELECT_FUZZ_MYSQL_USER
-    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    primary:
+      host: 127.0.0.1
+      port: 3307
+      username_env: SELECT_FUZZ_MYSQL_USER
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    replica:
+      host: 127.0.0.1
+      port: 3317
+      username_env: SELECT_FUZZ_MYSQL_USER
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
   - role: custom_on
-    host: 127.0.0.1
-    port: 3308
-    username_env: SELECT_FUZZ_MYSQL_USER
-    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    primary:
+      host: 127.0.0.1
+      port: 3308
+      username_env: SELECT_FUZZ_MYSQL_USER
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    replica:
+      host: 127.0.0.1
+      port: 3318
+      username_env: SELECT_FUZZ_MYSQL_USER
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
 
 correctness:
   workers: 10
@@ -26,18 +47,35 @@ correctness:
   byte_limit: 33554432
   min_rows_per_table: 10
   max_rows_per_table: 500
-  free_random_rate: 0.05
-  negative_mutation_rate: 0.05
+  free_random_rate: 0.20
+  negative_mutation_rate: 0.0
+  min_tables: 1
+  max_tables: 8
+  min_columns: 2
+  max_columns: 16
+  max_indexes_per_table: 8
+  max_query_tables: 4
+  max_query_depth: 3
+  query_grammar_path: null
+  grammar_compatible_type_percent: 80
+  explain_timeout_seconds: 10
 
 performance:
   workers: 1
   queries_per_round: 100
   initial_table_rows: 100000
+  initial_table_rows_max: 1000000
   max_table_rows: 50000000
-  max_calibration_rounds: 8
-  calibration_runs_per_reference: 3
-  calibration_min_seconds: 5
-  calibration_max_seconds: 12
+  max_total_rows: 100000000
+  insert_batch_rows: 10000
+  min_tables: 1
+  max_tables: 4
+  min_columns: 3
+  max_columns: 10
+  max_indexes_per_table: 6
+  max_query_tables: 4
+  max_query_depth: 3
   formal_timeout_seconds: 15
+  materialization_timeout_seconds: 300
   regression_threshold: 0.20
   max_start_skew_ms: 100

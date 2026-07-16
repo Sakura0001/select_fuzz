@@ -37,6 +37,7 @@ class _Cursor:
         on_warnings: Any | None = None,
         close_error: Exception | None = None,
         warnings_error: Exception | None = None,
+        affected_rows: int | None = None,
     ) -> None:
         self._rows = rows
         self.columns = columns
@@ -45,6 +46,7 @@ class _Cursor:
         self._on_warnings = on_warnings
         self._close_error = close_error
         self._warnings_error = warnings_error
+        self.affected_rows = affected_rows
         self.offset = 0
         self.closed = False
         self.fetch_sizes: list[int] = []
@@ -77,19 +79,31 @@ class _Session:
         *,
         connection_id: int = 41,
         killed: Event | None = None,
+        initialization_error: Exception | None = None,
     ) -> None:
         self.result = result
         self._connection_id = connection_id
         self._killed = killed
+        self._initialization_error = initialization_error
         self.closed = False
         self.aborted = False
         self.executed: list[str] = []
+        self.initialization_cursors: list[_Cursor] = []
 
     def connection_id(self) -> int:
         return self._connection_id
 
+    def is_alive(self) -> bool:
+        return True
+
     def execute(self, sql: str) -> _Cursor:
         self.executed.append(sql)
+        if sql == "SET SESSION time_zone = '+00:00'":
+            if self._initialization_error is not None:
+                raise self._initialization_error
+            cursor = _Cursor()
+            self.initialization_cursors.append(cursor)
+            return cursor
         if self._killed is not None:
             assert self._killed.wait(1), "watchdog did not issue KILL QUERY"
             raise _DatabaseError(1317, "42000", "Query execution was interrupted")
@@ -205,6 +219,81 @@ def test_run_session_keeps_caller_owned_temporary_session_open(node: NodeConfig)
     assert session.closed is False
     assert cursor.closed is True
     assert factory.query_context_entries == 0
+
+
+def test_runner_preserves_dml_affected_rows(node: NodeConfig) -> None:
+    session = _Session(_Cursor(affected_rows=23))
+    factory = _Factory(session)
+
+    result = _runner(factory).run_session(
+        session,
+        node,
+        "sf_dml_1",
+        "UPDATE t SET id = id + 1 LIMIT 23",
+        timeout_s=15,
+        row_limit=10,
+        byte_limit=1024,
+    )
+
+    assert result.status is ExecutionStatus.SUCCESS
+    assert result.affected_rows == 23
+
+
+def test_runner_initializes_query_session_to_utc_before_user_sql(
+    node: NodeConfig,
+) -> None:
+    session = _Session(_Cursor())
+    factory = _Factory(session)
+
+    result = _runner(factory).run_session(
+        session,
+        node,
+        "sf_temp_1",
+        "SELECT 1",
+        timeout_s=15,
+        row_limit=10,
+        byte_limit=1024,
+    )
+
+    assert result.status is ExecutionStatus.SUCCESS
+    assert session.executed == [
+        "SET SESSION time_zone = '+00:00'",
+        "SELECT 1",
+    ]
+    assert len(session.initialization_cursors) == 1
+    assert session.initialization_cursors[0].closed is True
+
+
+def test_session_initialization_failure_is_infrastructure_and_skips_user_sql(
+    node: NodeConfig,
+) -> None:
+    session = _Session(
+        _Cursor(),
+        initialization_error=_DatabaseError(
+            1298,
+            "HY000",
+            "Unknown or incorrect time zone",
+        ),
+    )
+    factory = _Factory(session)
+
+    result = _runner(factory).run_session(
+        session,
+        node,
+        "sf_temp_1",
+        "SELECT must_not_run",
+        timeout_s=15,
+        row_limit=10,
+        byte_limit=1024,
+    )
+
+    assert result.status is ExecutionStatus.INFRA_ERROR
+    assert result.connection_id == 41
+    assert result.connection_reusable is False
+    assert result.error is not None
+    assert result.error.message == "query session initialization failed: _DatabaseError"
+    assert session.executed == ["SET SESSION time_zone = '+00:00'"]
+    assert factory.control_context_entries == 0
 
 
 def test_statement_end_time_excludes_post_execution_warning_diagnostics(
@@ -617,10 +706,12 @@ class _RawCursor:
         rows: tuple[tuple[object, ...], ...] = (),
         description: tuple[tuple[object, ...], ...] = (),
         warning_count: int = 0,
+        rowcount: int = -1,
     ) -> None:
         self._rows = list(rows)
         self.description = description
         self.warning_count = warning_count
+        self.rowcount = rowcount
         self.executed: list[str] = []
         self.closed = False
 
@@ -752,9 +843,7 @@ def test_connector_liveness_probe_never_reconnects_a_pinned_session(
     with factory.query_session(node, "sf_case_1") as session:
         assert session.is_alive() is True
 
-    assert connection.ping_calls == [
-        {"reconnect": False, "attempts": 1, "delay": 0}
-    ]
+    assert connection.ping_calls == [{"reconnect": False, "attempts": 1, "delay": 0}]
 
 
 def test_control_connections_use_a_short_independent_timeout(node: NodeConfig) -> None:
@@ -779,3 +868,107 @@ def test_control_connections_use_a_short_independent_timeout(node: NodeConfig) -
     assert connect_calls[0]["connection_timeout"] == 5
     assert connect_calls[0]["read_timeout"] == 5
     assert connect_calls[0]["write_timeout"] == 5
+
+
+def test_control_connection_can_be_bounded_by_replication_deadline(
+    node: NodeConfig,
+) -> None:
+    connect_calls: list[dict[str, object]] = []
+
+    def connect(**kwargs: object) -> _RawConnection:
+        connect_calls.append(dict(kwargs))
+        return _RawConnection()
+
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=connect,
+    )
+
+    with factory.control_session_with_timeout(node, "sf_case_1", 2.9):
+        pass
+
+    assert connect_calls[0]["connection_timeout"] == 2
+    assert connect_calls[0]["read_timeout"] == 2
+
+    with factory.control_session_until(node, "sf_case_1", time.monotonic() + 3):
+        pass
+
+    assert connect_calls[1]["connection_timeout"] == 2
+
+
+def test_absolute_control_deadline_is_recomputed_after_connect(
+    node: NodeConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [100.0]
+    connection = _RawConnection()
+    connect_calls: list[dict[str, object]] = []
+
+    def connect(**kwargs: object) -> _RawConnection:
+        connect_calls.append(dict(kwargs))
+        clock[0] += 1.2
+        return connection
+
+    monkeypatch.setattr("select_fuzz.execution.mysql.time_module.monotonic", lambda: clock[0])
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=connect,
+    )
+
+    with factory.control_session_until(node, "sf_case_1", 103.9):
+        assert connection.read_timeout == 2
+        assert connection.write_timeout == 2
+
+    assert connect_calls[0]["connection_timeout"] == 3
+
+
+def test_absolute_control_deadline_rejects_invalid_or_expired_values(
+    node: NodeConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("select_fuzz.execution.mysql.time_module.monotonic", lambda: 100.0)
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=lambda **kwargs: _RawConnection(),
+    )
+
+    with pytest.raises(ValueError, match="finite"):
+        with factory.control_session_until(node, "sf_case_1", float("nan")):
+            pass
+    with pytest.raises(TimeoutError, match="expired"):
+        with factory.control_session_until(node, "sf_case_1", 100.5):
+            pass
+
+
+def test_connector_applies_typed_session_variables_when_opening_replica_session(
+    node: NodeConfig,
+) -> None:
+    connection = _RawConnection()
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=lambda **kwargs: connection,
+        session_variables_by_role={
+            NodeRole.BASELINE: {
+                "optimizer_switch": "index_merge=off",
+                "sql_safe_updates": 0,
+            }
+        },
+    )
+
+    with factory.query_session(node, "sf_case_1"):
+        pass
+
+    assert connection.query_cursor.executed == [
+        "SET SESSION optimizer_switch = 'index_merge=off'",
+        "SET SESSION sql_safe_updates = 0",
+    ]

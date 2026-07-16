@@ -19,9 +19,9 @@ from select_fuzz.domain import stable_fingerprint
 from select_fuzz.execution import ConnectionFactory, MySQLConnectorFactory, QuerySession
 
 
-REQUIRED_CORRECTNESS_CAPABILITIES = frozenset({"mysql_8_0_41", "explain_analyze"})
+REQUIRED_CORRECTNESS_CAPABILITIES = frozenset({"explain_analyze"})
 REQUIRED_CORRECTNESS_PERMISSIONS = frozenset(
-    {"SELECT", "INSERT", "CREATE", "CREATE TEMPORARY TABLES"}
+    {"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE"}
 )
 
 
@@ -103,6 +103,7 @@ class MySQLDoctorProbe:
                 capabilities=frozenset(capabilities),
                 permissions=_permissions(grants),
                 role_probe_matches=role_probe_matches,
+                server_version=version if isinstance(version, str) else None,
             )
 
 
@@ -113,21 +114,39 @@ class DoctorService:
 
     def run(self) -> PreflightReport:
         snapshots: list[NodePreflight] = []
+        replica_snapshots: list[NodePreflight] = []
         failures: list[PreflightIssue] = []
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-doctor") as pool:
-            futures = {node.role: pool.submit(self._probe.probe, node) for node in self._config.nodes}
-            for role in NodeRole:
+        jobs: dict[tuple[NodeRole, str], NodeConfig] = {
+            (role, "primary"): self._config.node_for(role) for role in NodeRole
+        }
+        for role in NodeRole:
+            primary = self._config.node_for(role)
+            replica = self._config.replica_for(role)
+            if (primary.host.casefold(), primary.port) != (
+                replica.host.casefold(),
+                replica.port,
+            ):
+                jobs[(role, "replica")] = replica
+        with ThreadPoolExecutor(
+            max_workers=len(jobs), thread_name_prefix="sf-doctor"
+        ) as pool:
+            futures = {
+                identity: pool.submit(self._probe.probe, node)
+                for identity, node in jobs.items()
+            }
+            for (role, endpoint_kind), future in futures.items():
                 try:
-                    snapshot = futures[role].result()
+                    snapshot = future.result()
                     if snapshot.role is not role:
                         raise ValueError("probe returned the wrong role")
-                    snapshots.append(snapshot)
+                    target = snapshots if endpoint_kind == "primary" else replica_snapshots
+                    target.append(snapshot)
                 except Exception as error:
                     failures.append(
                         PreflightIssue(
                             code="node_unavailable",
                             message=(
-                                f"Node {role.value} probe failed: "
+                                f"Node {role.value} {endpoint_kind} probe failed: "
                                 f"{type(error).__name__}"
                             ),
                             role=role,
@@ -135,19 +154,57 @@ class DoctorService:
                     )
         evaluated = evaluate_preflight(
             tuple(snapshots),
-            required_capabilities=REQUIRED_CORRECTNESS_CAPABILITIES,
+            required_capabilities=frozenset(),
             required_permissions=REQUIRED_CORRECTNESS_PERMISSIONS,
+        )
+        replica_evaluated = (
+            evaluate_preflight(
+                tuple(replica_snapshots),
+                required_capabilities=(
+                    REQUIRED_CORRECTNESS_CAPABILITIES
+                    if self._config.mode.value == "performance"
+                    else frozenset()
+                ),
+                required_permissions=frozenset({"SELECT"}),
+            )
+            if replica_snapshots
+            else PreflightReport()
         )
         failed_roles = {issue.role for issue in failures}
         retained_fatals = tuple(
             issue
-            for issue in evaluated.fatals
+            for issue in (*evaluated.fatals, *replica_evaluated.fatals)
             if not (
                 issue.code == "missing_node_observation" and issue.role in failed_roles
             )
         )
+        versions = {
+            snapshot.server_version
+            for snapshot in (*snapshots, *replica_snapshots)
+            if snapshot.server_version is not None
+        }
+        version_warnings = (
+            (
+                PreflightIssue(
+                    code="version_mismatch",
+                    message="MySQL versions differ across configured primary/replica endpoints",
+                ),
+            )
+            if len(versions) > 1
+            else ()
+        )
+        warnings = tuple(
+            {
+                (issue.code, issue.role, issue.message): issue
+                for issue in (
+                    *evaluated.warnings,
+                    *replica_evaluated.warnings,
+                    *version_warnings,
+                )
+            }.values()
+        )
         return PreflightReport(
-            warnings=evaluated.warnings,
+            warnings=warnings,
             fatals=(*failures, *retained_fatals),
         )
 

@@ -18,8 +18,11 @@ from select_fuzz.config import MAX_STATEMENT_TIMEOUT_SECONDS, NodeConfig, NodeRo
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.execution.protocols import BarrierLike, ConnectionFactory, QuerySession
 from select_fuzz.execution.setup import (
+    LockstepSetupResult,
+    LockstepSetupVerdict,
     SetupBundleLike,
     SetupNodeResult,
+    SetupStatementRecord,
     validate_database_name,
 )
 from select_fuzz.oracle.errors import normalize_error
@@ -30,6 +33,7 @@ class PrepareStatus(StrEnum):
     SETUP_MISMATCH = "setup_mismatch"
     REJECTED_GENERATION = "rejected_generation"
     INFRASTRUCTURE_PAUSE = "infrastructure_pause"
+    REPLICA_SYNC_TIMEOUT = "replica_sync_timeout"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,9 +50,7 @@ class QueryLimits:
             or self.timeout_seconds <= 0
             or self.timeout_seconds > MAX_STATEMENT_TIMEOUT_SECONDS
         ):
-            raise ValueError(
-                "timeout_seconds must be finite, positive, and at most 300 seconds"
-            )
+            raise ValueError("timeout_seconds must be finite, positive, and at most 300 seconds")
         for field_name in ("row_limit", "byte_limit"):
             value = getattr(self, field_name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -118,9 +120,9 @@ class DatabaseNameFactory:
         now_ns = self._clock_ns()
         if not isinstance(now_ns, int) or isinstance(now_ns, bool) or now_ns < 0:
             raise ValueError("clock_ns must return a nonnegative integer")
-        timestamp = datetime.fromtimestamp(
-            now_ns / 1_000_000_000, tz=timezone.utc
-        ).strftime("%Y%m%dt%H%M%S")
+        timestamp = datetime.fromtimestamp(now_ns / 1_000_000_000, tz=timezone.utc).strftime(
+            "%Y%m%dt%H%M%S"
+        )
         seed_id = sha256(str(seed).encode("ascii")).hexdigest()[:10]
         time_id = sha256(str(now_ns).encode("ascii")).hexdigest()[:8]
         with self._lock:
@@ -177,6 +179,10 @@ class QueryRunnerLike(Protocol):
     ) -> NodeExecution: ...
 
 
+class ReplicationWaiterLike(Protocol):
+    def wait(self, database: str, sequence: int) -> object: ...
+
+
 class PreparedRound:
     """One retained setup and, when required, its three pinned sessions."""
 
@@ -190,6 +196,10 @@ class PreparedRound:
         generation: int,
         sessions: Mapping[NodeRole, QuerySession] | None = None,
         stack: ExitStack | None = None,
+        replication_result: object | None = None,
+        attempted_setup_sql: tuple[str, ...] = (),
+        setup_statement_records: tuple[SetupStatementRecord, ...] = (),
+        setup_failing_sql: str | None = None,
     ) -> None:
         self.status = status
         self.database = database
@@ -198,6 +208,10 @@ class PreparedRound:
         self.generation = generation
         self.sessions = None if sessions is None else dict(sessions)
         self._stack = stack
+        self.replication_result = replication_result
+        self.attempted_setup_sql = attempted_setup_sql
+        self.setup_statement_records = setup_statement_records
+        self.setup_failing_sql = setup_failing_sql
         self._closed = False
         self._replacement: PreparedRound | None = None
 
@@ -220,6 +234,14 @@ class PreparedRound:
 
 
 @dataclass(frozen=True, slots=True)
+class BaselineExplainResult:
+    """One unpersisted baseline EXPLAIN admission result."""
+
+    prepared: PreparedRound
+    execution: NodeExecution
+
+
+@dataclass(frozen=True, slots=True)
 class TriadExecutionResult(Sequence[NodeExecution]):
     prepared: PreparedRound
     executions: tuple[NodeExecution, ...]
@@ -236,9 +258,7 @@ class TriadExecutionResult(Sequence[NodeExecution]):
     @overload
     def __getitem__(self, index: slice) -> tuple[NodeExecution, ...]: ...
 
-    def __getitem__(
-        self, index: int | slice
-    ) -> NodeExecution | tuple[NodeExecution, ...]:
+    def __getitem__(self, index: int | slice) -> NodeExecution | tuple[NodeExecution, ...]:
         return self.executions[index]
 
 
@@ -288,15 +308,24 @@ class TriadCoordinator:
         setup_runner: SetupRunnerLike,
         query_runner: QueryRunnerLike,
         session_factory: ConnectionFactory,
+        query_nodes: Sequence[NodeConfig] | None = None,
+        replication_waiter: ReplicationWaiterLike | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         by_role = {node.role: node for node in nodes}
         if len(nodes) != 3 or len(by_role) != 3 or set(by_role) != set(NodeRole):
             raise ValueError("coordinator requires exactly one node for each fixed role")
+        query_by_role = {
+            node.role: node for node in (nodes if query_nodes is None else query_nodes)
+        }
+        if len(query_by_role) != 3 or set(query_by_role) != set(NodeRole):
+            raise ValueError("query_nodes require exactly one node for each fixed role")
         self._nodes = tuple(by_role[role] for role in NodeRole)
+        self._query_nodes = tuple(query_by_role[role] for role in NodeRole)
         self._setup_runner = setup_runner
         self._query_runner = query_runner
         self._session_factory = session_factory
+        self._replication_waiter = replication_waiter
         self._sleeper = sleeper
 
     def prepare(
@@ -311,6 +340,7 @@ class TriadCoordinator:
             raise ValueError("generation must be a nonnegative integer")
         stack = ExitStack()
         sessions: dict[NodeRole, QuerySession] | None = None
+        lockstep_result: LockstepSetupResult | None = None
         try:
             if bundle.requires_same_session:
                 sessions = {
@@ -320,21 +350,38 @@ class TriadCoordinator:
                     for node in self._nodes
                 }
 
-            def apply(node: NodeConfig) -> SetupNodeResult:
-                result = self._setup_runner.apply(
-                    node,
+            lockstep_apply = getattr(self._setup_runner, "apply_lockstep", None)
+            if callable(lockstep_apply):
+                lockstep_result = lockstep_apply(
+                    self._nodes,
                     database,
                     bundle,
-                    session=None if sessions is None else sessions[node.role],
+                    sessions=sessions,
                 )
-                if result.role is not node.role:
-                    return _setup_infra_failure(node, ValueError("setup role mismatch"))
-                return result
+                results = lockstep_result.nodes
+                status = {
+                    LockstepSetupVerdict.READY: PrepareStatus.READY,
+                    LockstepSetupVerdict.MISMATCH: PrepareStatus.SETUP_MISMATCH,
+                    LockstepSetupVerdict.REJECTED_GENERATION: PrepareStatus.REJECTED_GENERATION,
+                    LockstepSetupVerdict.INFRASTRUCTURE_PAUSE: PrepareStatus.INFRASTRUCTURE_PAUSE,
+                }[lockstep_result.verdict]
+            else:
 
-            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-setup") as pool:
-                futures = {node.role: pool.submit(apply, node) for node in self._nodes}
-                results = tuple(futures[role].result() for role in NodeRole)
-            status = _classify_setup(results)
+                def apply(node: NodeConfig) -> SetupNodeResult:
+                    result = self._setup_runner.apply(
+                        node,
+                        database,
+                        bundle,
+                        session=None if sessions is None else sessions[node.role],
+                    )
+                    if result.role is not node.role:
+                        return _setup_infra_failure(node, ValueError("setup role mismatch"))
+                    return result
+
+                with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-setup") as pool:
+                    futures = {node.role: pool.submit(apply, node) for node in self._nodes}
+                    results = tuple(futures[role].result() for role in NodeRole)
+                status = _classify_setup(results)
         except Exception as error:
             stack.close()
             results = tuple(_setup_infra_failure(node, error) for node in self._nodes)
@@ -344,6 +391,15 @@ class TriadCoordinator:
                 bundle=bundle,
                 nodes=results,
                 generation=generation,
+                attempted_setup_sql=(
+                    () if lockstep_result is None else lockstep_result.attempted_bundle_sql
+                ),
+                setup_statement_records=(
+                    () if lockstep_result is None else lockstep_result.statement_records
+                ),
+                setup_failing_sql=(
+                    None if lockstep_result is None else lockstep_result.failing_sql
+                ),
             )
         if status is not PrepareStatus.READY:
             stack.close()
@@ -353,7 +409,44 @@ class TriadCoordinator:
                 bundle=bundle,
                 nodes=results,
                 generation=generation,
+                attempted_setup_sql=(
+                    () if lockstep_result is None else lockstep_result.attempted_bundle_sql
+                ),
+                setup_statement_records=(
+                    () if lockstep_result is None else lockstep_result.statement_records
+                ),
+                setup_failing_sql=(
+                    None if lockstep_result is None else lockstep_result.failing_sql
+                ),
             )
+        replication_result: object | None = None
+        if self._replication_waiter is not None:
+            required_sequence = getattr(bundle, "replication_sequence", 0)
+            if (
+                not isinstance(required_sequence, int)
+                or isinstance(required_sequence, bool)
+                or required_sequence < 0
+            ):
+                raise ValueError("bundle replication_sequence must be nonnegative")
+            replication_result = self._replication_waiter.wait(database, required_sequence)
+            if not bool(getattr(replication_result, "ready", False)):
+                stack.close()
+                return PreparedRound(
+                    status=PrepareStatus.REPLICA_SYNC_TIMEOUT,
+                    database=database,
+                    bundle=bundle,
+                    nodes=results,
+                    generation=generation,
+                    replication_result=replication_result,
+                    attempted_setup_sql=(
+                        bundle.statements
+                        if lockstep_result is None
+                        else lockstep_result.attempted_bundle_sql
+                    ),
+                    setup_statement_records=(
+                        () if lockstep_result is None else lockstep_result.statement_records
+                    ),
+                )
         return PreparedRound(
             status=status,
             database=database,
@@ -362,6 +455,15 @@ class TriadCoordinator:
             generation=generation,
             sessions=sessions,
             stack=stack if sessions is not None else None,
+            replication_result=replication_result,
+            attempted_setup_sql=(
+                bundle.statements
+                if lockstep_result is None
+                else lockstep_result.attempted_bundle_sql
+            ),
+            setup_statement_records=(
+                () if lockstep_result is None else lockstep_result.statement_records
+            ),
         )
 
     def prepare_until_recovered(
@@ -428,6 +530,57 @@ class TriadCoordinator:
         current._replacement = rebuilt
         return rebuilt
 
+    def explain_baseline(
+        self,
+        prepared: PreparedRound,
+        sql: str,
+        limits: QueryLimits,
+    ) -> BaselineExplainResult:
+        """Run a plain EXPLAIN on the baseline query node without a triad barrier."""
+
+        current = self.ensure_live(prepared)
+        if current.status is not PrepareStatus.READY:
+            raise RuntimeError(f"round is not ready: {current.status.value}")
+        if not isinstance(sql, str) or not sql.strip():
+            raise ValueError("sql must not be empty")
+        statement = sql.strip()
+        if statement.endswith(";"):
+            statement = statement[:-1].rstrip()
+        explain_sql = f"EXPLAIN {statement}"
+        node = next(node for node in self._query_nodes if node.role is NodeRole.BASELINE)
+        try:
+            if current.sessions is None:
+                execution = self._query_runner.run(
+                    node,
+                    current.database,
+                    explain_sql,
+                    timeout_s=limits.timeout_seconds,
+                    row_limit=limits.row_limit,
+                    byte_limit=limits.byte_limit,
+                    barrier=None,
+                )
+            else:
+                execution = self._query_runner.run_session(
+                    current.sessions[node.role],
+                    node,
+                    current.database,
+                    explain_sql,
+                    timeout_s=limits.timeout_seconds,
+                    row_limit=limits.row_limit,
+                    byte_limit=limits.byte_limit,
+                    barrier=None,
+                )
+            if execution.role is not NodeRole.BASELINE:
+                raise ValueError("EXPLAIN role mismatch")
+        except Exception as error:
+            execution = _query_infra_failure(node, error)
+        if current.sessions is not None and (
+            execution.status is ExecutionStatus.INFRA_ERROR
+            or not execution.connection_reusable
+        ):
+            current.close()
+        return BaselineExplainResult(current, execution)
+
     def execute(
         self,
         prepared: PreparedRound,
@@ -472,11 +625,10 @@ class TriadCoordinator:
                 return _query_infra_failure(node, error)
 
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-query") as pool:
-            futures = {node.role: pool.submit(run, node) for node in self._nodes}
+            futures = {node.role: pool.submit(run, node) for node in self._query_nodes}
             executions = tuple(futures[role].result() for role in NodeRole)
         if current.sessions is not None and any(
-            execution.status is ExecutionStatus.INFRA_ERROR
-            or not execution.connection_reusable
+            execution.status is ExecutionStatus.INFRA_ERROR or not execution.connection_reusable
             for execution in executions
         ):
             current.close()
@@ -484,6 +636,7 @@ class TriadCoordinator:
 
 
 __all__ = [
+    "BaselineExplainResult",
     "DatabaseNameFactory",
     "InfrastructureRetryPolicy",
     "PrepareStatus",

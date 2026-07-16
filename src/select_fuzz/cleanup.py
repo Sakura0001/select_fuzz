@@ -138,7 +138,7 @@ def build_cleanup_service(
             write_timeout=5,
         )
 
-    return CleanupService(config.nodes, connect_node)
+    return CleanupService(config.primary_nodes, connect_node)
 
 
 __all__ = [

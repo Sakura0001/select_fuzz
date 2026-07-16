@@ -83,20 +83,17 @@ def run_command(
     rounds: int | None = typer.Option(None, "--rounds", min=1),
     seed: int = typer.Option(0, "--seed"),
     workers: int | None = typer.Option(None, "--workers", min=1),
-    queries_per_round: int | None = typer.Option(
-        None, "--queries-per-round", min=1
-    ),
-    duration_seconds: float | None = typer.Option(
-        None, "--duration-seconds", min=0.001
-    ),
-    timeout_seconds: float | None = typer.Option(
-        None, "--timeout-seconds", min=0.001, max=300
-    ),
-    degradation_ratio: float | None = typer.Option(
-        None, "--degradation-ratio", min=0
-    ),
+    queries_per_round: int | None = typer.Option(None, "--queries-per-round", min=1),
+    duration_seconds: float | None = typer.Option(None, "--duration-seconds", min=0.001),
+    timeout_seconds: float | None = typer.Option(None, "--timeout-seconds", min=0.001, max=300),
+    degradation_ratio: float | None = typer.Option(None, "--degradation-ratio", min=0),
     data_rows_min: int | None = typer.Option(None, "--data-rows-min", min=1),
     data_rows_max: int | None = typer.Option(None, "--data-rows-max", min=1),
+    full_thread_sql_log: bool | None = typer.Option(
+        None,
+        "--full-thread-sql-log/--no-full-thread-sql-log",
+        help="Append every executed SQL statement to one sourceable file per worker.",
+    ),
     artifacts: Path = typer.Option(Path("artifacts"), "--artifacts"),
 ) -> None:
     """Run one registered correctness or performance mode."""
@@ -107,6 +104,7 @@ def run_command(
             "mode": selected_mode.value,
             "workers": workers,
             "queries_per_round": queries_per_round,
+            "full_thread_sql_log": full_thread_sql_log,
         }
         if selected_mode is RunMode.CORRECTNESS:
             overrides.update(
@@ -133,14 +131,8 @@ def run_command(
     if factory is None:
         typer.echo(f"mode is not registered: {selected_mode.value}", err=True)
         raise typer.Exit(code=2)
-    section = (
-        loaded.correctness
-        if selected_mode is RunMode.CORRECTNESS
-        else loaded.performance
-    )
-    run_id = deterministic_id(
-        "run", selected_mode.value, seed, time.time_ns()
-    )
+    section = loaded.correctness if selected_mode is RunMode.CORRECTNESS else loaded.performance
+    run_id = deterministic_id("run", selected_mode.value, seed, time.time_ns())
     request = RunRequest(
         run_id=run_id,
         mode=selected_mode.value,
@@ -150,11 +142,7 @@ def run_command(
         queries_per_round=section.queries_per_round,
     )
     stop_event = Event()
-    timer = (
-        None
-        if duration_seconds is None
-        else Timer(duration_seconds, stop_event.set)
-    )
+    timer = None if duration_seconds is None else Timer(duration_seconds, stop_event.set)
     previous_handlers: dict[int, Any] = {}
 
     def request_stop(signum: int, frame: object) -> None:
@@ -176,6 +164,8 @@ def run_command(
         for stored_signum, handler in previous_handlers.items():
             signal.signal(stored_signum, handler)
     typer.echo(json.dumps(asdict(summary), sort_keys=True, separators=(",", ":")))
+    if summary.findings > 0:
+        raise typer.Exit(code=1)
 
 
 @app.command("doctor")
@@ -183,7 +173,7 @@ def doctor_command(
     mode: str = typer.Option("correctness", "--mode"),
     config: Path = typer.Option(..., "--config", exists=True, dir_okay=False),
 ) -> None:
-    """Validate all three nodes without exposing credentials."""
+    """Validate all configured primary/replica endpoints without exposing credentials."""
 
     try:
         selected_mode = RunMode(mode)
@@ -231,13 +221,16 @@ def replay_command(
     except Exception as error:
         typer.echo(f"replay failed: {type(error).__name__}", err=True)
         raise typer.Exit(code=1) from None
+    oracle_verdict = None if result.replay_verdict is None else result.replay_verdict.value
+    effective_verdict = (
+        result.replay_classification if result.replay_classification is not None else oracle_verdict
+    )
     document = {
         "case_id": result.case_id,
         "database": result.database,
         "original_verdict": result.original_verdict,
-        "replay_verdict": (
-            None if result.replay_verdict is None else result.replay_verdict.value
-        ),
+        "replay_verdict": effective_verdict,
+        "oracle_verdict": oracle_verdict,
         "status": result.status.value,
     }
     typer.echo(json.dumps(document, sort_keys=True, separators=(",", ":")))
@@ -247,9 +240,7 @@ def replay_command(
 
 @app.command("regression-seeds")
 def regression_seeds_command(
-    output: Path = typer.Option(
-        Path("tests/regression/seeds.json"), "--output"
-    ),
+    output: Path = typer.Option(Path("tests/regression/seeds.json"), "--output"),
     seed: int = typer.Option(20260712, "--seed"),
 ) -> None:
     """Freeze versioned generator seeds and expected coverage tags."""
@@ -282,9 +273,7 @@ def serve_command(
             store,
             SelectFuzzCommandBuilder(config, artifacts),
         )
-        correctness_config = loaded.model_copy(
-            update={"mode": RunMode.CORRECTNESS}
-        )
+        correctness_config = loaded.model_copy(update={"mode": RunMode.CORRECTNESS})
         replay_executor = ProductionReplayExecutor(
             build_replay_service(correctness_config, artifacts)
         )
@@ -311,9 +300,7 @@ def cleanup_command(
 
     try:
         loaded = load_config(config)
-        report: CleanupReport = CLEANUP_FACTORY(loaded).run(
-            tuple(databases), execute=execute
-        )
+        report: CleanupReport = CLEANUP_FACTORY(loaded).run(tuple(databases), execute=execute)
     except (ConfigLoadError, ManagedDatabaseError, ValueError) as error:
         typer.echo(str(error), err=True)
         raise typer.Exit(code=2) from None

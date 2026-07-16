@@ -28,17 +28,38 @@ _CORRECTNESS_FLAT_KEYS = {
     "max_rows_per_table",
     "free_random_rate",
     "negative_mutation_rate",
+    "min_tables",
+    "max_tables",
+    "min_columns",
+    "max_columns",
+    "max_indexes_per_table",
+    "max_query_tables",
+    "max_query_depth",
+    "query_grammar_path",
+    "grammar_compatible_type_percent",
+    "explain_timeout_seconds",
 }
 _PERFORMANCE_FLAT_KEYS = {
     "workers",
     "queries_per_round",
     "initial_table_rows",
+    "initial_table_rows_max",
     "max_table_rows",
+    "max_total_rows",
+    "insert_batch_rows",
+    "min_tables",
+    "max_tables",
+    "min_columns",
+    "max_columns",
+    "max_indexes_per_table",
+    "max_query_tables",
+    "max_query_depth",
     "max_calibration_rounds",
     "calibration_runs_per_reference",
     "calibration_min_seconds",
     "calibration_max_seconds",
     "formal_timeout_seconds",
+    "materialization_timeout_seconds",
     "regression_threshold",
     "max_start_skew_ms",
 }
@@ -65,10 +86,15 @@ def _merge_mapping(target: dict[str, Any], source: Mapping[str, object]) -> None
 
 def _set_dotted(target: dict[str, Any], dotted_key: str, value: object) -> None:
     parts = dotted_key.split(".")
-    if not parts or any(not part for part in parts) or parts[0] not in {
-        "correctness",
-        "performance",
-    }:
+    if (
+        not parts
+        or any(not part for part in parts)
+        or parts[0]
+        not in {
+            "correctness",
+            "performance",
+        }
+    ):
         raise ConfigLoadError(f"Unsupported CLI override key: {dotted_key}")
     cursor = target
     for part in parts[:-1]:
@@ -81,9 +107,7 @@ def _set_dotted(target: dict[str, Any], dotted_key: str, value: object) -> None:
 
 def _apply_cli_overrides(raw: dict[str, Any], cli: Mapping[str, object]) -> None:
     cli_mode = cli.get("mode")
-    mode_value = (
-        raw.get("mode", RunMode.CORRECTNESS.value) if cli_mode is None else cli_mode
-    )
+    mode_value = raw.get("mode", RunMode.CORRECTNESS.value) if cli_mode is None else cli_mode
     if not isinstance(mode_value, str):
         raise ConfigLoadError("Invalid CLI mode")
     try:
@@ -98,6 +122,9 @@ def _apply_cli_overrides(raw: dict[str, Any], cli: Mapping[str, object]) -> None
 
     for key, value in cli.items():
         if value is None or key == "mode":
+            continue
+        if key == "full_thread_sql_log":
+            raw[key] = deepcopy(value)
             continue
         if key in {"correctness", "performance"}:
             if not isinstance(value, Mapping):
@@ -125,9 +152,7 @@ def _apply_cli_overrides(raw: dict[str, Any], cli: Mapping[str, object]) -> None
             raise ConfigLoadError(f"Unsupported CLI override key: {key}")
 
 
-def load_config(
-    path: str | Path, *, cli: Mapping[str, object] | None = None
-) -> AppConfig:
+def load_config(path: str | Path, *, cli: Mapping[str, object] | None = None) -> AppConfig:
     """Load YAML and apply CLI values with CLI taking precedence."""
 
     config_path = Path(path)
@@ -147,6 +172,24 @@ def load_config(
         raise ConfigLoadError("Configuration root must be a mapping")
 
     raw: dict[str, Any] = deepcopy(dict(document))
+    if "replica_parameters" in raw:
+        raise ConfigLoadError("replica parameters must be supplied through replica_parameters_file")
+    parameter_reference = raw.get("replica_parameters_file")
+    if parameter_reference is not None:
+        if not isinstance(parameter_reference, str) or not parameter_reference.strip():
+            raise ConfigLoadError("replica_parameters_file must be a nonempty path")
+        parameter_path = Path(parameter_reference)
+        if not parameter_path.is_absolute():
+            parameter_path = config_path.parent / parameter_path
+        parameter_path = parameter_path.resolve()
+        try:
+            parameter_document = yaml.safe_load(parameter_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as error:
+            raise ConfigLoadError("Unable to read replica parameters file") from error
+        if not isinstance(parameter_document, Mapping):
+            raise ConfigLoadError("replica parameters root must be a mapping")
+        raw["replica_parameters_file"] = parameter_path
+        raw["replica_parameters"] = deepcopy(dict(parameter_document))
     if cli:
         _apply_cli_overrides(raw, cli)
     validation_message: str | None = None
@@ -155,7 +198,13 @@ def load_config(
     except ValidationError as error:
         validation_message = _validation_summary(error)
     if validation_message is not None:
+        if parameter_reference is not None and "replica_parameters" in validation_message:
+            raise ConfigLoadError(f"Invalid replica parameters: {validation_message}")
         raise ConfigLoadError(validation_message)
+    if any(node.legacy_single_endpoint for node in config.nodes):
+        raise ConfigLoadError(
+            "Configuration must define distinct primary and replica endpoints for all three roles"
+        )
     return config
 
 
@@ -167,7 +216,9 @@ def resolve_credentials(
     source = os.environ if environ is None else environ
     missing = [name for name in (node.username_env, node.password_env) if not source.get(name)]
     if missing:
-        raise ConfigLoadError(f"Missing required credential environment variable: {', '.join(missing)}")
+        raise ConfigLoadError(
+            f"Missing required credential environment variable: {', '.join(missing)}"
+        )
     return ResolvedCredentials(
         username=SecretStr(source[node.username_env]),
         password=SecretStr(source[node.password_env]),

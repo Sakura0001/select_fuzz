@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping, Sequence, Set
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import math
@@ -17,6 +17,7 @@ from mysql.connector.constants import FieldFlag
 from select_fuzz.config import (
     MAX_STATEMENT_TIMEOUT_SECONDS,
     NodeConfig,
+    NodeRole,
     resolve_credentials,
 )
 from select_fuzz.domain import ColumnMeta, ErrorInfo, ExecutionStatus, NodeExecution
@@ -35,6 +36,38 @@ INTERNAL_WATCHDOG_TIMEOUT_ERRNO = 65003
 _INTERNAL_SQLSTATE = "HY000"
 _TIMEOUT_SQLSTATE = "HYT00"
 _MYSQL_CLIENT_ERROR_RANGE = range(2000, 3000)
+_QUERY_SESSION_INITIALIZATION_SQL = "SET SESSION time_zone = '+00:00'"
+
+
+def _session_value_sql(value: bool | int | float | str) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("session variable float values must be finite")
+        return repr(value)
+    if isinstance(value, str):
+        return "'" + value.replace("'", "''") + "'"
+    raise TypeError("session variable values must be scalar")
+
+
+def render_session_variable_sql(
+    variables: Mapping[str, bool | int | float | str],
+) -> tuple[str, ...]:
+    """Render validated non-secret SET SESSION statements deterministically."""
+
+    statements: list[str] = []
+    for name in sorted(variables):
+        if (
+            not isinstance(name, str)
+            or not name.replace("_", "a").isalnum()
+            or (not name[0].isalpha() and name[0] != "_")
+        ):
+            raise ValueError("session variable names must be safe identifiers")
+        statements.append(f"SET SESSION {name} = {_session_value_sql(variables[name])}")
+    return tuple(statements)
 
 
 class _ResultLimitExceeded(RuntimeError):
@@ -85,8 +118,7 @@ def _cell_wire_size(value: object) -> int:
         return len(str(value).encode("ascii")) + 1
     if isinstance(value, Mapping):
         return 2 + sum(
-            _cell_wire_size(key) + _cell_wire_size(child)
-            for key, child in value.items()
+            _cell_wire_size(key) + _cell_wire_size(child) for key, child in value.items()
         )
     if isinstance(value, (tuple, list, Set)):
         return 2 + sum(_cell_wire_size(child) for child in value)
@@ -117,6 +149,11 @@ def _database_error(error: Exception) -> ErrorInfo | None:
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _initialize_query_session(session: QuerySession) -> None:
+    cursor = session.execute(_QUERY_SESSION_INITIALIZATION_SQL)
+    cursor.close()
 
 
 class NodeQueryRunner:
@@ -166,9 +203,7 @@ class NodeQueryRunner:
                 started_ns=started_ns,
                 ended_ns=max(started_ns, ended_ns),
                 connection_id=None,
-                error=_internal_error(
-                    f"query session lifecycle failed: {type(error).__name__}"
-                ),
+                error=_internal_error(f"query session lifecycle failed: {type(error).__name__}"),
                 connection_reusable=False,
             )
 
@@ -204,8 +239,22 @@ class NodeQueryRunner:
                 started_ns=initial_ns,
                 ended_ns=max(initial_ns, ended_ns),
                 connection_id=None,
+                error=_internal_error(f"connection identity lookup failed: {type(error).__name__}"),
+                connection_reusable=False,
+            )
+
+        try:
+            _initialize_query_session(session)
+        except Exception as error:
+            ended_ns = self._monotonic_ns()
+            return NodeExecution.failure(
+                role=node.role,
+                status=ExecutionStatus.INFRA_ERROR,
+                started_ns=initial_ns,
+                ended_ns=max(initial_ns, ended_ns),
+                connection_id=connection_id,
                 error=_internal_error(
-                    f"connection identity lookup failed: {type(error).__name__}"
+                    f"query session initialization failed: {type(error).__name__}"
                 ),
                 connection_reusable=False,
             )
@@ -252,6 +301,7 @@ class NodeQueryRunner:
         rows: list[tuple[object, ...]] = []
         columns: tuple[ColumnMeta, ...] = ()
         warnings: tuple[str, ...] = ()
+        affected_rows: int | None = None
         status = ExecutionStatus.SUCCESS
         error_info: ErrorInfo | None = None
         cleanup_error: Exception | None = None
@@ -260,6 +310,7 @@ class NodeQueryRunner:
         try:
             cursor = session.execute(sql)
             columns = cursor.columns
+            affected_rows = getattr(cursor, "affected_rows", None)
             retained_bytes = 0
             while True:
                 batch = cursor.fetchmany(1)
@@ -298,9 +349,7 @@ class NodeQueryRunner:
                 )
             else:
                 status = ExecutionStatus.ERROR
-                error_info = _internal_error(
-                    str(limit_error), errno=INTERNAL_RESULT_LIMIT_ERRNO
-                )
+                error_info = _internal_error(str(limit_error), errno=INTERNAL_RESULT_LIMIT_ERRNO)
             rows.clear()
             columns = ()
         except Exception as execution_error:
@@ -309,9 +358,7 @@ class NodeQueryRunner:
             error_info = _database_error(execution_error)
             if error_info is None:
                 status = (
-                    ExecutionStatus.TIMEOUT
-                    if handle.timed_out
-                    else ExecutionStatus.INFRA_ERROR
+                    ExecutionStatus.TIMEOUT if handle.timed_out else ExecutionStatus.INFRA_ERROR
                 )
                 connection_reusable = False
                 error_info = (
@@ -327,10 +374,7 @@ class NodeQueryRunner:
                 )
             elif error_info.errno == 3024 or (
                 handle.timed_out
-                and (
-                    error_info.errno == 1317
-                    or error_info.errno in _MYSQL_CLIENT_ERROR_RANGE
-                )
+                and (error_info.errno == 1317 or error_info.errno in _MYSQL_CLIENT_ERROR_RANGE)
             ):
                 status = ExecutionStatus.TIMEOUT
                 connection_reusable = error_info.errno == 3024
@@ -350,16 +394,10 @@ class NodeQueryRunner:
                 except Exception as close_error:
                     cleanup_error = close_error
 
-        ended_ns = (
-            self._monotonic_ns()
-            if statement_ended_ns is None
-            else statement_ended_ns
-        )
+        ended_ns = self._monotonic_ns() if statement_ended_ns is None else statement_ended_ns
         if cleanup_error is not None and status is ExecutionStatus.SUCCESS:
             status = ExecutionStatus.INFRA_ERROR
-            error_info = _internal_error(
-                f"cursor cleanup failed: {type(cleanup_error).__name__}"
-            )
+            error_info = _internal_error(f"cursor cleanup failed: {type(cleanup_error).__name__}")
             rows.clear()
             columns = ()
             connection_reusable = False
@@ -386,6 +424,7 @@ class NodeQueryRunner:
                 rows=tuple(rows),
                 warnings=warnings,
                 connection_reusable=connection_reusable,
+                affected_rows=affected_rows,
             )
         assert error_info is not None
         return NodeExecution.failure(
@@ -424,8 +463,7 @@ class _ConnectorCursor:
         flags_value = flags if isinstance(flags, int) and not isinstance(flags, bool) else 0
         charset_value = (
             character_set_id
-            if isinstance(character_set_id, int)
-            and not isinstance(character_set_id, bool)
+            if isinstance(character_set_id, int) and not isinstance(character_set_id, bool)
             else None
         )
         return ColumnMeta(
@@ -441,6 +479,13 @@ class _ConnectorCursor:
     @property
     def columns(self) -> tuple[ColumnMeta, ...]:
         return self._columns
+
+    @property
+    def affected_rows(self) -> int | None:
+        value = getattr(self._cursor, "rowcount", None)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+        return value
 
     def fetchmany(self, size: int) -> tuple[tuple[object, ...], ...]:
         rows = self._cursor.fetchmany(size)
@@ -459,13 +504,20 @@ class _ConnectorCursor:
         try:
             warning_cursor.execute("SHOW WARNINGS")
             warning_rows = warning_cursor.fetchall()
-            return tuple(
-                f"{level} {code}: {message}" for level, code, message in warning_rows
-            )
+            return tuple(f"{level} {code}: {message}" for level, code, message in warning_rows)
         finally:
             warning_cursor.close()
 
     def close(self) -> None:
+        # Stored procedure CALL statements can leave one or more empty result
+        # sets behind. Consume them before closing so the connection remains
+        # reusable for subsequent materialization statements.
+        nextset = getattr(self._cursor, "nextset", None)
+        if callable(nextset):
+            while nextset():
+                fetchall = getattr(self._cursor, "fetchall", None)
+                if callable(fetchall) and getattr(self._cursor, "with_rows", False):
+                    fetchall()
         self._cursor.close()
 
 
@@ -516,6 +568,8 @@ class MySQLConnectorFactory:
         read_timeout_s: int = 310,
         control_timeout_s: int = 5,
         diagnostic_timeout_s: int = 5,
+        session_variables_by_role: Mapping[NodeRole, Mapping[str, bool | int | float | str]]
+        | None = None,
     ) -> None:
         _positive_bound(connection_timeout_s, "connection_timeout_s")
         _positive_bound(read_timeout_s, "read_timeout_s")
@@ -531,6 +585,10 @@ class MySQLConnectorFactory:
         self._read_timeout_s = read_timeout_s
         self._control_timeout_s = control_timeout_s
         self._diagnostic_timeout_s = diagnostic_timeout_s
+        self._session_sql_by_role = {
+            role: render_session_variable_sql(variables)
+            for role, variables in (session_variables_by_role or {}).items()
+        }
 
     @contextmanager
     def _session(
@@ -559,6 +617,9 @@ class MySQLConnectorFactory:
         )
         session = _ConnectorSession(connection, self._diagnostic_timeout_s)
         try:
+            for sql in self._session_sql_by_role.get(node.role, ()):
+                cursor = session.execute(sql)
+                cursor.close()
             yield session
         finally:
             session.close()
@@ -579,6 +640,77 @@ class MySQLConnectorFactory:
             read_timeout_s=self._control_timeout_s,
         )
 
+    def control_session_with_timeout(
+        self,
+        node: NodeConfig,
+        database: str,
+        timeout_seconds: float,
+    ) -> AbstractContextManager[QuerySession]:
+        """Open a control session bounded by the caller's remaining deadline."""
+
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds < 1
+        ):
+            raise ValueError("timeout_seconds must be finite and at least one second")
+        bounded = min(self._control_timeout_s, max(1, math.floor(timeout_seconds)))
+        return self._session(
+            node,
+            database,
+            connection_timeout_s=bounded,
+            read_timeout_s=bounded,
+        )
+
+    @contextmanager
+    def control_session_until(
+        self,
+        node: NodeConfig,
+        database: str,
+        deadline_monotonic: float,
+    ) -> Iterator[QuerySession]:
+        """Open one marker-probe session under a single absolute deadline."""
+
+        if (
+            not isinstance(deadline_monotonic, (int, float))
+            or isinstance(deadline_monotonic, bool)
+            or not math.isfinite(deadline_monotonic)
+        ):
+            raise ValueError("deadline_monotonic must be finite")
+
+        def remaining_seconds() -> int:
+            remaining = deadline_monotonic - time_module.monotonic()
+            if remaining < 1:
+                raise TimeoutError("control session deadline expired")
+            return min(self._control_timeout_s, max(1, math.floor(remaining)))
+
+        credentials = resolve_credentials(node, self._environ)
+        initial_timeout = remaining_seconds()
+        connection = self._connect(
+            host=node.host,
+            port=node.port,
+            user=credentials.username.get_secret_value(),
+            password=credentials.password.get_secret_value(),
+            database=database,
+            autocommit=True,
+            buffered=False,
+            get_warnings=False,
+            raise_on_warnings=False,
+            connection_timeout=initial_timeout,
+            read_timeout=initial_timeout,
+            write_timeout=initial_timeout,
+            use_pure=True,
+        )
+        session = _ConnectorSession(connection, self._diagnostic_timeout_s)
+        try:
+            query_timeout = remaining_seconds()
+            connection.read_timeout = query_timeout
+            connection.write_timeout = query_timeout
+            yield session
+        finally:
+            session.close()
+
 
 __all__ = [
     "INTERNAL_RESULT_LIMIT_ERRNO",
@@ -586,4 +718,5 @@ __all__ = [
     "INTERNAL_WATCHDOG_TIMEOUT_ERRNO",
     "MySQLConnectorFactory",
     "NodeQueryRunner",
+    "render_session_variable_sql",
 ]

@@ -11,7 +11,7 @@ from select_fuzz.config import NodeRole, PreflightIssue, PreflightReport
 from select_fuzz.domain import RunRequest
 from select_fuzz.service import RunSummary
 from select_fuzz.replay import ReplayResult, ReplayStatus
-from select_fuzz.oracle import OracleVerdict
+from select_fuzz.oracle import OracleVerdict, QueryErrorDisposition
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +64,44 @@ def test_cli_dispatches_correctness_defaults(monkeypatch, tmp_path: Path) -> Non
     assert runner.requests[0].queries_per_round == 1000
     assert runner.requests[0].rounds == 1
     assert '"queries_completed":1000' in result.output
+
+
+def test_run_cli_returns_nonzero_when_findings_were_preserved(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    class FindingRunner(_Runner):
+        def run(self, request: RunRequest, stop_event: Event) -> RunSummary:
+            summary = super().run(request, stop_event)
+            return RunSummary(
+                run_id=summary.run_id,
+                rounds_completed=summary.rounds_completed,
+                queries_completed=summary.queries_completed,
+                findings=1,
+                rejected=summary.rejected,
+                over_budget=summary.over_budget,
+                stopped=summary.stopped,
+            )
+
+    monkeypatch.setitem(
+        MODE_RUNNERS,
+        "correctness",
+        lambda config, root: FindingRunner(),
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--mode",
+            "correctness",
+            "--config",
+            str(PROJECT_ROOT / "config" / "example.yaml"),
+            "--rounds",
+            "1",
+            "--artifacts",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert '"findings":1' in result.output
 
 
 def test_cli_overrides_seed_workers_and_queries(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
@@ -157,9 +195,7 @@ def test_doctor_cli_returns_zero_with_warnings(monkeypatch) -> None:  # type: ig
             (),
             {
                 "run": lambda self: PreflightReport(
-                    warnings=(
-                        PreflightIssue(code="configuration_difference", message="different"),
-                    )
+                    warnings=(PreflightIssue(code="configuration_difference", message="different"),)
                 )
             },
         )(),
@@ -260,6 +296,48 @@ def test_replay_cli_dispatches_finding_and_emits_json(monkeypatch, tmp_path: Pat
     assert result.exit_code == 0, result.output
     assert '"status":"reproduced"' in result.output
     assert '"case_id":"case_finding_1"' in result.output
+    assert '"replay_verdict":"result_mismatch"' in result.output
+    assert '"oracle_verdict":"result_mismatch"' in result.output
+
+
+def test_replay_cli_emits_effective_generator_classification(  # type: ignore[no-untyped-def]
+    monkeypatch, tmp_path: Path
+) -> None:
+    class GeneratorFindingRunner(_ReplayRunner):
+        def replay(self, reference: str | Path) -> ReplayResult:
+            result = super().replay(reference)
+            return ReplayResult(
+                case_id=result.case_id,
+                database=result.database,
+                status=ReplayStatus.REPRODUCED,
+                original_verdict=(QueryErrorDisposition.UNEXPECTED_VALID_ERROR.value),
+                replay_verdict=OracleVerdict.MATCH,
+                executions=(),
+                replay_classification=(QueryErrorDisposition.UNEXPECTED_VALID_ERROR.value),
+            )
+
+    monkeypatch.setattr(
+        "select_fuzz.cli.REPLAY_FACTORY",
+        lambda config, root: GeneratorFindingRunner(),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "replay",
+            "--config",
+            str(PROJECT_ROOT / "config" / "example.yaml"),
+            "--artifacts",
+            str(tmp_path),
+            "--finding",
+            "case_generator_1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert '"replay_verdict":"unexpected_valid_error"' in result.output
+    assert '"oracle_verdict":"match"' in result.output
+    assert '"replay_verdict":"match"' not in result.output
 
 
 def test_replay_cli_returns_one_when_finding_no_longer_reproduces(
@@ -318,9 +396,7 @@ def test_regression_seeds_cli_writes_versioned_corpus(tmp_path: Path) -> None:
     assert '"schema_version":1' in output.read_text(encoding="utf-8")
 
 
-def test_serve_cli_builds_loopback_app_with_real_supervision(
-    monkeypatch, tmp_path: Path
-) -> None:  # type: ignore[no-untyped-def]
+def test_serve_cli_builds_loopback_app_with_real_supervision(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     dist = tmp_path / "dist"
     (dist / "assets").mkdir(parents=True)
     (dist / "index.html").write_text("<html></html>", encoding="utf-8")
@@ -406,11 +482,7 @@ def test_cleanup_cli_returns_one_for_sanitized_partial_failure(monkeypatch) -> N
             return CleanupReport(
                 databases,
                 execute,
-                (
-                    CleanupNodeResult(
-                        databases[0], NodeRole.CUSTOM_ON, False, "RuntimeError"
-                    ),
-                ),
+                (CleanupNodeResult(databases[0], NodeRole.CUSTOM_ON, False, "RuntimeError"),),
             )
 
     monkeypatch.setattr("select_fuzz.cli.CLEANUP_FACTORY", lambda config: Cleanup())

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, is_dataclass
 from hashlib import sha256
 import json
 from pathlib import Path
 from threading import Event
 import time
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from select_fuzz.artifacts import (
     CaseBundleWriter,
@@ -28,21 +28,70 @@ from select_fuzz.domain import (
     stable_fingerprint,
 )
 from select_fuzz.execution import (
+    BaselineExplainResult,
     DatabaseNameFactory,
     MySQLConnectorFactory,
     MySQLSetupRunner,
+    MutationBatchResult,
+    MutationVerdict,
     NodeQueryRunner,
     PreparedRound,
     PrepareStatus,
     QueryLimits,
+    ReplicationBarrier,
     SetupNodeResult,
     TriadCoordinator,
+    TriadMutationCoordinator,
+    with_replication_marker,
 )
-from select_fuzz.generation.coverage import CoverageLedger, CoverageScheduler
-from select_fuzz.generation.query import QueryBatchPlanner, QueryGenerator, QueryMix
-from select_fuzz.generation.schema import SchemaGenerator, SchemaLimits
+from select_fuzz.generation.coverage import CoverageLedger, WeightedCoverageScheduler
+from select_fuzz.generation.mutation import MutationBatch, MutationBatchGenerator
+from select_fuzz.generation.data import (
+    DataBundle,
+    DataScenario,
+    DistributionKind,
+)
+from select_fuzz.generation.query import (
+    GeneratedQuery,
+    QueryBatchPlanner,
+    QueryBudget,
+    QueryGenerator,
+    QueryLane,
+    QueryMix,
+    TargetNotReachable,
+)
+from select_fuzz.generation.query_grammar import (
+    CandidateRejected,
+    GrammarQueryConfig,
+    GrammarQueryGenerator,
+    SelectGrammar,
+)
+from select_fuzz.generation.query_ast import (
+    ColumnRef,
+    ExpectedError,
+    JoinRelation,
+    QueryAst,
+    Relation,
+    SelectQuery,
+    Star,
+    TableQuery,
+    TableRelation,
+)
+from select_fuzz.generation.query_scope import DEFAULT_QUERY_SCOPE, QueryCoverageScope
+from select_fuzz.generation.schema import (
+    BoundaryDeclaration,
+    SchemaGenerator,
+    SchemaLimits,
+    SchemaManifest,
+    SchemaProfile,
+)
 from select_fuzz.generation.setup import SetupBundleBuilder
-from select_fuzz.oracle import OracleVerdict, compare_three_nodes
+from select_fuzz.oracle import (
+    OracleVerdict,
+    QueryErrorDisposition,
+    analyze_query_errors,
+    compare_three_nodes,
+)
 from select_fuzz.service import (
     CorrectnessRunService,
     EventPublisher,
@@ -59,6 +108,8 @@ class CorrectnessQuery:
     coverage_eligible: bool
     seed: int
     case_ordinal: int
+    lane: QueryLane = QueryLane.VALID
+    expected_error: ExpectedError | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.sql, str) or not self.sql.strip():
@@ -67,6 +118,14 @@ class CorrectnessQuery:
             raise ValueError("target_feature_id must not be empty")
         if not isinstance(self.coverage_eligible, bool):
             raise TypeError("coverage_eligible must be a bool")
+        if not isinstance(self.lane, QueryLane):
+            raise TypeError("lane must be a QueryLane")
+        if self.expected_error is not None and not isinstance(self.expected_error, ExpectedError):
+            raise TypeError("expected_error must be an ExpectedError or None")
+        if (self.lane is QueryLane.NEGATIVE) != (self.expected_error is not None):
+            raise ValueError("negative lane must have exactly one expected error contract")
+        if self.lane is not QueryLane.VALID and self.coverage_eligible:
+            raise ValueError("only valid-lane queries may be coverage eligible")
 
 
 class SetupBundleLike(Protocol):
@@ -88,11 +147,15 @@ class RoundMaterialization:
     schema_seed: int
     data_seed: int
     rows_per_table: int = 0
+    schema: SchemaManifest | None = None
+    dynamic_queries: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "queries", tuple(self.queries))
-        if not self.queries:
+        if not self.queries and not self.dynamic_queries:
             raise ValueError("round materialization requires queries")
+        if self.dynamic_queries and self.schema is None:
+            raise ValueError("dynamic query rounds require an immutable schema snapshot")
         if (
             not isinstance(self.rows_per_table, int)
             or isinstance(self.rows_per_table, bool)
@@ -125,6 +188,14 @@ class ExecutionBatchLike(Protocol):
     def __iter__(self) -> Iterator[NodeExecution]: ...
 
 
+class ExplainBatchLike(Protocol):
+    @property
+    def prepared(self) -> PreparedLike: ...
+
+    @property
+    def execution(self) -> NodeExecution: ...
+
+
 class CoordinatorLike(Protocol):
     def prepare_until_recovered(
         self,
@@ -137,6 +208,14 @@ class CoordinatorLike(Protocol):
     def execute(
         self, prepared: PreparedLike, sql: str, limits: QueryLimits
     ) -> ExecutionBatchLike: ...
+
+    def explain_baseline(
+        self, prepared: PreparedLike, sql: str, limits: QueryLimits
+    ) -> ExplainBatchLike: ...
+
+
+class MutationCoordinatorLike(Protocol):
+    def execute_batch(self, database: str, batch: MutationBatch) -> MutationBatchResult: ...
 
 
 class ProductionCoordinatorAdapter:
@@ -158,12 +237,20 @@ class ProductionCoordinatorAdapter:
             should_stop=should_stop,
         )
 
-    def execute(
-        self, prepared: PreparedLike, sql: str, limits: QueryLimits
-    ) -> ExecutionBatchLike:
+    def execute(self, prepared: PreparedLike, sql: str, limits: QueryLimits) -> ExecutionBatchLike:
         if not isinstance(prepared, PreparedRound):
             raise TypeError("production coordinator requires PreparedRound")
         return self._triad.execute(prepared, sql, limits)
+
+    def explain_baseline(
+        self,
+        prepared: PreparedLike,
+        sql: str,
+        limits: QueryLimits,
+    ) -> BaselineExplainResult:
+        if not isinstance(prepared, PreparedRound):
+            raise TypeError("production coordinator requires PreparedRound")
+        return self._triad.explain_baseline(prepared, sql, limits)
 
 
 class CoverageLike(Protocol):
@@ -173,24 +260,247 @@ class CoverageLike(Protocol):
 
 
 class ArtifactWriterLike(Protocol):
+    def begin_round_sql(
+        self,
+        worker_id: int,
+        *,
+        database: str,
+        setup_sql: tuple[str, ...],
+        queries: tuple[str, ...],
+        metadata: Mapping[str, object],
+    ) -> Path: ...
+
+    def append_round_sql(self, worker_id: int, database: str, sql: str) -> None: ...
+
+    def append_round_dml_batch(
+        self,
+        worker_id: int,
+        database: str,
+        statements: tuple[str, ...],
+    ) -> None: ...
+
+    def begin_round_dml_batch(self, worker_id: int, database: str) -> None: ...
+
+    def append_round_dml_sql(self, worker_id: int, database: str, sql: str) -> None: ...
+
+    def end_round_dml_batch(self, worker_id: int, database: str) -> None: ...
+
+    def append_thread_query_sql(
+        self,
+        worker_id: int,
+        sql: str,
+        *,
+        metadata: Mapping[str, object],
+    ) -> None: ...
+
+    def write_query_record(
+        self,
+        worker_id: int,
+        record: Mapping[str, object],
+    ) -> None: ...
+
     def write_pass(self, record: PassRecord) -> None: ...
 
     def write_finding(self, record: FindingRecord) -> Path: ...
 
 
 class JsonlEventSink:
-    def __init__(self, writer: JsonlWriter) -> None:
+    def __init__(
+        self,
+        writer: JsonlWriter,
+        *,
+        persist_query_events: bool = True,
+    ) -> None:
         self._writer = writer
+        self._persist_query_events = persist_query_events
 
     def publish(self, event: RunEvent) -> None:
+        if event.kind == "query_completed" and not self._persist_query_events:
+            return
         self._writer.append(
             {
-                "payload": dict(event.payload),
+                "payload": _json_event_value(event.payload),
                 "run_id": event.run_id,
                 "sequence": event.sequence,
                 "type": event.kind,
             }
         )
+
+
+def _json_event_value(value: object) -> object:
+    """Thaw immutable RunEvent containers into strict JSON containers."""
+
+    if isinstance(value, Mapping):
+        return {key: _json_event_value(child) for key, child in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_event_value(child) for child in value]
+    if isinstance(value, (set, frozenset)):
+        children = [_json_event_value(child) for child in value]
+        return sorted(
+            children,
+            key=lambda child: json.dumps(
+                child,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ),
+        )
+    return value
+
+
+_PRODUCTION_DATA_SCENARIOS = (
+    DataScenario.SEEDED_RANDOM,
+    DataScenario.BOUNDARY,
+    DataScenario.ALL_NULL,
+    DataScenario.MIXED_NULL,
+    DataScenario.DUPLICATE,
+    DataScenario.HOTSPOT,
+)
+
+_SCENARIO_DISTRIBUTIONS = {
+    DataScenario.SEEDED_RANDOM: DistributionKind.UNIFORM,
+    DataScenario.BOUNDARY: DistributionKind.BOUNDARY,
+    DataScenario.ALL_NULL: DistributionKind.ALL_NULL,
+    DataScenario.MIXED_NULL: DistributionKind.MIXED_NULL,
+    DataScenario.DUPLICATE: DistributionKind.DUPLICATE,
+    DataScenario.HOTSPOT: DistributionKind.HOTSPOT,
+}
+
+_SCENARIO_WITNESS_MINIMUM = {
+    DataScenario.SEEDED_RANDOM: 0,
+    DataScenario.BOUNDARY: 8,
+    DataScenario.ALL_NULL: 1,
+    DataScenario.MIXED_NULL: 2,
+    DataScenario.DUPLICATE: 2,
+    DataScenario.HOTSPOT: 5,
+    DataScenario.MIXED: 0,
+}
+
+
+def _iter_ast_nodes(value: object) -> Iterator[object]:
+    """Walk the closed query AST without relying on rendered-SQL substring matches."""
+
+    yield value
+    if is_dataclass(value) and not isinstance(value, type):
+        for field in fields(value):
+            yield from _iter_ast_nodes(getattr(value, field.name))
+    elif isinstance(value, Mapping):
+        for child in value.values():
+            yield from _iter_ast_nodes(child)
+    elif isinstance(value, (tuple, list, set, frozenset)):
+        for child in value:
+            yield from _iter_ast_nodes(child)
+
+
+def _physical_column_references(
+    ast: QueryAst,
+    schema: SchemaManifest,
+) -> frozenset[tuple[str, str]]:
+    tables_by_name = {table.name: table for table in schema.tables}
+    table_names = set(tables_by_name)
+    nodes = tuple(_iter_ast_nodes(ast))
+    aliases: dict[str, set[str]] = {}
+    for node in nodes:
+        if isinstance(node, TableRelation) and node.table in table_names:
+            aliases.setdefault(node.alias, set()).add(node.table)
+    references: set[tuple[str, str]] = set()
+    for node in nodes:
+        if isinstance(node, ColumnRef):
+            for table_name in aliases.get(node.table_alias, ()):
+                references.add((table_name, node.name))
+        elif isinstance(node, TableQuery) and node.table in table_names:
+            references.update(
+                (node.table, column.name) for column in tables_by_name[node.table].columns
+            )
+        elif isinstance(node, SelectQuery):
+            stars = tuple(
+                projection.expression
+                for projection in node.projection
+                if isinstance(projection.expression, Star)
+            )
+            for star in stars:
+                for table_name in _relation_table_names(
+                    node.source,
+                    table_names=table_names,
+                    alias=star.table_alias,
+                ):
+                    references.update(
+                        (table_name, column.name) for column in tables_by_name[table_name].columns
+                    )
+    return frozenset(references)
+
+
+def _relation_table_names(
+    relation: Relation | None,
+    *,
+    table_names: set[str],
+    alias: str | None,
+) -> frozenset[str]:
+    """Resolve direct physical tables visible to one SELECT star projection."""
+
+    if isinstance(relation, TableRelation):
+        if relation.table in table_names and (alias is None or relation.alias == alias):
+            return frozenset({relation.table})
+        return frozenset()
+    if isinstance(relation, JoinRelation):
+        return _relation_table_names(
+            relation.left,
+            table_names=table_names,
+            alias=alias,
+        ) | _relation_table_names(
+            relation.right,
+            table_names=table_names,
+            alias=alias,
+        )
+    return frozenset()
+
+
+def _reads_physical_table(ast: QueryAst, schema: SchemaManifest) -> bool:
+    table_names = {table.name for table in schema.tables}
+    return any(
+        (isinstance(node, TableRelation) and node.table in table_names)
+        or (isinstance(node, TableQuery) and node.table in table_names)
+        for node in _iter_ast_nodes(ast)
+    )
+
+
+def _gated_round_coverage_tags(
+    ast: QueryAst,
+    *,
+    schema: SchemaManifest,
+    data: DataBundle,
+    scenario: DataScenario,
+    row_cardinality: str,
+    boundary: BoundaryDeclaration | None,
+    scenario_witness_met: bool,
+    fallback_tags: frozenset[str] = frozenset(),
+) -> frozenset[str]:
+    """Return only round tags whose setup value is observed by this query AST."""
+
+    tags = set(fallback_tags)
+    if _reads_physical_table(ast, schema):
+        tags.add(f"row_cardinality:{row_cardinality}")
+
+    references = _physical_column_references(ast, schema)
+    if not scenario_witness_met:
+        return frozenset(tags)
+
+    expected_distribution = _SCENARIO_DISTRIBUTIONS.get(scenario)
+    if expected_distribution is not None:
+        effective_columns = {
+            (table_name, plan.column_name)
+            for table_name, plans in data.distributions.items()
+            for plan in plans
+            if plan.kind is expected_distribution and plan.fallback_reason is None
+        }
+        if references & effective_columns:
+            tags.add(f"data_scenario:{scenario.value}")
+
+    boundary_reference = (schema.tables[0].name, "boundary_col")
+    if boundary is not None and boundary_reference in references:
+        tags.add(f"schema_boundary:{boundary.boundary_id.value}")
+        tags.update(f"schema_boundary_status:{tag}" for tag in boundary.tags)
+    return frozenset(tags)
 
 
 class GeneratedRoundSource:
@@ -206,85 +516,172 @@ class GeneratedRoundSource:
         names: DatabaseNameFactory | None = None,
         schema_limits: SchemaLimits | None = None,
         query_generator: QueryGenerator | None = None,
+        grammar_query_generator: GrammarQueryGenerator | None = None,
+        query_scope: QueryCoverageScope | None = None,
+        query_budget: QueryBudget | None = None,
+        replica_mode: bool = False,
     ) -> None:
         if rows_per_table is not None:
             if (
                 not isinstance(rows_per_table, int)
                 or isinstance(rows_per_table, bool)
-                or rows_per_table <= 0
+                or rows_per_table < 0
             ):
-                raise ValueError("rows_per_table must be positive")
+                raise ValueError("rows_per_table must be nonnegative")
             min_rows_per_table = max_rows_per_table = rows_per_table
         for name, value in (
             ("min_rows_per_table", min_rows_per_table),
             ("max_rows_per_table", max_rows_per_table),
         ):
-            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-                raise ValueError(f"{name} must be positive")
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be nonnegative")
         if min_rows_per_table > max_rows_per_table:
-            raise ValueError(
-                "min_rows_per_table must not exceed max_rows_per_table"
-            )
+            raise ValueError("min_rows_per_table must not exceed max_rows_per_table")
         self._ledger = ledger
+        self._fixed_rows_per_table = rows_per_table
         self._min_rows_per_table = min_rows_per_table
         self._max_rows_per_table = max_rows_per_table
         self._names = names or DatabaseNameFactory()
         self._schema_limits = schema_limits or SchemaLimits()
         self._queries = query_generator or QueryGenerator()
-        self._catalog = self._queries.feature_catalog()
+        self._grammar_queries = grammar_query_generator
+        self._query_scope = query_scope or DEFAULT_QUERY_SCOPE
+        self._query_budget = query_budget or QueryBudget()
+        self._replica_mode = replica_mode
+        self._catalog = self._query_scope.filter_catalog(self._queries.feature_catalog())
         self._schema = SchemaGenerator()
+        self._typed_boundaries = (
+            self._schema.executable_boundary_declarations(self._schema_limits)
+            if self._schema_limits.max_columns >= 3
+            else ()
+        )
         self._setup = SetupBundleBuilder()
 
     def materialize(self, context: RoundContext) -> RoundMaterialization:
         tree = SeedTree(context.round_seed)
         enabled = self._catalog.signature_targets(version=(8, 0, 41))
+        if self._replica_mode:
+            enabled = tuple(
+                target
+                for target in enabled
+                if set(target.compatible_profiles) - {SchemaProfile.TEMPORARY_INNODB.value}
+            )
         if not enabled:
             raise RuntimeError("no evidence-verified query feature is enabled")
-        schema_target = enabled[context.round_seed % len(enabled)]
-        schema_seed = tree.derive("schema")
         data_seed = tree.derive("data")
-        rows_per_table = self._min_rows_per_table + (
-            tree.derive("rows_per_table")
-            % (self._max_rows_per_table - self._min_rows_per_table + 1)
+        scenario = _PRODUCTION_DATA_SCENARIOS[
+            tree.derive("data_scenario") % len(_PRODUCTION_DATA_SCENARIOS)
+        ]
+        boundary = None
+        if scenario is DataScenario.BOUNDARY and self._typed_boundaries:
+            boundary_index = tree.derive("typed_boundary") % len(self._typed_boundaries)
+            boundary = self._typed_boundaries[boundary_index]
+        schema_target = enabled[context.round_seed % len(enabled)]
+        if boundary is not None:
+            regular_targets = tuple(
+                target
+                for target in enabled
+                if SchemaProfile.REGULAR_INNODB.value in target.compatible_profiles
+            )
+            if not regular_targets:
+                raise RuntimeError("typed boundary coverage requires a regular target")
+            schema_target = regular_targets[context.round_seed % len(regular_targets)]
+        rows_per_table = self._rows_for_round(context.round_number, tree, scenario)
+        witness_minimum = _SCENARIO_WITNESS_MINIMUM[scenario]
+        scenario_witness_met = rows_per_table >= witness_minimum
+        row_cardinality = (
+            "zero" if rows_per_table == 0 else "one" if rows_per_table == 1 else "many"
         )
-        schema = self._schema.generate(
-            schema_target,
-            seed=schema_seed,
-            limits=self._schema_limits,
-        )
+        start_ordinal = context.round_number * context.request.queries_per_round
+        last_unreachable: TargetNotReachable | None = None
+        for schema_attempt in range(32):
+            schema_seed = (
+                tree.derive("schema")
+                if schema_attempt == 0
+                else tree.derive("schema_retry", schema_attempt)
+            )
+            schema = self._schema.generate(
+                schema_target,
+                seed=schema_seed,
+                limits=self._schema_limits,
+                typed_boundary_id=(None if boundary is None else boundary.boundary_id),
+            )
+            if self._replica_mode and schema.requires_same_session:
+                continue
+            generated: tuple[GeneratedQuery, ...] = ()
+            if self._grammar_queries is None:
+                scheduler = WeightedCoverageScheduler(
+                    catalog=self._catalog,
+                    ledger=self._ledger,
+                    min_hits=10,
+                    version=(8, 0, 41),
+                    profiles=frozenset({schema.profile.value}),
+                    schedule_seed=context.request.seed,
+                    plan_start_ordinal=start_ordinal,
+                )
+                try:
+                    generated = QueryBatchPlanner(self._queries).plan(
+                        schema,
+                        scheduler=scheduler,
+                        run_seed=context.request.seed,
+                        start_case_ordinal=start_ordinal,
+                        queries_per_round=context.request.queries_per_round,
+                        estimated_rows_by_table={
+                            # Estimates are safety inputs, not setup data. A one-row
+                            # upper estimate keeps zero-row rounds query-plannable.
+                            table.name: max(1, rows_per_table)
+                            for table in schema.tables
+                        },
+                        budget=self._query_budget,
+                        allow_compatible_fallback=schema_attempt == 31,
+                        require_table_reference=True,
+                    )
+                except TargetNotReachable as error:
+                    last_unreachable = error
+                    continue
+            break
+        else:
+            raise TargetNotReachable(
+                "no scheduled query target is reachable after 32 schema attempts"
+            ) from last_unreachable
         bundle = self._setup.build(
             schema,
             seed=data_seed,
             rows_per_table=rows_per_table,
+            scenario=scenario,
         )
-        start_ordinal = context.round_number * context.request.queries_per_round
-        scheduler = CoverageScheduler(
-            catalog=self._catalog,
-            ledger=self._ledger,
-            min_hits=10,
-            version=(8, 0, 41),
-            profiles=frozenset({schema.profile.value}),
-            schedule_seed=context.request.seed,
-            plan_start_ordinal=start_ordinal,
-        )
-        generated = QueryBatchPlanner(self._queries).plan(
-            schema,
-            scheduler=scheduler,
-            run_seed=context.request.seed,
-            start_case_ordinal=start_ordinal,
-            queries_per_round=context.request.queries_per_round,
-            estimated_rows_by_table={
-                table.name: rows_per_table for table in schema.tables
-            },
+        if self._replica_mode:
+            bundle = with_replication_marker(bundle)  # type: ignore[assignment]
+        fallback_tags = (
+            frozenset(
+                {
+                    f"data_scenario_fallback:{scenario.value}:"
+                    f"insufficient_rows_{rows_per_table}_required_{witness_minimum}"
+                }
+            )
+            if not scenario_witness_met
+            else frozenset()
         )
         queries = tuple(
             CorrectnessQuery(
                 sql=query.sql,
                 target_feature_id=query.target_feature_id,
-                coverage_tags=query.feature_tags,
+                coverage_tags=query.feature_tags
+                | _gated_round_coverage_tags(
+                    query.ast,
+                    schema=schema,
+                    data=bundle.data,
+                    scenario=scenario,
+                    row_cardinality=row_cardinality,
+                    boundary=boundary,
+                    scenario_witness_met=scenario_witness_met,
+                    fallback_tags=fallback_tags,
+                ),
                 coverage_eligible=query.coverage_eligible,
                 seed=query.seed,
                 case_ordinal=query.case_ordinal,
+                lane=query.lane,
+                expected_error=query.expected_error,
             )
             for query in generated
         )
@@ -301,7 +698,64 @@ class GeneratedRoundSource:
             schema_seed,
             data_seed,
             rows_per_table,
+            schema,
+            self._grammar_queries is not None,
         )
+
+    def generate_query(
+        self,
+        materialized: RoundMaterialization,
+        context: RoundContext,
+        candidate_ordinal: int,
+    ) -> CorrectnessQuery:
+        """Generate one stateless grammar candidate from the round schema snapshot."""
+
+        if self._grammar_queries is None or not materialized.dynamic_queries:
+            raise RuntimeError("round source is not configured for dynamic grammar queries")
+        if materialized.schema is None:  # pragma: no cover - dataclass invariant
+            raise RuntimeError("dynamic round has no schema snapshot")
+        if (
+            not isinstance(candidate_ordinal, int)
+            or isinstance(candidate_ordinal, bool)
+            or candidate_ordinal < 0
+        ):
+            raise ValueError("candidate_ordinal must be a nonnegative integer")
+        candidate_seed = SeedTree(context.round_seed).derive(
+            "grammar_candidate",
+            candidate_ordinal,
+        )
+        candidate = self._grammar_queries.generate(
+            materialized.schema,
+            seed=candidate_seed,
+        )
+        grammar_tags = frozenset(
+            f"grammar:{entry.partition('@')[0]}" for entry in candidate.production_trace
+        )
+        start_ordinal = context.round_number * context.request.queries_per_round
+        return CorrectnessQuery(
+            sql=candidate.sql,
+            target_feature_id="grammar_random",
+            coverage_tags=grammar_tags | {"grammar_random"},
+            coverage_eligible=True,
+            seed=candidate.seed,
+            case_ordinal=start_ordinal + candidate_ordinal,
+        )
+
+    def _rows_for_round(
+        self,
+        round_number: int,
+        tree: SeedTree,
+        scenario: DataScenario,
+    ) -> int:
+        if self._fixed_rows_per_table is not None:
+            return self._fixed_rows_per_table
+        del round_number
+        rows = self._min_rows_per_table + (
+            tree.derive("rows_per_table")
+            % (self._max_rows_per_table - self._min_rows_per_table + 1)
+        )
+        witness_minimum = _SCENARIO_WITNESS_MINIMUM[scenario]
+        return max(rows, min(witness_minimum, self._max_rows_per_table))
 
 
 def _json_digest(value: object) -> str:
@@ -326,6 +780,123 @@ def _setup_result_to_artifact(result: SetupNodeResult) -> dict[str, object]:
     return artifact
 
 
+def _expected_error_to_artifact(expected: ExpectedError | None) -> dict[str, object] | None:
+    if expected is None:
+        return None
+    return {
+        "errno": expected.expected_errno,
+        "kind": expected.kind.value,
+        "sqlstate": expected.expected_sqlstate,
+    }
+
+
+def _query_execution_to_log(execution: NodeExecution) -> dict[str, object]:
+    columns = [
+        {
+            "binary": column.binary,
+            "character_set_id": column.character_set_id,
+            "column_length": column.column_length,
+            "decimals": column.decimals,
+            "flags": column.flags,
+            "name": column.name,
+            "nullable": column.nullable,
+            "type_code": column.type_code,
+            "unsigned": column.unsigned,
+        }
+        for column in execution.columns
+    ]
+    error = (
+        None
+        if execution.error is None
+        else {
+            "errno": execution.error.errno,
+            "message": execution.error.message,
+            "sqlstate": execution.error.sqlstate,
+        }
+    )
+    return {
+        "affected_rows": execution.affected_rows,
+        "column_count": len(execution.columns),
+        "column_metadata": columns,
+        "column_metadata_digest": _json_digest(columns),
+        "connection_id": execution.connection_id,
+        "connection_reusable": execution.connection_reusable,
+        "elapsed_ns": execution.elapsed_ns,
+        "error": error,
+        "row_count": len(execution.rows),
+        "status": execution.status.value,
+        "warnings": execution.warnings,
+        "watchdog_error_type": execution.watchdog_error_type,
+        "watchdog_fired": execution.watchdog_fired,
+    }
+
+
+def _replication_observations(result: object | None) -> dict[str, object]:
+    observations = getattr(result, "observations", None)
+    if not isinstance(observations, Mapping):
+        return {}
+    encoded: dict[str, object] = {}
+    for role in NodeRole:
+        observation = observations.get(role)
+        encoded[role.value] = {
+            "error_type": getattr(observation, "error_type", None),
+            "observed_sequence": getattr(observation, "observed_sequence", None),
+        }
+    return encoded
+
+
+def _execution_error_artifact(execution: NodeExecution) -> dict[str, object] | None:
+    error = execution.error
+    if error is None:
+        return None
+    return {
+        "errno": error.errno,
+        "message": error.message,
+        "sqlstate": error.sqlstate,
+    }
+
+
+def _mutation_step_artifacts(
+    result: MutationBatchResult,
+) -> tuple[dict[str, object], ...]:
+    steps: list[dict[str, object]] = []
+    for sql, outcomes in zip(
+        result.executed_sql,
+        result.statement_results,
+        strict=False,
+    ):
+        steps.append(
+            {
+                "sql": sql,
+                "roles": {
+                    role.value: {
+                        "affected_rows": outcomes[role].affected_rows,
+                        "error": _execution_error_artifact(outcomes[role]),
+                        "status": outcomes[role].status.value,
+                    }
+                    for role in NodeRole
+                },
+            }
+        )
+    return tuple(steps)
+
+
+def _has_uniform_runtime_error(executions: tuple[NodeExecution, ...]) -> bool:
+    if len(executions) != len(NodeRole):
+        return False
+    if any(
+        execution.status is not ExecutionStatus.ERROR or execution.error is None
+        for execution in executions
+    ):
+        return False
+    identities = {
+        (execution.error.errno, execution.error.sqlstate)
+        for execution in executions
+        if execution.error is not None
+    }
+    return len(identities) == 1
+
+
 class CorrectnessRoundEngine:
     def __init__(
         self,
@@ -337,6 +908,10 @@ class CorrectnessRoundEngine:
         *,
         configuration_fingerprints: Mapping[NodeRole, str],
         sleeper: Callable[[float], None] = time.sleep,
+        mutation_generator: MutationBatchGenerator | None = None,
+        mutation_coordinator: MutationCoordinatorLike | None = None,
+        replica_parameters_sha256: str | None = None,
+        explain_timeout_seconds: float = 10.0,
     ) -> None:
         if set(configuration_fingerprints) != set(NodeRole):
             raise ValueError("configuration_fingerprints require all three roles")
@@ -345,8 +920,19 @@ class CorrectnessRoundEngine:
         self._artifacts = artifacts
         self._coverage = coverage
         self._limits = limits
+        self._explain_limits = QueryLimits(
+            explain_timeout_seconds,
+            limits.row_limit,
+            limits.byte_limit,
+        )
         self._fingerprints = dict(configuration_fingerprints)
         self._sleeper = sleeper
+        self._interruptible_backoff = sleeper is time.sleep
+        if (mutation_generator is None) != (mutation_coordinator is None):
+            raise ValueError("mutation generator and coordinator must be configured together")
+        self._mutation_generator = mutation_generator
+        self._mutation_coordinator = mutation_coordinator
+        self._replica_parameters_sha256 = replica_parameters_sha256
 
     def run_round(
         self,
@@ -360,12 +946,45 @@ class CorrectnessRoundEngine:
             database=materialized.database,
             should_stop=stop_event.is_set,
         )
+        attempted_setup_sql = (
+            tuple(getattr(prepared, "attempted_setup_sql"))
+            if hasattr(prepared, "attempted_setup_sql")
+            else materialized.bundle.statements
+        )
+        self._artifacts.begin_round_sql(
+            context.worker_id,
+            database=prepared.database,
+            setup_sql=attempted_setup_sql,
+            queries=(),
+            metadata={
+                "data_seed": materialized.data_seed,
+                "round_number": context.round_number,
+                "round_seed": context.round_seed,
+                "run_id": context.request.run_id,
+                "schema_seed": materialized.schema_seed,
+                "worker_id": context.worker_id,
+                "replica_parameters_sha256": self._replica_parameters_sha256,
+            },
+        )
         if prepared.status is not PrepareStatus.READY:
             kind = prepared.status.value
-            events.publish("setup_not_ready", {"database": prepared.database, "status": kind})
+            events.publish(
+                "setup_not_ready",
+                {
+                    "database": prepared.database,
+                    "node_results": {
+                        result.role.value: _setup_result_to_artifact(result)
+                        for result in prepared.nodes
+                    },
+                    "status": kind,
+                },
+            )
             try:
-                if prepared.status is PrepareStatus.SETUP_MISMATCH:
-                    query = materialized.queries[0]
+                if prepared.status in {
+                    PrepareStatus.SETUP_MISMATCH,
+                    PrepareStatus.REPLICA_SYNC_TIMEOUT,
+                }:
+                    query = materialized.queries[0] if materialized.queries else None
                     case_id = deterministic_id(
                         "case",
                         context.request.run_id,
@@ -373,9 +992,27 @@ class CorrectnessRoundEngine:
                         "setup",
                     )
                     results = {
-                        result.role: _setup_result_to_artifact(result)
-                        for result in prepared.nodes
+                        result.role: _setup_result_to_artifact(result) for result in prepared.nodes
                     }
+                    failing_sql = getattr(prepared, "setup_failing_sql", None)
+                    statement_records = tuple(
+                        {
+                            "sql": record.sql,
+                            "roles": {
+                                role.value: {
+                                    "affected_rows": record.results[role].affected_rows,
+                                    "error": (
+                                        None
+                                        if record.results[role].error is None
+                                        else asdict(record.results[role].error)
+                                    ),
+                                    "status": record.results[role].status.value,
+                                }
+                                for role in NodeRole
+                            },
+                        }
+                        for record in getattr(prepared, "setup_statement_records", ())
+                    )
                     self._artifacts.write_finding(
                         FindingRecord(
                             case_id=case_id,
@@ -384,26 +1021,42 @@ class CorrectnessRoundEngine:
                             databases={role: prepared.database for role in NodeRole},
                             seeds={
                                 "data": materialized.data_seed,
-                                "query": query.seed,
+                                "query": (
+                                    context.round_seed if query is None else query.seed
+                                ),
                                 "round": context.round_seed,
                                 "schema": materialized.schema_seed,
                             },
                             setup_sql=materialized.bundle.statements,
-                            query_sql=query.sql,
+                            query_sql=(
+                                failing_sql
+                                or (query.sql if query is not None else "SELECT 1")
+                            ),
                             query_limits={
                                 "byte_limit": self._limits.byte_limit,
                                 "row_limit": self._limits.row_limit,
                                 "timeout_seconds": self._limits.timeout_seconds,
                             },
                             payload_sha256=materialized.bundle.payload_sha256,
-                            original_verdict=PrepareStatus.SETUP_MISMATCH.value,
-                            first_difference={
-                                "category": "setup",
-                                "status_by_role": {
-                                    role.value: results[role]["status"]
-                                    for role in NodeRole
-                                },
-                            },
+                            original_verdict=prepared.status.value,
+                            first_difference=(
+                                {
+                                    "category": "setup",
+                                    "status_by_role": {
+                                        role.value: results[role]["status"] for role in NodeRole
+                                    },
+                                    "failing_sql": failing_sql,
+                                    "statement_records": statement_records,
+                                }
+                                if prepared.status is PrepareStatus.SETUP_MISMATCH
+                                else {
+                                    "category": "replication",
+                                    "required_sequence": 0,
+                                    "observations": _replication_observations(
+                                        getattr(prepared, "replication_result", None)
+                                    ),
+                                }
+                            ),
                             statistics={
                                 role.value: {
                                     "status": results[role]["status"],
@@ -412,9 +1065,9 @@ class CorrectnessRoundEngine:
                             },
                             configuration_fingerprints=self._fingerprints,
                             results=results,
-                            requires_same_session=(
-                                materialized.bundle.requires_same_session
-                            ),
+                            requires_same_session=(materialized.bundle.requires_same_session),
+                            replica_parameters_sha256=self._replica_parameters_sha256,
+                            execution_sql=attempted_setup_sql,
                         )
                     )
             finally:
@@ -422,92 +1075,314 @@ class CorrectnessRoundEngine:
             return RoundSummary(
                 context.round_number,
                 0,
-                1 if prepared.status is PrepareStatus.SETUP_MISMATCH else 0,
+                (
+                    1
+                    if prepared.status
+                    in {
+                        PrepareStatus.SETUP_MISMATCH,
+                        PrepareStatus.REPLICA_SYNC_TIMEOUT,
+                    }
+                    else 0
+                ),
                 1 if prepared.status is PrepareStatus.REJECTED_GENERATION else 0,
                 0,
             )
-        queries_completed = findings = over_budget = 0
+        queries_completed = findings = rejected = over_budget = 0
+        mutation_sequence = 0
+        committed_mutation_sql: list[str] = []
         current_prepared = prepared
+        dynamic_queries = materialized.dynamic_queries
+        dynamic_generate: Callable[
+            [RoundMaterialization, RoundContext, int], CorrectnessQuery
+        ] | None = None
+        if dynamic_queries:
+            raw_generate = getattr(self._source, "generate_query", None)
+            if not callable(raw_generate):
+                raise RuntimeError("dynamic round source has no generate_query method")
+            dynamic_generate = cast(
+                Callable[[RoundMaterialization, RoundContext, int], CorrectnessQuery],
+                raw_generate,
+            )
+        legacy_queries = iter(materialized.queries)
+        candidate_ordinal = 0
         try:
-            for query in materialized.queries:
+            while True:
+                if dynamic_queries:
+                    if queries_completed >= context.request.queries_per_round:
+                        break
+                    if dynamic_generate is None:  # pragma: no cover - invariant above
+                        raise RuntimeError("dynamic query generator is unavailable")
+                    ordinal = candidate_ordinal
+                    candidate_ordinal += 1
+                    try:
+                        query = dynamic_generate(materialized, context, ordinal)
+                    except CandidateRejected:
+                        rejected += 1
+                        continue
+                else:
+                    try:
+                        query = next(legacy_queries)
+                    except StopIteration:
+                        break
                 if stop_event.is_set():
                     break
+                if dynamic_queries:
+                    explain_delay = 0.25
+                    while True:
+                        admission = self._coordinator.explain_baseline(
+                            current_prepared,
+                            query.sql,
+                            self._explain_limits,
+                        )
+                        current_prepared = admission.prepared
+                        explain_execution = admission.execution
+                        if explain_execution.status is not ExecutionStatus.INFRA_ERROR:
+                            break
+                        events.publish(
+                            "infrastructure_pause",
+                            {
+                                "database": current_prepared.database,
+                                "stage": "baseline_explain",
+                                "worker_id": context.worker_id,
+                            },
+                        )
+                        if stop_event.is_set():
+                            break
+                        if self._interruptible_backoff:
+                            if stop_event.wait(explain_delay):
+                                break
+                        else:
+                            self._sleeper(explain_delay)
+                            if stop_event.is_set():
+                                break
+                        explain_delay = min(30.0, explain_delay * 2)
+                    if explain_execution.status is ExecutionStatus.INFRA_ERROR:
+                        break
+                    if (
+                        explain_execution.status is not ExecutionStatus.SUCCESS
+                        or not explain_execution.rows
+                    ):
+                        rejected += 1
+                        continue
+                case_id = deterministic_id(
+                    "case",
+                    context.request.run_id,
+                    context.round_number,
+                    query.case_ordinal,
+                )
+                query_context: dict[str, object] = {
+                    "case_id": case_id,
+                    "case_ordinal": query.case_ordinal,
+                    "coverage_eligible": query.coverage_eligible,
+                    "coverage_tags": tuple(sorted(query.coverage_tags)),
+                    "data_seed": materialized.data_seed,
+                    "expected_error": _expected_error_to_artifact(query.expected_error),
+                    "lane": query.lane.value,
+                    "query_limits": {
+                        "byte_limit": self._limits.byte_limit,
+                        "row_limit": self._limits.row_limit,
+                        "timeout_seconds": self._limits.timeout_seconds,
+                    },
+                    "query_seed": query.seed,
+                    "query_sql": query.sql,
+                    "requires_same_session": materialized.bundle.requires_same_session,
+                    "round_number": context.round_number,
+                    "round_seed": context.round_seed,
+                    "run_id": context.request.run_id,
+                    "schema_seed": materialized.schema_seed,
+                    "schema_version": 1,
+                    "setup_payload_sha256": materialized.bundle.payload_sha256,
+                    "target_feature_id": query.target_feature_id,
+                    "worker_id": context.worker_id,
+                }
                 delay = 0.25
+                attempt_number = 0
                 while True:
-                    batch = self._coordinator.execute(current_prepared, query.sql, self._limits)
+                    attempt_database = current_prepared.database
+                    attempt_id = deterministic_id(
+                        "attempt",
+                        context.request.run_id,
+                        context.round_number,
+                        query.case_ordinal,
+                        attempt_number,
+                    )
+                    attempt_context = {
+                        **query_context,
+                        "attempt_id": attempt_id,
+                        "attempt_number": attempt_number,
+                        "database": attempt_database,
+                    }
+                    self._artifacts.write_query_record(
+                        context.worker_id,
+                        {
+                            **attempt_context,
+                            "type": "query_attempt_started",
+                        },
+                    )
+                    self._artifacts.append_round_sql(
+                        context.worker_id,
+                        current_prepared.database,
+                        query.sql,
+                    )
+                    self._artifacts.append_thread_query_sql(
+                        context.worker_id,
+                        query.sql,
+                        metadata={
+                            "attempt_id": attempt_id,
+                            "attempt_number": attempt_number,
+                            "case_ordinal": query.case_ordinal,
+                            "database": attempt_database,
+                            "query_seed": query.seed,
+                            "round_number": context.round_number,
+                            "run_id": context.request.run_id,
+                            "worker_id": context.worker_id,
+                        },
+                    )
+                    try:
+                        batch = self._coordinator.execute(
+                            current_prepared,
+                            query.sql,
+                            self._limits,
+                        )
+                    except Exception as error:
+                        self._artifacts.write_query_record(
+                            context.worker_id,
+                            {
+                                **attempt_context,
+                                "exception": {
+                                    "message": str(error),
+                                    "type": type(error).__name__,
+                                },
+                                "type": "query_attempt_finished",
+                                "verdict": "executor_exception",
+                            },
+                        )
+                        raise
                     current_prepared = batch.prepared
                     executions = tuple(batch)
-                    if not any(
-                        execution.status is ExecutionStatus.INFRA_ERROR
-                        for execution in executions
-                    ):
+                    executions_by_role = {execution.role: execution for execution in executions}
+                    nodes = {
+                        role.value: _query_execution_to_log(executions_by_role[role])
+                        for role in NodeRole
+                    }
+                    has_infra_error = any(
+                        execution.status is ExecutionStatus.INFRA_ERROR for execution in executions
+                    )
+                    if not has_infra_error:
                         break
+                    aborting = stop_event.is_set()
+                    self._artifacts.write_query_record(
+                        context.worker_id,
+                        {
+                            **attempt_context,
+                            "nodes": nodes,
+                            "result_database": current_prepared.database,
+                            "type": "query_attempt_finished",
+                            "verdict": (
+                                "infrastructure_abort" if aborting else "infrastructure_retry"
+                            ),
+                        },
+                    )
                     events.publish(
                         "infrastructure_pause",
-                        {"case_ordinal": query.case_ordinal, "database": current_prepared.database},
+                        {
+                            "attempt_number": attempt_number,
+                            "case_ordinal": query.case_ordinal,
+                            "database": current_prepared.database,
+                            "query_sql": query.sql,
+                            "worker_id": context.worker_id,
+                        },
                     )
-                    if stop_event.is_set():
+                    if aborting:
                         break
-                    self._sleeper(delay)
+                    if self._interruptible_backoff:
+                        if stop_event.wait(delay):
+                            break
+                    else:
+                        self._sleeper(delay)
+                        if stop_event.is_set():
+                            break
                     delay = min(30.0, delay * 2)
-                if stop_event.is_set() or any(
-                    execution.status is ExecutionStatus.INFRA_ERROR
-                    for execution in executions
-                ):
+                    attempt_number += 1
+                # A successful triad dispatch that already returned must still
+                # be classified and receive its durable finished record.  The
+                # stop flag prevents the next query at the top of the loop.
+                if has_infra_error:
                     break
-                oracle = compare_three_nodes(executions)
-                case_id = deterministic_id(
-                    "case", context.request.run_id, context.round_number, query.case_ordinal
-                )
-                encoded = {
-                    execution.role: node_execution_to_artifact(execution)
-                    for execution in executions
-                }
-                if oracle.verdict is OracleVerdict.RESULT_MISMATCH:
-                    first = next(pair for pair in oracle.pairwise if not pair.matched)
-                    self._artifacts.write_finding(
-                        FindingRecord(
-                            case_id=case_id,
-                            run_id=context.request.run_id,
-                            mode="correctness",
-                            databases={role: current_prepared.database for role in NodeRole},
-                            seeds={
-                                "data": materialized.data_seed,
-                                "query": query.seed,
-                                "round": context.round_seed,
-                                "schema": materialized.schema_seed,
-                            },
-                            setup_sql=materialized.bundle.statements,
-                            query_sql=query.sql,
-                            query_limits={
-                                "byte_limit": self._limits.byte_limit,
-                                "row_limit": self._limits.row_limit,
-                                "timeout_seconds": self._limits.timeout_seconds,
-                            },
-                            payload_sha256=materialized.bundle.payload_sha256,
-                            original_verdict=oracle.verdict.value,
-                            first_difference=asdict(first),
-                            statistics={
-                                role.value: {
-                                    "elapsed_ns": next(e for e in executions if e.role is role).elapsed_ns,
-                                    "rows": len(next(e for e in executions if e.role is role).rows),
-                                    "status": next(e for e in executions if e.role is role).status.value,
-                                }
-                                for role in NodeRole
-                            },
-                            configuration_fingerprints=self._fingerprints,
-                            results=encoded,
-                            requires_same_session=materialized.bundle.requires_same_session,
-                        )
+                if dynamic_queries and _has_uniform_runtime_error(executions):
+                    rejected += 1
+                    self._artifacts.write_query_record(
+                        context.worker_id,
+                        {
+                            **attempt_context,
+                            "nodes": nodes,
+                            "result_database": current_prepared.database,
+                            "type": "query_attempt_finished",
+                            "verdict": "uniform_runtime_error_rejected",
+                        },
                     )
-                    findings += 1
-                elif oracle.verdict is OracleVerdict.OVER_BUDGET:
-                    over_budget += 1
-                else:
-                    baseline = next(e for e in executions if e.role is NodeRole.BASELINE)
-                    baseline_artifact = encoded[NodeRole.BASELINE]
-                    self._artifacts.write_pass(
-                        PassRecord(
+                    events.publish(
+                        "query_rejected",
+                        {
+                            "case_id": case_id,
+                            "case_ordinal": query.case_ordinal,
+                            "database": current_prepared.database,
+                            "query_seed": query.seed,
+                            "reason": "uniform_runtime_error",
+                            "round_number": context.round_number,
+                            "worker_id": context.worker_id,
+                        },
+                    )
+                    continue
+                try:
+                    oracle = compare_three_nodes(executions)
+                    error_analysis = analyze_query_errors(query.expected_error, executions)
+                    encoded = {
+                        execution.role: node_execution_to_artifact(execution)
+                        for execution in executions
+                    }
+                    finding_verdict: str | None = None
+                    first_difference: Mapping[str, object] | None = None
+                    pass_record: PassRecord | None = None
+                    finding_record: FindingRecord | None = None
+                    effective_verdict = oracle.verdict.value
+                    if oracle.verdict is OracleVerdict.RESULT_MISMATCH:
+                        first = next(pair for pair in oracle.pairwise if not pair.matched)
+                        finding_verdict = oracle.verdict.value
+                        first_difference = asdict(first)
+                    elif oracle.verdict is OracleVerdict.OVER_BUDGET or (
+                        error_analysis.disposition is QueryErrorDisposition.RESOURCE_LIMIT
+                    ):
+                        effective_verdict = QueryErrorDisposition.RESOURCE_LIMIT.value
+                        over_budget += 1
+                    elif error_analysis.disposition in {
+                        QueryErrorDisposition.UNEXPECTED_VALID_ERROR,
+                        QueryErrorDisposition.EXPECTED_ERROR_MISMATCH,
+                        QueryErrorDisposition.DEFER_TO_ORACLE,
+                    }:
+                        finding_verdict = error_analysis.disposition.value
+                        effective_verdict = error_analysis.disposition.value
+                        first_difference = {
+                            "category": "generator_contract",
+                            "expected_error": _expected_error_to_artifact(query.expected_error),
+                            "observed_identities": [
+                                (
+                                    None
+                                    if identity is None
+                                    else {
+                                        "errno": identity[0],
+                                        "sqlstate": identity[1],
+                                    }
+                                )
+                                for identity in error_analysis.observed_identities
+                            ],
+                            "reason": error_analysis.reason,
+                        }
+                        rejected += 1
+                    elif error_analysis.disposition is QueryErrorDisposition.SUCCESS:
+                        baseline = executions_by_role[NodeRole.BASELINE]
+                        baseline_artifact = encoded[NodeRole.BASELINE]
+                        pass_record = PassRecord(
                             case_id=case_id,
                             run_id=context.request.run_id,
                             database=current_prepared.database,
@@ -521,18 +1396,297 @@ class CorrectnessRoundEngine:
                             },
                             coverage_tags=tuple(sorted(query.coverage_tags)),
                         )
+                        effective_verdict = QueryErrorDisposition.SUCCESS.value
+                    elif error_analysis.disposition is QueryErrorDisposition.EXPECTED_ERROR:
+                        effective_verdict = QueryErrorDisposition.EXPECTED_ERROR.value
+
+                    if finding_verdict is not None:
+                        if first_difference is None:  # pragma: no cover - local invariant
+                            raise RuntimeError("finding requires first-difference details")
+                        finding_record = FindingRecord(
+                            case_id=case_id,
+                            run_id=context.request.run_id,
+                            mode="correctness",
+                            databases={role: current_prepared.database for role in NodeRole},
+                            seeds={
+                                "data": materialized.data_seed,
+                                "query": query.seed,
+                                "round": context.round_seed,
+                                "schema": materialized.schema_seed,
+                            },
+                            setup_sql=(
+                                *materialized.bundle.statements,
+                                *committed_mutation_sql,
+                            ),
+                            query_sql=query.sql,
+                            query_limits={
+                                "byte_limit": self._limits.byte_limit,
+                                "row_limit": self._limits.row_limit,
+                                "timeout_seconds": self._limits.timeout_seconds,
+                            },
+                            payload_sha256=materialized.bundle.payload_sha256,
+                            original_verdict=finding_verdict,
+                            first_difference=first_difference,
+                            statistics={
+                                role.value: {
+                                    "elapsed_ns": next(
+                                        e for e in executions if e.role is role
+                                    ).elapsed_ns,
+                                    "rows": len(next(e for e in executions if e.role is role).rows),
+                                    "status": next(
+                                        e for e in executions if e.role is role
+                                    ).status.value,
+                                }
+                                for role in NodeRole
+                            },
+                            configuration_fingerprints=self._fingerprints,
+                            results=encoded,
+                            requires_same_session=materialized.bundle.requires_same_session,
+                            replica_parameters_sha256=self._replica_parameters_sha256,
+                        )
+                except Exception as error:
+                    self._artifacts.write_query_record(
+                        context.worker_id,
+                        {
+                            **attempt_context,
+                            "exception": {
+                                "message": str(error),
+                                "type": type(error).__name__,
+                            },
+                            "nodes": nodes,
+                            "result_database": current_prepared.database,
+                            "type": "query_attempt_finished",
+                            "verdict": "classification_exception",
+                        },
                     )
-                if query.coverage_eligible:
-                    self._coverage.record(query.target_feature_id)
-                queries_completed += 1
-                events.publish(
-                    "query_completed",
+                    raise
+
+                observed_identities = {
+                    role.value: (
+                        None
+                        if identity is None
+                        else {"errno": identity[0], "sqlstate": identity[1]}
+                    )
+                    for role, identity in zip(
+                        NodeRole,
+                        error_analysis.observed_identities,
+                        strict=True,
+                    )
+                }
+                self._artifacts.write_query_record(
+                    context.worker_id,
                     {
-                        "case_id": case_id,
-                        "case_ordinal": query.case_ordinal,
-                        "verdict": oracle.verdict.value,
+                        **attempt_context,
+                        "error_disposition": error_analysis.disposition.value,
+                        "first_difference": first_difference,
+                        "expected_finding_manifest": (
+                            None if finding_record is None else f"findings/{case_id}/manifest.json"
+                        ),
+                        "nodes": nodes,
+                        "observed_error_identities": observed_identities,
+                        "oracle_verdict": oracle.verdict.value,
+                        "reason": error_analysis.reason,
+                        "result_database": current_prepared.database,
+                        "type": "query_attempt_finished",
+                        "verdict": effective_verdict,
                     },
                 )
+
+                if pass_record is not None:
+                    self._artifacts.write_pass(pass_record)
+                    if query.coverage_eligible and error_analysis.coverage_eligible:
+                        self._coverage.record(query.target_feature_id)
+                        for coverage_tag in sorted(query.coverage_tags - {query.target_feature_id}):
+                            self._coverage.record(coverage_tag)
+                if finding_record is not None:
+                    self._artifacts.write_finding(finding_record)
+                    findings += 1
+                counted_this_query = not dynamic_queries or pass_record is not None
+                if counted_this_query:
+                    queries_completed += 1
+                completion_payload: dict[str, object] = {
+                    "case_id": case_id,
+                    "case_ordinal": query.case_ordinal,
+                    "database": current_prepared.database,
+                    "lane": query.lane.value,
+                    "query_seed": query.seed,
+                    "query_sql": query.sql,
+                    "round_number": context.round_number,
+                    "target_feature_id": query.target_feature_id,
+                    "verdict": effective_verdict,
+                    "worker_id": context.worker_id,
+                }
+                if error_analysis.disposition is not QueryErrorDisposition.SUCCESS:
+                    completion_payload.update(
+                        {
+                            "error_reason": error_analysis.reason,
+                            "expected_error": _expected_error_to_artifact(query.expected_error),
+                            "observed_error_identities": tuple(
+                                (
+                                    None
+                                    if identity is None
+                                    else {
+                                        "errno": identity[0],
+                                        "sqlstate": identity[1],
+                                    }
+                                )
+                                for identity in error_analysis.observed_identities
+                            ),
+                        }
+                    )
+                events.publish(
+                    (
+                        "query_completed"
+                        if counted_this_query or finding_record is not None
+                        else "query_rejected"
+                    ),
+                    completion_payload,
+                )
+                if finding_record is not None:
+                    break
+
+                if (
+                    self._mutation_generator is not None
+                    and self._mutation_coordinator is not None
+                    and counted_this_query
+                    and queries_completed % 10 == 0
+                ):
+                    mutation_sequence += 1
+                    mutation_seed = SeedTree(context.round_seed).derive(
+                        "mutation", mutation_sequence
+                    )
+                    mutation_batch = self._mutation_generator.generate(
+                        cast(Any, materialized.bundle),
+                        seed=mutation_seed,
+                        sequence=mutation_sequence,
+                    )
+                    logged_execute = getattr(
+                        self._mutation_coordinator, "execute_batch_logged", None
+                    )
+                    if callable(logged_execute):
+                        self._artifacts.begin_round_dml_batch(
+                            context.worker_id, current_prepared.database
+                        )
+                        try:
+                            mutation_result = logged_execute(
+                                current_prepared.database,
+                                mutation_batch,
+                                on_statement=lambda sql: self._artifacts.append_round_dml_sql(
+                                    context.worker_id,
+                                    current_prepared.database,
+                                    sql,
+                                ),
+                            )
+                        finally:
+                            self._artifacts.end_round_dml_batch(
+                                context.worker_id, current_prepared.database
+                            )
+                    else:
+                        mutation_result = self._mutation_coordinator.execute_batch(
+                            current_prepared.database,
+                            mutation_batch,
+                        )
+                        self._artifacts.append_round_dml_batch(
+                            context.worker_id,
+                            current_prepared.database,
+                            mutation_result.executed_sql,
+                        )
+                    events.publish(
+                        "mutation_batch_completed",
+                        {
+                            "batch_seed": mutation_seed,
+                            "database": current_prepared.database,
+                            "sequence": mutation_sequence,
+                            "statement_count": len(mutation_batch.statements),
+                            "actual_affected_rows": mutation_result.actual_affected_rows,
+                            "target_rows": mutation_batch.target_rows,
+                            "verdict": mutation_result.verdict.value,
+                            "worker_id": context.worker_id,
+                        },
+                    )
+                    if mutation_result.verdict in {
+                        MutationVerdict.COMMITTED,
+                        MutationVerdict.REPLICA_SYNC_TIMEOUT,
+                    }:
+                        committed_mutation_sql.extend(mutation_result.executed_sql)
+                    if mutation_result.terminates_round:
+                        mutation_case_id = deterministic_id(
+                            "case",
+                            context.request.run_id,
+                            context.round_number,
+                            "mutation",
+                            mutation_sequence,
+                        )
+                        encoded_mutation = {
+                            role: node_execution_to_artifact(mutation_result.final_results[role])
+                            for role in NodeRole
+                        }
+                        mutation_difference: dict[str, object] = {
+                            "category": "mutation",
+                            "affected_rows_by_role": {
+                                role.value: mutation_result.final_results[role].affected_rows
+                                for role in NodeRole
+                            },
+                            "status_by_role": {
+                                role.value: mutation_result.final_results[role].status.value
+                                for role in NodeRole
+                            },
+                            "target_rows": mutation_batch.target_rows,
+                            "transaction_steps": _mutation_step_artifacts(mutation_result),
+                        }
+                        if mutation_result.replication_result is not None:
+                            mutation_difference = {
+                                "category": "replication",
+                                "observations": _replication_observations(
+                                    mutation_result.replication_result
+                                ),
+                                "required_sequence": mutation_sequence,
+                            }
+                        self._artifacts.write_finding(
+                            FindingRecord(
+                                case_id=mutation_case_id,
+                                run_id=context.request.run_id,
+                                mode="correctness",
+                                databases={role: current_prepared.database for role in NodeRole},
+                                seeds={
+                                    "data": materialized.data_seed,
+                                    "mutation": mutation_seed,
+                                    "round": context.round_seed,
+                                    "schema": materialized.schema_seed,
+                                },
+                                setup_sql=(
+                                    *materialized.bundle.statements,
+                                    *committed_mutation_sql,
+                                ),
+                                query_sql=(
+                                    mutation_result.failing_sql or mutation_batch.statements[0].sql
+                                ),
+                                query_limits={
+                                    "byte_limit": self._limits.byte_limit,
+                                    "row_limit": self._limits.row_limit,
+                                    "timeout_seconds": self._limits.timeout_seconds,
+                                },
+                                payload_sha256=materialized.bundle.payload_sha256,
+                                original_verdict=mutation_result.verdict.value,
+                                first_difference=mutation_difference,
+                                statistics={
+                                    role.value: {
+                                        "affected_rows": mutation_result.final_results[
+                                            role
+                                        ].affected_rows,
+                                        "status": mutation_result.final_results[role].status.value,
+                                    }
+                                    for role in NodeRole
+                                },
+                                configuration_fingerprints=self._fingerprints,
+                                results=encoded_mutation,
+                                requires_same_session=False,
+                                replica_parameters_sha256=(self._replica_parameters_sha256),
+                                execution_sql=mutation_result.executed_sql,
+                            )
+                        )
+                        findings += 1
+                        break
         finally:
             current_prepared.close()
             if current_prepared is not prepared:
@@ -542,23 +1696,22 @@ class CorrectnessRoundEngine:
             context.round_number,
             queries_completed,
             findings,
-            0,
+            rejected,
             over_budget,
         )
 
 
 def _fingerprints(config: AppConfig) -> dict[NodeRole, str]:
     return {
-        node.role: stable_fingerprint(
+        role: stable_fingerprint(
             {
-                "host": node.host,
-                "port": node.port,
-                "role": node.role.value,
-                "role_probe_expected": node.role_probe_expected,
-                "role_probe_sql": node.role_probe_sql,
+                "primary": config.node_for(role).model_dump(mode="json"),
+                "replica": config.replica_for(role).model_dump(mode="json"),
+                "replica_session_variables": config.replica_session_variables(role),
+                "role": role.value,
             }
         )
-        for node in config.nodes
+        for role in NodeRole
     }
 
 
@@ -591,24 +1744,77 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
     if config.mode.value != "correctness":
         raise ValueError("correctness runner requires correctness config mode")
     event_writer = JsonlWriter(artifact_root / "events.jsonl")
-    artifacts = CaseBundleWriter(artifact_root, events=event_writer)
+    artifacts = CaseBundleWriter(
+        artifact_root,
+        events=event_writer,
+        full_thread_sql_log=config.full_thread_sql_log,
+        query_attempt_json_log=False,
+        record_pass_events=False,
+    )
     ledger = CoverageLedger(artifact_root / "coverage.json")
-    mix = query_mix_from_rates(
-        config.correctness.free_random_rate,
-        config.correctness.negative_mutation_rate,
+    grammar = (
+        SelectGrammar.default()
+        if config.correctness.query_grammar_path is None
+        else SelectGrammar.from_path(config.correctness.query_grammar_path)
+    )
+    grammar_generator = GrammarQueryGenerator(
+        grammar,
+        config=GrammarQueryConfig(
+            compatible_type_percent=(
+                config.correctness.grammar_compatible_type_percent
+            ),
+            max_tables_per_query_block=config.correctness.max_query_tables,
+        ),
     )
     source = GeneratedRoundSource(
         ledger,
         min_rows_per_table=config.correctness.min_rows_per_table,
         max_rows_per_table=config.correctness.max_rows_per_table,
-        query_generator=QueryGenerator(mix=mix),
+        schema_limits=SchemaLimits(
+            min_tables=config.correctness.min_tables,
+            max_tables=config.correctness.max_tables,
+            min_columns=config.correctness.min_columns,
+            max_columns=config.correctness.max_columns,
+            max_indexes_per_table=config.correctness.max_indexes_per_table,
+        ),
+        query_budget=QueryBudget(
+            max_tables=config.correctness.max_query_tables,
+            max_depth=config.correctness.max_query_depth,
+            max_output_rows=config.correctness.row_limit,
+        ),
+        grammar_query_generator=grammar_generator,
+        replica_mode=True,
     )
-    factory = MySQLConnectorFactory()
+    primary_factory = MySQLConnectorFactory()
+    replica_factory = MySQLConnectorFactory(
+        session_variables_by_role={
+            role: config.replica_session_variables(role) for role in NodeRole
+        }
+    )
+    replication = ReplicationBarrier(
+        config.replica_nodes,
+        replica_factory,
+        timeout_seconds=config.replica_sync_timeout_seconds,
+    )
     coordinator = TriadCoordinator(
-        config.nodes,
-        setup_runner=MySQLSetupRunner(factory),
-        query_runner=NodeQueryRunner(factory),
-        session_factory=factory,
+        config.primary_nodes,
+        query_nodes=config.replica_nodes,
+        setup_runner=MySQLSetupRunner(primary_factory),
+        query_runner=NodeQueryRunner(replica_factory),
+        session_factory=replica_factory,
+        replication_waiter=replication,
+    )
+    mutation_limits = QueryLimits(
+        config.correctness.timeout_seconds,
+        max(config.correctness.row_limit, 50),
+        config.correctness.byte_limit,
+    )
+    mutation_coordinator = TriadMutationCoordinator(
+        config.primary_nodes,
+        factory=primary_factory,
+        runner=NodeQueryRunner(primary_factory),
+        replication_waiter=replication,
+        limits=mutation_limits,
     )
     engine = CorrectnessRoundEngine(
         source,
@@ -621,8 +1827,15 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
             config.correctness.byte_limit,
         ),
         configuration_fingerprints=_fingerprints(config),
+        mutation_generator=MutationBatchGenerator(),
+        mutation_coordinator=mutation_coordinator,
+        replica_parameters_sha256=config.replica_parameters_sha256,
+        explain_timeout_seconds=config.correctness.explain_timeout_seconds,
     )
-    return CorrectnessRunService(engine, JsonlEventSink(event_writer))
+    return CorrectnessRunService(
+        engine,
+        JsonlEventSink(event_writer, persist_query_events=False),
+    )
 
 
 __all__ = [

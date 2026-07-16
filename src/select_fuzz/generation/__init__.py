@@ -2,6 +2,19 @@
 
 from select_fuzz.generation.catalog import EvidenceRef, FeatureCatalog, FeatureSpec
 from select_fuzz.generation.coverage import CoverageLedger, CoverageScheduler
+from select_fuzz.generation.function_registry import (
+    DETERMINISTIC_FUNCTION_SIGNATURES,
+    DeterministicFunctionSignature,
+    FunctionArgument,
+    FunctionFamily,
+    FunctionResult,
+)
+from select_fuzz.generation.mutation import (
+    MutationBatch,
+    MutationBatchGenerator,
+    MutationOperation,
+    MutationStatement,
+)
 from select_fuzz.generation.query import (
     EvidenceGateError,
     GeneratedQuery,
@@ -17,7 +30,24 @@ from select_fuzz.generation.query import (
     UnsupportedQueryFeature,
 )
 from select_fuzz.generation.query_ast import ExpectedError, ExpectedErrorKind, QueryAst
+from select_fuzz.generation.query_grammar import (
+    CandidateQuery,
+    CandidateRejected,
+    GrammarColumn,
+    GrammarError,
+    GrammarQueryConfig,
+    GrammarQueryGenerator,
+    GrammarSchema,
+    GrammarTable,
+    SelectGrammar,
+    TypeFamily,
+)
 from select_fuzz.generation.query_safety import ReadOnlyValidator, UnsafeQuery
+from select_fuzz.generation.query_scope import (
+    DEFAULT_QUERY_SCOPE,
+    QueryCoverageScope,
+    QueryExclusionReason,
+)
 from select_fuzz.generation.schema import (
     ColumnDef,
     ForeignKeyDef,
@@ -39,26 +69,46 @@ from select_fuzz.generation.schema_rules import SchemaRuleViolation, SchemaRules
 __all__ = [
     "CoverageLedger",
     "CoverageScheduler",
+    "DEFAULT_QUERY_SCOPE",
+    "DETERMINISTIC_FUNCTION_SIGNATURES",
     "ColumnDef",
+    "CandidateQuery",
+    "CandidateRejected",
     "EvidenceGateError",
     "EvidenceRef",
+    "DeterministicFunctionSignature",
     "ExpectedError",
     "ExpectedErrorKind",
     "FeatureCatalog",
     "FeatureSpec",
     "ForeignKeyDef",
+    "FunctionArgument",
+    "FunctionFamily",
+    "FunctionResult",
     "IndexDef",
     "IndexExpression",
     "IndexExpressionKind",
     "IndexKind",
     "IndexPart",
+    "MutationBatch",
+    "MutationBatchGenerator",
+    "MutationOperation",
+    "MutationStatement",
     "PartitionDef",
     "GeneratedQuery",
+    "GrammarColumn",
+    "GrammarError",
+    "GrammarQueryConfig",
+    "GrammarQueryGenerator",
+    "GrammarSchema",
+    "GrammarTable",
     "QueryAst",
     "QueryBatchPlanner",
     "QueryBudget",
     "QueryBudgetExceeded",
     "QueryComplexity",
+    "QueryCoverageScope",
+    "QueryExclusionReason",
     "QueryGenerator",
     "QueryLane",
     "QueryMix",
@@ -71,8 +121,10 @@ __all__ = [
     "SchemaRuleViolation",
     "SchemaRules",
     "SortDirection",
+    "SelectGrammar",
     "TableDef",
     "TargetNotReachable",
     "UnsafeQuery",
     "UnsupportedQueryFeature",
+    "TypeFamily",
 ]

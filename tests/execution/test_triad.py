@@ -10,7 +10,11 @@ import pytest
 
 from select_fuzz.config import NodeConfig, NodeRole
 from select_fuzz.domain import ColumnMeta, ErrorInfo, ExecutionStatus, NodeExecution
-from select_fuzz.execution.setup import MySQLSetupRunner, SetupNodeResult
+from select_fuzz.execution.setup import (
+    MySQLSetupRunner,
+    SetupNodeResult,
+    SetupStatementNodeResult,
+)
 from select_fuzz.execution.triad import (
     DatabaseNameFactory,
     InfrastructureRetryPolicy,
@@ -30,6 +34,9 @@ class _DatabaseError(Exception):
 
 class _Cursor:
     columns: tuple[()] = ()
+
+    def __init__(self, affected_rows: int | None = 0) -> None:
+        self.affected_rows = affected_rows
 
     def fetchmany(self, size: int) -> tuple[()]:
         return ()
@@ -70,7 +77,10 @@ class _Session:
                 raise self.factory.semantic_failures[self.role]
             if self.role in self.factory.infrastructure_failures:
                 raise RuntimeError("transport unavailable")
-        return _Cursor()
+        affected_rows = (
+            self.factory.setup_affected_rows.get(self.role, 3) if sql.startswith("INSERT") else 0
+        )
+        return _Cursor(affected_rows)
 
     def disconnect(self) -> None:
         self.alive = False
@@ -91,11 +101,10 @@ class _Factory:
         self.semantic_failures: dict[NodeRole, _DatabaseError] = {}
         self.infrastructure_failures: set[NodeRole] = set()
         self.pin_failures: set[NodeRole] = set()
+        self.setup_affected_rows: dict[NodeRole, int | None] = {}
 
     @contextmanager
-    def query_session(
-        self, node: NodeConfig, database: str
-    ) -> Iterator[_Session]:
+    def query_session(self, node: NodeConfig, database: str) -> Iterator[_Session]:
         assert database == "information_schema"
         if node.role in self.pin_failures:
             raise RuntimeError("pin failed")
@@ -108,9 +117,7 @@ class _Factory:
             session.close()
 
     @contextmanager
-    def control_session(
-        self, node: NodeConfig, database: str
-    ) -> Iterator[_Session]:
+    def control_session(self, node: NodeConfig, database: str) -> Iterator[_Session]:
         with self.query_session(node, database) as session:
             yield session
 
@@ -205,9 +212,7 @@ class _WrongRoleSetupRunner(_DigestSetupRunner):
         *,
         session: _Session | None = None,
     ) -> SetupNodeResult:
-        return SetupNodeResult(
-            NodeRole.BASELINE, ExecutionStatus.SUCCESS, bundle.payload_sha256
-        )
+        return SetupNodeResult(NodeRole.BASELINE, ExecutionStatus.SUCCESS, bundle.payload_sha256)
 
 
 class _WrongRoleQueryRunner(_QueryRunner):
@@ -249,9 +254,8 @@ class _FlakySetupRunner:
                 ExecutionStatus.INFRA_ERROR,
                 error=ErrorInfo(2003, "HY000", "Can't connect to MySQL server"),
             )
-        return SetupNodeResult(
-            node.role, ExecutionStatus.SUCCESS, bundle.payload_sha256
-        )
+        return SetupNodeResult(node.role, ExecutionStatus.SUCCESS, bundle.payload_sha256)
+
 
 @pytest.fixture
 def nodes() -> tuple[NodeConfig, ...]:
@@ -276,6 +280,120 @@ def _limits() -> QueryLimits:
     return QueryLimits(timeout_seconds=15, row_limit=10_000, byte_limit=32 << 20)
 
 
+def test_setup_uses_primaries_and_queries_use_replicas(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    replicas = tuple(
+        NodeConfig(role=role, host="replica.example", port=33161 + index)
+        for index, role in enumerate(NodeRole)
+    )
+    setup_ports: list[int] = []
+    query_ports: list[int] = []
+
+    class Setup:
+        def apply(self, node, database, bundle, *, session=None):  # type: ignore[no-untyped-def]
+            setup_ports.append(node.port)
+            return SetupNodeResult(node.role, ExecutionStatus.SUCCESS, bundle.payload_sha256)
+
+    class Query(_QueryRunner):
+        def run(self, node, database, sql, **kwargs):  # type: ignore[no-untyped-def]
+            query_ports.append(node.port)
+            return super().run(node, database, sql, **kwargs)
+
+    coordinator = TriadCoordinator(
+        nodes,
+        query_nodes=replicas,
+        setup_runner=Setup(),
+        query_runner=Query(),
+        session_factory=_Factory(),
+    )
+    prepared = coordinator.prepare(_Bundle(False), database="sf_correctness_route_1")
+
+    coordinator.execute(prepared, "SELECT 1", _limits())
+
+    assert sorted(setup_ports) == sorted(node.port for node in nodes)
+    assert sorted(query_ports) == sorted(node.port for node in replicas)
+
+
+def test_baseline_explain_uses_one_query_node_without_a_barrier(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    calls: list[tuple[NodeConfig, str, float, Any]] = []
+
+    class ExplainRunner(_QueryRunner):
+        def run(
+            self,
+            node,
+            database,
+            sql,
+            *,
+            timeout_s,
+            row_limit,
+            byte_limit,
+            barrier,
+        ):  # type: ignore[no-untyped-def]
+            calls.append((node, sql, timeout_s, barrier))
+            now = monotonic_ns()
+            return NodeExecution.success(
+                role=node.role,
+                connection_id=500,
+                started_ns=now,
+                ended_ns=now,
+                columns=(ColumnMeta("table", 253, False, False, False),),
+                rows=(("t0",),),
+            )
+
+    coordinator = _coordinator(nodes, _Factory(), ExplainRunner())
+    prepared = coordinator.prepare(_Bundle(False), database="sf_correctness_explain_1")
+
+    result = coordinator.explain_baseline(
+        prepared,
+        "SELECT 1;",
+        QueryLimits(timeout_seconds=10, row_limit=10_000, byte_limit=32 << 20),
+    )
+
+    assert result.prepared is prepared
+    assert result.execution.status is ExecutionStatus.SUCCESS
+    assert result.execution.rows
+    assert len(calls) == 1
+    node, sql, timeout, barrier = calls[0]
+    assert node.role is NodeRole.BASELINE
+    assert sql == "EXPLAIN SELECT 1"
+    assert timeout == 10
+    assert barrier is None
+
+
+def test_initial_replica_barrier_timeout_preserves_prepared_database(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    class Setup:
+        def apply(self, node, database, bundle, *, session=None):  # type: ignore[no-untyped-def]
+            return SetupNodeResult(node.role, ExecutionStatus.SUCCESS, bundle.payload_sha256)
+
+    class WaitResult:
+        ready = False
+        observations: dict[object, object] = {}
+
+    class Waiter:
+        def wait(self, database: str, sequence: int) -> WaitResult:
+            assert database == "sf_correctness_replica_timeout_1"
+            assert sequence == 0
+            return WaitResult()
+
+    coordinator = TriadCoordinator(
+        nodes,
+        setup_runner=Setup(),
+        query_runner=_QueryRunner(),
+        session_factory=_Factory(),
+        replication_waiter=Waiter(),
+    )
+
+    prepared = coordinator.prepare(_Bundle(False), database="sf_correctness_replica_timeout_1")
+
+    assert prepared.status is PrepareStatus.REPLICA_SYNC_TIMEOUT
+    assert prepared.database == "sf_correctness_replica_timeout_1"
+
+
 def test_same_setup_bundle_reaches_all_roles_concurrently(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
@@ -288,11 +406,61 @@ def test_same_setup_bundle_reaches_all_roles_concurrently(
 
     assert prepared.status is PrepareStatus.READY
     assert {result.role for result in prepared.nodes} == set(NodeRole)
-    assert {result.payload_sha256 for result in prepared.nodes} == {
-        bundle.payload_sha256
-    }
+    assert {result.payload_sha256 for result in prepared.nodes} == {bundle.payload_sha256}
     assert all(session.saw_setup for session in factory.sessions)
     assert all(session.closed for session in factory.sessions)
+
+
+def test_initial_dml_affected_row_difference_is_setup_mismatch(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    factory = _Factory()
+    factory.setup_affected_rows[NodeRole.CUSTOM_ON] = 2
+
+    prepared = _coordinator(nodes, factory, _QueryRunner()).prepare(
+        _Bundle(requires_same_session=False),
+        database="sf_correctness_setup_rows_1",
+    )
+
+    assert prepared.status is PrepareStatus.SETUP_MISMATCH
+    assert prepared.setup_failing_sql == "INSERT INTO `t0` VALUES (1),(2),(3);"
+    failing_record = prepared.setup_statement_records[-1]
+    assert failing_record.results[NodeRole.BASELINE].affected_rows == 3
+    assert failing_record.results[NodeRole.CUSTOM_ON].affected_rows == 2
+
+
+def test_initial_dml_requires_connector_affected_rows(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    factory = _Factory()
+    factory.setup_affected_rows = {role: None for role in NodeRole}
+
+    prepared = _coordinator(nodes, factory, _QueryRunner()).prepare(
+        _Bundle(requires_same_session=False),
+        database="sf_correctness_setup_rows_2",
+    )
+
+    assert prepared.status is PrepareStatus.SETUP_MISMATCH
+    assert prepared.setup_failing_sql.startswith("INSERT")
+
+
+def test_different_semantic_setup_errors_are_a_mismatch(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    factory = _Factory()
+    for ordinal, role in enumerate(NodeRole):
+        factory.semantic_failures[role] = _DatabaseError(
+            1005 + ordinal,
+            "HY000",
+            f"different setup error {ordinal}",
+        )
+
+    prepared = _coordinator(nodes, factory, _QueryRunner()).prepare(
+        _Bundle(requires_same_session=False),
+        database="sf_correctness_setup_errors_1",
+    )
+
+    assert prepared.status is PrepareStatus.SETUP_MISMATCH
 
 
 def test_partial_setup_error_is_mismatch(nodes: tuple[NodeConfig, ...]) -> None:
@@ -344,7 +512,7 @@ def test_all_same_access_denied_is_infrastructure_pause_not_rejected_generation(
     assert prepared.status is PrepareStatus.INFRASTRUCTURE_PAUSE
 
 
-def test_infrastructure_setup_failure_pauses_without_finding(
+def test_partial_infrastructure_setup_failure_is_a_preserved_mismatch(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
@@ -355,7 +523,7 @@ def test_infrastructure_setup_failure_pauses_without_finding(
         _Bundle(requires_same_session=False), database="sf_correctness_w0_r4_s10"
     )
 
-    assert prepared.status is PrepareStatus.INFRASTRUCTURE_PAUSE
+    assert prepared.status is PrepareStatus.SETUP_MISMATCH
 
 
 def test_temporary_setup_and_query_share_each_pinned_session(
@@ -367,9 +535,7 @@ def test_temporary_setup_and_query_share_each_pinned_session(
     bundle = _Bundle(requires_same_session=True)
 
     prepared = coordinator.prepare(bundle, database="sf_correctness_w0_r5_s11")
-    results = coordinator.execute(
-        prepared, "SELECT COUNT(*) FROM `t0` ORDER BY 1", _limits()
-    )
+    results = coordinator.execute(prepared, "SELECT COUNT(*) FROM `t0` ORDER BY 1", _limits())
 
     assert prepared.status is PrepareStatus.READY
     assert prepared.sessions is not None
@@ -461,6 +627,52 @@ def test_setup_node_result_enforces_success_error_invariants() -> None:
     )
     assert result.payload_sha256 is None
 
+    with pytest.raises(ValueError, match="successful setup cannot"):
+        SetupNodeResult(
+            role=NodeRole.BASELINE,
+            status=ExecutionStatus.SUCCESS,
+            payload_sha256="a" * 64,
+            error=ErrorInfo(1005, "HY000", "unexpected"),
+        )
+    with pytest.raises(ValueError, match="status"):
+        SetupNodeResult(
+            role=NodeRole.BASELINE,
+            status=ExecutionStatus.TIMEOUT,
+            error=ErrorInfo(3024, "HY000", "timeout"),
+        )
+    with pytest.raises(ValueError, match="payload"):
+        SetupNodeResult(
+            role=NodeRole.BASELINE,
+            status=ExecutionStatus.ERROR,
+            payload_sha256="a" * 64,
+            error=ErrorInfo(1005, "HY000", "failure"),
+        )
+
+
+def test_setup_statement_result_enforces_status_payload_invariants() -> None:
+    error = ErrorInfo(1005, "HY000", "failure")
+    with pytest.raises(ValueError, match="successful setup statement"):
+        SetupStatementNodeResult(
+            NodeRole.BASELINE,
+            ExecutionStatus.SUCCESS,
+            error=error,
+        )
+    with pytest.raises(ValueError, match="status"):
+        SetupStatementNodeResult(
+            NodeRole.BASELINE,
+            ExecutionStatus.TIMEOUT,
+            error=error,
+        )
+    with pytest.raises(ValueError, match="requires an error"):
+        SetupStatementNodeResult(NodeRole.BASELINE, ExecutionStatus.ERROR)
+    with pytest.raises(ValueError, match="affected rows"):
+        SetupStatementNodeResult(
+            NodeRole.BASELINE,
+            ExecutionStatus.ERROR,
+            affected_rows=1,
+            error=error,
+        )
+
 
 def test_payload_checksum_divergence_is_setup_mismatch(
     nodes: tuple[NodeConfig, ...],
@@ -473,9 +685,7 @@ def test_payload_checksum_divergence_is_setup_mismatch(
         session_factory=factory,
     )
 
-    prepared = coordinator.prepare(
-        _Bundle(False), database="sf_correctness_w0_r8_s14"
-    )
+    prepared = coordinator.prepare(_Bundle(False), database="sf_correctness_w0_r8_s14")
 
     assert prepared.status is PrepareStatus.SETUP_MISMATCH
 
@@ -487,9 +697,7 @@ def test_partial_pinned_session_acquisition_closes_earlier_leases(
     factory.pin_failures.add(NodeRole.CUSTOM_OFF)
     coordinator = _coordinator(nodes, factory, _QueryRunner())
 
-    prepared = coordinator.prepare(
-        _Bundle(True), database="sf_correctness_w0_r9_s15"
-    )
+    prepared = coordinator.prepare(_Bundle(True), database="sf_correctness_w0_r9_s15")
 
     assert prepared.status is PrepareStatus.INFRASTRUCTURE_PAUSE
     assert prepared.sessions is None
@@ -506,9 +714,7 @@ def test_failed_temporary_setup_closes_all_pinned_sessions(
     )
     coordinator = _coordinator(nodes, factory, _QueryRunner())
 
-    prepared = coordinator.prepare(
-        _Bundle(True), database="sf_correctness_w0_r10_s16"
-    )
+    prepared = coordinator.prepare(_Bundle(True), database="sf_correctness_w0_r10_s16")
 
     assert prepared.status is PrepareStatus.SETUP_MISMATCH
     assert prepared.sessions is None

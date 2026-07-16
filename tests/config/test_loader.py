@@ -25,11 +25,31 @@ from select_fuzz.config import (
 def _node(role: str, port: int) -> dict[str, object]:
     return {
         "role": role,
-        "host": "127.0.0.1",
-        "port": port,
-        "username_env": "SELECT_FUZZ_MYSQL_USER",
-        "password_env": "SELECT_FUZZ_MYSQL_PASSWORD",
+        "primary": {
+            "host": "127.0.0.1",
+            "port": port,
+            "username_env": "SELECT_FUZZ_MYSQL_USER",
+            "password_env": "SELECT_FUZZ_MYSQL_PASSWORD",
+        },
+        "replica": {
+            "host": "127.0.0.1",
+            "port": port + 10_000,
+            "username_env": "SELECT_FUZZ_MYSQL_USER",
+            "password_env": "SELECT_FUZZ_MYSQL_PASSWORD",
+        },
     }
+
+
+def test_loader_rejects_legacy_single_endpoint_topology(tmp_path: Path) -> None:
+    data = _config_data()
+    data["nodes"] = [
+        {"role": "baseline", "host": "127.0.0.1", "port": 3306},
+        {"role": "custom_off", "host": "127.0.0.1", "port": 3307},
+        {"role": "custom_on", "host": "127.0.0.1", "port": 3308},
+    ]
+
+    with pytest.raises(ConfigLoadError, match="distinct primary and replica"):
+        load_config(_write_config(tmp_path, data))
 
 
 def _config_data(**correctness: object) -> dict[str, object]:
@@ -62,11 +82,18 @@ def test_mode_defaults_cli_override_and_secret_never_enters_config(
     assert config.correctness.workers == 8
     assert config.correctness.queries_per_round == 1000
     assert config.correctness.timeout_seconds == 15.0
+    assert config.correctness.explain_timeout_seconds == 10.0
+    assert config.correctness.grammar_compatible_type_percent == 80
+    assert config.correctness.query_grammar_path is None
     assert config.performance.workers == 1
     assert config.performance.queries_per_round == 100
     assert config.performance.regression_threshold == 0.20
     assert config.performance.calibration_max_seconds == 12.0
     assert config.performance.formal_timeout_seconds == 15.0
+    assert config.full_thread_sql_log is False
+    assert config.correctness.negative_mutation_rate == 0
+    assert config.performance.initial_table_rows_max == 1_000_000
+    assert config.performance.insert_batch_rows == 10_000
     assert "runtime-secret" not in config.model_dump_json()
     assert "runtime-secret" not in repr(config)
 
@@ -105,6 +132,43 @@ def test_performance_workers_must_equal_one() -> None:
         PerformanceConfig(calibration_runs_per_reference=2)
 
 
+def test_fuzz_ranges_and_thread_sql_log_switch_are_strict() -> None:
+    config = AppConfig(
+        nodes=(
+            NodeConfig(role=NodeRole.BASELINE, host="127.0.0.1", port=3306),
+            NodeConfig(role=NodeRole.CUSTOM_OFF, host="127.0.0.1", port=3307),
+            NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1", port=3308),
+        ),
+        full_thread_sql_log=True,
+        correctness=CorrectnessConfig(
+            min_tables=2,
+            max_tables=5,
+            min_columns=3,
+            max_columns=12,
+            max_indexes_per_table=6,
+            max_query_depth=4,
+        ),
+        performance=PerformanceConfig(
+            initial_table_rows=100_000,
+            initial_table_rows_max=500_000,
+            max_table_rows=1_000_000,
+            max_total_rows=2_000_000,
+            insert_batch_rows=5_000,
+        ),
+    )
+
+    assert config.full_thread_sql_log is True
+    assert config.correctness.max_query_depth == 4
+    assert config.performance.initial_table_rows_max == 500_000
+
+    with pytest.raises(ValidationError, match="min_tables"):
+        CorrectnessConfig(min_tables=5, max_tables=2)
+    with pytest.raises(ValidationError, match="initial_table_rows_max"):
+        PerformanceConfig(initial_table_rows=500_000, initial_table_rows_max=100_000)
+    with pytest.raises(ValidationError, match="max_total_rows"):
+        PerformanceConfig(max_table_rows=2_000_000, max_total_rows=1_000_000)
+
+
 def test_statement_timeouts_share_the_ui_and_connector_safety_ceiling() -> None:
     assert CorrectnessConfig(timeout_seconds=300).timeout_seconds == 300
     assert PerformanceConfig(formal_timeout_seconds=300).formal_timeout_seconds == 300
@@ -123,6 +187,8 @@ def test_correctness_row_range_is_configurable_and_ordered(tmp_path: Path) -> No
 
     assert config.correctness.min_rows_per_table == 37
     assert config.correctness.max_rows_per_table == 419
+    with pytest.raises(ValidationError, match="min_rows_per_table"):
+        CorrectnessConfig(min_rows_per_table=0, max_rows_per_table=1)
 
     with pytest.raises(ValidationError, match="min_rows_per_table"):
         CorrectnessConfig(min_rows_per_table=500, max_rows_per_table=100)
@@ -292,9 +358,7 @@ def test_preflight_warns_when_configuration_fingerprint_is_missing() -> None:
 
     report = evaluate_preflight(snapshots)
 
-    assert "configuration_fingerprint_missing" in {
-        issue.code for issue in report.warnings
-    }
+    assert "configuration_fingerprint_missing" in {issue.code for issue in report.warnings}
 
 
 def test_role_probe_fields_must_be_configured_together() -> None:

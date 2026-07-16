@@ -29,8 +29,16 @@ from select_fuzz.execution import (
     MySQLConnectorFactory,
     MySQLSetupRunner,
     NodeQueryRunner,
+    ReplicationBarrier,
+    replication_sequence_from_sql,
 )
-from select_fuzz.oracle import OracleVerdict, compare_three_nodes
+from select_fuzz.generation.query_ast import ExpectedError, ExpectedErrorKind
+from select_fuzz.oracle import (
+    OracleVerdict,
+    QueryErrorDisposition,
+    analyze_query_errors,
+    compare_three_nodes,
+)
 
 
 class ReplayStatus(StrEnum):
@@ -52,6 +60,7 @@ class ReplayCase:
     original_databases: Mapping[NodeRole, str]
     original_verdict: str
     requires_same_session: bool
+    expected_error: ExpectedError | None
 
     @classmethod
     def from_finding(cls, finding: StoredFinding) -> ReplayCase:
@@ -65,6 +74,7 @@ class ReplayCase:
         requires_same_session = replay.get("requires_same_session")
         mode = finding.manifest.get("mode")
         original_verdict = finding.manifest.get("original_verdict")
+        first_difference = finding.manifest.get("first_difference")
         if mode != "correctness":
             raise ArtifactValidationError("replay currently requires correctness mode")
         if (
@@ -116,9 +126,40 @@ class ReplayCase:
         accepted_verdicts = {
             *(verdict.value for verdict in OracleVerdict),
             PrepareStatus.SETUP_MISMATCH.value,
+            QueryErrorDisposition.UNEXPECTED_VALID_ERROR.value,
+            QueryErrorDisposition.EXPECTED_ERROR_MISMATCH.value,
         }
         if original_verdict not in accepted_verdicts:
             raise ArtifactValidationError("original oracle verdict is invalid")
+        expected_error: ExpectedError | None = None
+        if original_verdict in {
+            QueryErrorDisposition.UNEXPECTED_VALID_ERROR.value,
+            QueryErrorDisposition.EXPECTED_ERROR_MISMATCH.value,
+        }:
+            if not isinstance(first_difference, Mapping):
+                raise ArtifactValidationError("generator finding details are invalid")
+            if first_difference.get("category") != "generator_contract":
+                raise ArtifactValidationError(
+                    "generator finding category must be generator_contract"
+                )
+            expected_payload = first_difference.get("expected_error")
+            if original_verdict == QueryErrorDisposition.EXPECTED_ERROR_MISMATCH.value:
+                if not isinstance(expected_payload, Mapping):
+                    raise ArtifactValidationError("expected error contract is missing")
+                try:
+                    expected_error = ExpectedError(
+                        ExpectedErrorKind(expected_payload["kind"]),
+                        expected_payload["errno"],
+                        expected_payload["sqlstate"],
+                    )
+                except (KeyError, TypeError, ValueError) as error:
+                    raise ArtifactValidationError(
+                        "expected error contract is invalid"
+                    ) from error
+            elif expected_payload is not None:
+                raise ArtifactValidationError(
+                    "valid-query generator finding cannot expect an error"
+                )
         assert isinstance(mode, str) and isinstance(original_verdict, str)
         return cls(
             case_id=finding.case_id,
@@ -131,6 +172,7 @@ class ReplayCase:
             original_databases=MappingProxyType(typed_databases),
             original_verdict=original_verdict,
             requires_same_session=requires_same_session,
+            expected_error=expected_error,
         )
 
     @property
@@ -146,6 +188,10 @@ class ReplayCase:
         """SetupBundleLike compatibility for the production triad adapter."""
 
         return self.setup_sql
+
+    @property
+    def replication_sequence(self) -> int:
+        return replication_sequence_from_sql(self.setup_sql)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +271,7 @@ class ReplayResult:
     original_verdict: str
     replay_verdict: OracleVerdict | None
     executions: tuple[NodeExecution, ...]
+    replay_classification: str | None = None
 
 
 class ReplayService:
@@ -290,9 +337,15 @@ class ReplayService:
                 executions=executions,
             )
         oracle_result = compare_three_nodes(executions)
+        replay_verdict = oracle_result.verdict.value
+        if oracle_result.verdict is OracleVerdict.MATCH:
+            replay_verdict = analyze_query_errors(
+                replay_case.expected_error,
+                executions,
+            ).disposition.value
         status = (
             ReplayStatus.REPRODUCED
-            if oracle_result.verdict.value == replay_case.original_verdict
+            if replay_verdict == replay_case.original_verdict
             else ReplayStatus.NOT_REPRODUCED
         )
         return ReplayResult(
@@ -302,6 +355,7 @@ class ReplayService:
             original_verdict=replay_case.original_verdict,
             replay_verdict=oracle_result.verdict,
             executions=executions,
+            replay_classification=replay_verdict,
         )
 
 
@@ -310,12 +364,24 @@ def build_replay_service(config: AppConfig, artifact_root: Path) -> ReplayServic
 
     if config.mode.value != "correctness":
         raise ValueError("replay requires correctness config mode")
-    factory = MySQLConnectorFactory()
+    primary_factory = MySQLConnectorFactory()
+    replica_factory = MySQLConnectorFactory(
+        session_variables_by_role={
+            role: config.replica_session_variables(role) for role in NodeRole
+        }
+    )
+    replication = ReplicationBarrier(
+        config.replica_nodes,
+        replica_factory,
+        timeout_seconds=config.replica_sync_timeout_seconds,
+    )
     triad = TriadCoordinator(
-        config.nodes,
-        setup_runner=MySQLSetupRunner(factory),
-        query_runner=NodeQueryRunner(factory),
-        session_factory=factory,
+        config.primary_nodes,
+        query_nodes=config.replica_nodes,
+        setup_runner=MySQLSetupRunner(primary_factory),
+        query_runner=NodeQueryRunner(replica_factory),
+        session_factory=replica_factory,
+        replication_waiter=replication,
     )
     return ReplayService(
         ArtifactReader(artifact_root),

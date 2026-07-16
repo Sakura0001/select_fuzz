@@ -52,24 +52,25 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
 
 ### 已实现但仍需扩大验证
 
-- [~] frame grammar 已覆盖当前安全矩阵，但尚未把全部合法 frame-bound 组合逐项做成
-  三节点定向见证；MySQL 8.0.41 不支持的 GROUPS/IGNORE NULLS/FROM LAST/EXCLUDE 继续
-  fail-closed 排除。
-- [~] optimizer hint 已验证当前生成集合及 hint-warning 准入门，但尚未形成完整的
-  hint 正向/负向矩阵。
+- [x] frame grammar 已将全部当前合法 numeric/temporal frame-bound 组合拆成 25 条定向
+  SQL，在三套 MySQL 8.0.41 上逐条 EXPLAIN、执行并比较；GROUPS/IGNORE NULLS/FROM LAST/
+  EXCLUDE 继续由生成阶段 fail-closed 排除。
+- [x] optimizer hint 已形成正向/负向矩阵：11 条正向 SQL 在三节点执行通过，4 类无真实
+  alias/index/derived 条件在生成阶段拒绝，hint warning 不进入 valid lane。
 - [~] 函数注册表已有全部 335 个基础/NULL 见证和精确 warning 契约，但尚未穷举每个
   signature 的完整值域与所有 error 契约。
-- [~] 一分钟随机运行只自然命中 47/49 个 set pair；49/49 已由三节点定向测试闭环，
-  仍可通过更长随机运行检验概率分布。
+- [~] 函数注册表的 335 个基础/NULL/error witness 已在当前工作树重跑通过；完整值域
+  仍需扩大验证，不以基础 witness 代替全部值域。
 
 ### 待完成
 
-- [ ] 运行 30 分钟最新文法三节点随机差分，并逐个归因所有错误 fingerprint；把可避免的
-  1690/3513/3854 候选收窄后回灌生成器。
-- [ ] 补齐 NOT EXISTS/NOT IN 的空/单/多行、outer/inner/both nullable 和嵌套矩阵。
-- [ ] 清理历史 artifact 中遗留的旧 SQL 产物，只保留重新生成的可复现实验产物。
-- [ ] 当前 P0/P1 修改仍在开发工作树中，尚未按主题拆分 commit，也尚未合并回 `main`；
-  当前 `main` 与 `codex/mysql-parallel-query-fuzzer` 仍共同指向 `973fd64`。
+- [x] 已以约 3 分钟短批次替代 30 分钟长跑：2 轮、200 条查询、81.5 秒完成、0 个未
+  归因 finding；固定命令和 artifact 见实现验收计划 12.1。
+- [x] NOT EXISTS/NOT IN 已补齐空/单/多行、outer/inner/both nullable 和嵌套矩阵，12 条
+  SQL 在三节点通过，证据位于 `artifacts/latest-grammar-matrix-20260716/`。
+- [~] 本轮中断长跑和旧诊断产物已移入明确 archive；历史仓库中与本轮无关的旧 artifact
+  不做破坏性删除，最终交付只索引当前工作树证据。
+- [~] P0/P1 修改已完成测试，待按主题拆分 commit 并合并回 `main`。
 
 ## 2026-07-16 文法生成迁移快照
 
@@ -159,7 +160,8 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
 ## 子查询、derived table 与 CTE
 
 - [x] scalar/row/table 子查询、EXISTS、IN、ANY、ALL、相关与非相关形态。
-- [~] NOT EXISTS/NOT IN、空/单/多行、nullable outer/inner/both、嵌套子查询。
+- [x] NOT EXISTS/NOT IN、空/单/多行、nullable outer/inner/both、嵌套子查询；12 条当前
+  grammar matrix SQL 已在三节点执行并保存 artifact。
 - [x] 普通/显式列 derived table、相关 LATERAL derived table；完整 set query expression
   作为 body 时强制显式稳定输出列。
 - [x] 单个非递归 CTE、带终止条件的 recursive UNION ALL CTE。
@@ -186,9 +188,9 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
   numeric/temporal bounded RANGE、UNBOUNDED/CURRENT/有界边界。
 - [x] GROUP_CONCAT 使用同表达式 DISTINCT + ORDER BY 并限制输出；JSON_ARRAYAGG 使用
   顺序无关常量，JSON_OBJECTAGG 使用同 key/value binding，避免重复 key last-wins 漂移。
-- [~] 尚未枚举全部合法 frame-bound 组合；`GROUPS`、`IGNORE NULLS`、
-  `NTH_VALUE ... FROM LAST` 和 window `EXCLUDE` 在 MySQL 8.0.41 均为 `1235/42000`，
-  因而 fail-closed 排除而非放入 valid lane。
+- [x] 已枚举并执行全部当前合法 frame-bound 组合（numeric/temporal 共 25 条）；
+  `GROUPS`、`IGNORE NULLS`、`NTH_VALUE ... FROM LAST` 和 window `EXCLUDE` 在 MySQL 8.0.41
+  均为 `1235/42000`，因此保留 fail-closed 排除而不放入 valid lane。
 
 ## 确定性函数
 
@@ -198,15 +200,17 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
   确定性安全注册表；这不是 MySQL 全部 built-in 的清单。
 - [x] 每个 signature 及全部声明 NULL 位置共有 335 个三节点见证；334 个无 warning，
   `encoding_sha2_2_null_1` 精确断言 Warning 1583。
-- [~] 完整值域及每个 signature 的全部 error 契约尚未穷举。
+- [~] 335 个基础/NULL witness 与 error contract 已在当前工作树实际通过；完整值域及每个
+  signature 的全部 error 契约仍未穷举。
 
 ## 索引、提示与回归种子
 
 - [x] BTREE prefix/descending/functional index 查询形态。
 - [x] join-order、index-level、derived pushdown optimizer hints。
 - [x] 表级 index hint 的 12 个 action/scope 叶。
-- [~] optimizer hint 已覆盖 JOIN_ORDER、INDEX、DERIVED_CONDITION_PUSHDOWN、NO_RANGE
-  及合法 NO_ICP fallback；EXPLAIN hint warning 会拒绝，但还不是完整正反矩阵。
+- [x] optimizer hint 已覆盖 JOIN_ORDER、INDEX、DERIVED_CONDITION_PUSHDOWN、NO_RANGE
+  及合法 NO_ICP fallback；正向 11 条三节点 SQL 与负向 4 类生成拒绝均通过，EXPLAIN hint
+  warning 会拒绝。
 - [x] 已登记的 MySQL 8.0.41 parser/optimizer 回归种子；物理 plan 命中与语法命中分开计数。
 
 ## 报错、归因与覆盖记账
@@ -224,4 +228,5 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
   MySQL 8.0.41 本地见证。
 - [x] 一分钟最新文法随机差分完成：20 轮、1965 条成功比较、0 finding；随机命中
   698 个 stable alternative 和 47/49 个 set pair。
-- [ ] 30 分钟随机差分运行后，逐个归因全部错误 fingerprint，并将可修项回灌生成器。
+- [x] 3 分钟随机差分短批次已完成：2 轮、200 条查询、81.5 秒、0 未归因 finding；长跑
+  不再是本轮门槛，低概率功能由定向矩阵补齐。

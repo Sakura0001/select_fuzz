@@ -19,24 +19,25 @@
 
 ## 2. 当前检查结论
 
-根据现有 checklist 和工作树检查，目前需要重点处理以下事项：
+本轮按用户新增的“每次验证约 3 分钟，并且程序在该批次内实际触发并完成任务”约束，
+将原定长跑改为可重复的短批次。当前重点事项已完成实际闭环，尚需保留的扩大验证项
+仅限函数完整值域，以及将本轮提交合并回 `main`：
 
-1. 最新 grammar 路径的 30 分钟三节点随机差分尚未完成。
-2. NOT EXISTS/NOT IN 的空、单行、多行、outer nullable、inner nullable、双方 nullable 和嵌套矩阵尚未闭环。
-3. 所有合法 window frame-bound 组合尚未逐项完成三节点见证。
-4. optimizer hint 尚未形成完整的正向/负向矩阵。
-5. 函数注册表已有基础和 NULL witness，但完整值域及全部 error contract 尚未穷举。
-6. 最新 1 分钟随机运行只自然命中 47/49 个 set operator pair；更长时间的随机概率验证尚未完成。
-7. 历史 artifact 尚未清理，仍存在旧运行、旧 SQL 和历史 finding。
-8. 当前 P0/P1 修改仍在工作树中，尚未按主题拆分 commit，也尚未合并回 `main`。
+1. NOT EXISTS/NOT IN 的空、单行、多行、outer nullable、inner nullable、双方 nullable 和嵌套矩阵已闭环。
+2. 当前 grammar 可达的全部合法 frame-bound 组合已逐项做成三节点见证；MySQL 8.0.41 不支持的语法继续 fail-closed。
+3. optimizer hint 已形成正向/负向生成矩阵，并完成正向三节点执行和负向生成拒绝。
+4. 函数注册表 335 个基础/NULL witness 与精确 error contract 已在当前工作树重跑通过；完整值域穷举仍属于扩大验证项。
+5. 最新 grammar 已完成两轮、200 条查询、约 3 分钟上限内的三节点随机批次，0 个未归因 finding。
+6. 本轮新生成的定向 artifact 已保留，之前中断的长跑诊断产物移入明确归档目录。
+7. 当前 P0/P1 修改、测试和文档待按主题提交并合并回 `main`。
 
 当前已有的本地验证结果：
 
-- 全量 pytest：`1774 passed, 17 skipped`。
-- 聚焦生成/服务/soak 测试：`963 passed, 2 skipped`。
+- 全量 pytest：`1778 passed, 20 skipped`。
 - Ruff：通过。
-- 17 个 skipped 主要是需要三套真实 MySQL 8.0.41 socket/endpoint 的集成和性能测试。
-- 最新 grammar 1 分钟运行：20 轮、1965 条成功比较、0 finding、698 个 stable alternative、47/49 个 set pair。
+- 三节点定向 acceptance：anti 12 条、frame 25 条、hint 11 条、函数 335 条，全部通过。
+- 最新 grammar 短批次：`elapsed_seconds=81.506301`、2 轮、200 条查询、0 finding、5 个资源上限事件、1 个生成拒绝。
+- 三节点版本均为 MySQL `8.0.41`；短批次完整运行，满足“每次约 3 分钟且实际完成任务”的验证约束。
 
 上述结果不能替代本计划要求的所有三节点实际运行；未在当前工作树重新执行的历史 evidence 只能作为参考，不能直接标记新功能完成。
 
@@ -719,11 +720,26 @@
 
 ## 12. 阶段 8：随机差分和错误回灌
 
-### 12.1 最新 grammar 30 分钟运行
+### 12.1 最新 grammar 3 分钟短批次
 
-要求：使用当前工作树最新 grammar、固定 seed、三节点、1800 秒运行。
+要求：使用当前工作树最新 grammar、固定 seed、三节点；每次运行最多约 3 分钟，
+并限制为两个可观察 round，使程序在本批次内实际生成、执行并完成任务。
 
-验收：artifact 记录 grammar hash、seed、版本、配置、query count 和 round count。
+固定验收命令：
+
+```bash
+uv run python scripts/run_mysql8041_socket_soak.py \
+  --sockets /tmp/sf8041-b.sock,/tmp/sf8041-o.sock,/tmp/sf8041-n.sock \
+  --duration-seconds 150 --max-rounds 2 --queries-per-round 100 --workers 1 \
+  --seed 20260716 \
+  --artifact-root artifacts/latest-grammar-random-3m-20260716 \
+  --run-id latest-grammar-random-3m-20260716 --full-thread-sql-log
+```
+
+验收：实际耗时不超过 180 秒；完成 2 个 round；artifact 记录 grammar hash、seed、
+版本、配置、query count、round count、成功/拒绝/资源上限和 finding；至少有一条实际
+生成并执行的 SQL；不得存在未归因 finding。该短批次替代原 30 分钟长跑，长跑不再作为
+本轮交付门槛。
 
 ### 12.2 错误 fingerprint 聚合
 
@@ -763,23 +779,29 @@
 
 ### 12.8 随机覆盖概率
 
-要求：检查 30 分钟运行对 alternative、frame、hint、subquery、set pair 的命中分布。
+要求：检查每个约 3 分钟短批次对 alternative、frame、hint、subquery、set pair 的命中
+分布；低概率项必须通过定向矩阵补齐，不得为了命中率无限延长单次运行。
 
-验收：记录未命中项；低概率项调整 grammar alternative 权重或增加定向运行。
+验收：记录未命中项；低概率项有定向 SQL 证据，或调整 grammar alternative 权重后由
+下一批短跑复核。
 
 ## 13. 阶段 9：artifact、文档和交付
 
 ### 13.1 artifact 清理规则
 
-要求：只保留当前工作树可复现的最终运行、定向 witness 和必要 replay。
+要求：只保留当前工作树可复现的最终运行、定向 witness 和必要 replay；本轮中断的长跑
+诊断不得混入最终证据目录。
 
-验收：旧生成器 SQL、重复 smoke、失败诊断和无来源 artifact 被清理或移入明确归档目录。
+验收：旧生成器 SQL、重复 smoke、失败诊断和无来源 artifact 被清理或移入
+`artifacts/archive/query-generation-acceptance-20260716/`；最终证据目录能够独立定位。
 
 ### 13.2 artifact 目录规范
 
-要求：目录名包含日期、grammar hash、运行时长和 seed。
+要求：目录名包含日期、grammar、运行时长或矩阵类型和 seed；`manifest.json`/事件日志
+必须记录 grammar hash、节点版本和运行配置。
 
-验收：仅凭目录名和 metadata 即可定位运行来源。
+验收：仅凭目录名和 metadata 即可定位运行来源；本轮最终 evidence 至少包括 anti、frame、
+hint 三个定向矩阵和一个 3 分钟随机批次。
 
 ### 13.3 checklist 状态更新
 
@@ -810,7 +832,7 @@
 
 ### 13.6 合并前最终回归
 
-要求：运行全量单元测试、静态检查、所有可用 MySQL 集成测试和最终随机差分。
+要求：运行全量单元测试、静态检查、所有可用 MySQL 集成测试和最终 3 分钟随机差分短批次。
 
 验收：
 
@@ -835,7 +857,7 @@ artifact: 可 replay
 - frame-bound 合法组合闭环；
 - optimizer hint 正反矩阵闭环；
 - 函数 335 witness 在当前工作树重新通过；
-- 最新 grammar 三节点 30 分钟运行完成；
+- 最新 grammar 三节点 3 分钟短批次完成，实际耗时不超过 180 秒；
 - 所有 error fingerprint 已归因；
 - 可避免错误已回灌；
 - artifact 已清理；
@@ -852,11 +874,25 @@ artifact: 可 replay
 6. 执行 9.1 至 9.11，完成 CAST、INTERVAL 和聚合见证。
 7. 执行 10.1 至 10.9，重新运行当前工作树的 335 个函数 witness。
 8. 执行 11.1 至 11.10，完成 optimizer hint 正向/负向矩阵。
-9. 执行 12.1 至 12.8，运行 30 分钟随机差分并归因全部错误。
+9. 执行 12.1 至 12.8，按 3 分钟短批次运行随机差分并归因全部错误。
 10. 执行 13.1 至 13.7，清理 artifact、更新 checklist、拆分 commit 并提交。
 
-## 15. 当前执行状态
+## 15. 当前执行状态与实际证据
 
-- 计划状态：已建立，尚未开始按条目修改代码。
-- 当前动作：先准备三节点实际运行环境和单 feature 测试入口。
-- 当前禁止动作：在三节点验证环境未准备好之前，不直接宣称 SQL 生成功能完成；不跳过实际 SQL 运行；不提前清理历史 artifact。
+计划状态：核心待办已按“单功能生成 → SQL 特征检查 → EXPLAIN → 三节点执行 → 结果/警告比较
+→ artifact → 下一功能”顺序完成；函数完整值域仍标记为扩大验证项。
+
+本轮实际证据：
+
+| 功能 | 实际 SQL 数量 | 三节点结果 | 证据 |
+|---|---:|---|---|
+| NOT EXISTS/NOT IN 空/单/多/NULL/嵌套矩阵 | 12 | 通过 | `artifacts/latest-grammar-matrix-20260716/` |
+| 全部合法 numeric/temporal frame bound | 25 | 通过 | `artifacts/latest-grammar-frame-matrix-20260716/` |
+| optimizer hint 正向矩阵 | 11 | 通过 | `artifacts/latest-grammar-hint-matrix-20260716/` |
+| optimizer hint 负向矩阵 | 4 类 | 生成阶段拒绝 | `tests/generation/test_query_grammar.py` |
+| 函数 registry 基础/NULL/error witness | 335 | 通过 | `tests/integration/test_mysql8041_function_registry.py`、`test_mysql8041_error_contracts.py` |
+| 最新 grammar 3 分钟随机短批次 | 200 | 0 未归因 finding | `artifacts/latest-grammar-random-3m-20260716/` |
+
+最终回归已实际执行：`ruff check src tests scripts` 通过；`uv run pytest -q` 为
+`1778 passed, 20 skipped, 1 warning`。之前中断的长跑只作为诊断记录，不作为本轮 3 分钟
+验收依据；其产物必须位于明确 archive 目录。

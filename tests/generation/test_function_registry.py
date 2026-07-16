@@ -115,6 +115,23 @@ def test_required_deterministic_function_families_have_representative_signatures
     } <= ids
 
 
+def test_function_warning_contract_is_explicit_and_closed() -> None:
+    contracts = {
+        signature.signature_id: signature.expected_warning_codes_by_null_position
+        for signature in DETERMINISTIC_FUNCTION_SIGNATURES
+        if signature.expected_warning_codes_by_null_position
+    }
+
+    assert contracts == {"encoding_sha2_2": ((1, (1583,)),)}
+    sha2 = next(
+        signature
+        for signature in DETERMINISTIC_FUNCTION_SIGNATURES
+        if signature.signature_id == "encoding_sha2_2"
+    )
+    assert sha2.expected_warning_codes(None) == ()
+    assert sha2.expected_warning_codes(1) == (1583,)
+
+
 def test_every_registered_signature_has_a_directed_read_only_query_witness() -> None:
     generator = QueryGenerator()
     manifest = _manifest()

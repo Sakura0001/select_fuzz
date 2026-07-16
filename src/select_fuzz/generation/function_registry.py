@@ -62,6 +62,7 @@ class DeterministicFunctionSignature:
     arguments: tuple[FunctionArgument, ...]
     result: FunctionResult
     null_argument_positions: frozenset[int]
+    expected_warning_codes_by_null_position: tuple[tuple[int, tuple[int, ...]], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "arguments", tuple(self.arguments))
@@ -82,6 +83,29 @@ class DeterministicFunctionSignature:
             for position in self.null_argument_positions
         ):
             raise ValueError("null argument position is outside the function arity")
+        normalized_contract = tuple(
+            (position, tuple(codes))
+            for position, codes in self.expected_warning_codes_by_null_position
+        )
+        if any(
+            position not in self.null_argument_positions
+            or any(
+                not isinstance(code, int) or isinstance(code, bool) or code <= 0
+                for code in codes
+            )
+            for position, codes in normalized_contract
+        ):
+            raise ValueError("warning contract position or code is invalid")
+        if len({position for position, _ in normalized_contract}) != len(normalized_contract):
+            raise ValueError("warning contract positions must be unique")
+        object.__setattr__(self, "expected_warning_codes_by_null_position", normalized_contract)
+
+    def expected_warning_codes(self, null_position: int | None) -> tuple[int, ...]:
+        """Return the exact warning contract for one directed NULL witness."""
+
+        if null_position is None:
+            return ()
+        return dict(self.expected_warning_codes_by_null_position).get(null_position, ())
 
 
 def _signature(
@@ -91,6 +115,7 @@ def _signature(
     result: FunctionResult,
     *,
     suffix: str | None = None,
+    expected_warning_codes_by_null_position: tuple[tuple[int, tuple[int, ...]], ...] = (),
 ) -> DeterministicFunctionSignature:
     identifier_suffix = suffix or str(len(arguments))
     signature_id = f"{family.value}_{sql_name.lower()}_{identifier_suffix}"
@@ -101,6 +126,7 @@ def _signature(
         arguments=arguments,
         result=result,
         null_argument_positions=frozenset(range(len(arguments))),
+        expected_warning_codes_by_null_position=expected_warning_codes_by_null_position,
     )
 
 
@@ -262,7 +288,13 @@ DETERMINISTIC_FUNCTION_SIGNATURES: tuple[DeterministicFunctionSignature, ...] = 
     # Hash/encoding functions have fixed payloads and no external state.
     _signature(FunctionFamily.ENCODING, "MD5", (T,), TXT),
     _signature(FunctionFamily.ENCODING, "SHA1", (T,), TXT),
-    _signature(FunctionFamily.ENCODING, "SHA2", (T, SHA_BITS), TXT),
+    _signature(
+        FunctionFamily.ENCODING,
+        "SHA2",
+        (T, SHA_BITS),
+        TXT,
+        expected_warning_codes_by_null_position=((1, (1583,)),),
+    ),
     _signature(FunctionFamily.ENCODING, "STATEMENT_DIGEST", (SQL,), TXT),
     _signature(FunctionFamily.ENCODING, "STATEMENT_DIGEST_TEXT", (SQL,), TXT),
     # Network conversion and classification use documentation-reserved addresses.

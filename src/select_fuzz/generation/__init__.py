@@ -33,6 +33,7 @@ from select_fuzz.generation.query_ast import ExpectedError, ExpectedErrorKind, Q
 from select_fuzz.generation.query_grammar import (
     CandidateQuery,
     CandidateRejected,
+    FunctionValueProfile,
     GrammarColumn,
     GrammarError,
     GrammarQueryConfig,
@@ -81,6 +82,7 @@ __all__ = [
     "ExpectedErrorKind",
     "FeatureCatalog",
     "FeatureSpec",
+    "FunctionValueProfile",
     "ForeignKeyDef",
     "FunctionArgument",
     "FunctionFamily",

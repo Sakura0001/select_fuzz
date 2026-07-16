@@ -7,7 +7,7 @@ from hashlib import sha256
 import json
 from typing import Mapping
 
-from select_fuzz.generation.data import DataBundle, DataGenerator
+from select_fuzz.generation.data import DataBundle, DataGenerator, DataScenario
 from select_fuzz.generation.schema import SchemaManifest
 
 
@@ -54,9 +54,13 @@ class SetupBundleBuilder:
         *,
         seed: int,
         rows_per_table: int | Mapping[str, int],
+        scenario: DataScenario = DataScenario.MIXED,
     ) -> SetupBundle:
         data = self.data_generator.generate(
-            schema, seed=seed, rows_per_table=rows_per_table
+            schema,
+            seed=seed,
+            rows_per_table=rows_per_table,
+            scenario=scenario,
         )
         tables = {table.name: table for table in schema.tables}
         statements = (

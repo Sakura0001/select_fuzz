@@ -20,7 +20,7 @@ from yaml.constructor import ConstructorError
 
 Version = tuple[int, int, int]
 TARGET_VERSION: Version = (8, 0, 41)
-CHECKED_AT = "2026-07-12"
+CHECKED_AT = "2026-07-14"
 
 TOP_LEVEL_KEYS = {
     "schema_version",
@@ -355,7 +355,7 @@ REVIEWED_VARIANT_IDS = frozenset(
         "window_inline_named",
     }
 )
-REVIEWED_CATALOG_SHA256 = "93ce862b4ec6474c1c1dc9dceb29a9e5b33be6e7e6c002c447782c9d3af05007"
+REVIEWED_CATALOG_SHA256 = "ced6006e1054b32a8570746c6bd0d1f43d62740ce4359dd5d2280e020ef3a86e"
 
 SQL_KEYWORDS = frozenset(
     {

@@ -47,4 +47,5 @@ def test_read_only_validator_requires_text_and_accepts_comments_quotes_and_cte_c
     ReadOnlyValidator().validate_text(valid)
     ReadOnlyValidator().validate_text("SELECT 1 -- ignored UPDATE\n")
     ReadOnlyValidator().validate_text("SELECT 1 /* ignored UPDATE */")
+    ReadOnlyValidator().validate_text("SELECT DISTINCTROW (1) AS `q1`")
     assert len(_masked_sql("SELECT 'a\\\'b', \"c\"\"d\", `e``f`")) > 0

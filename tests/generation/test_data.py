@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from decimal import Decimal
 import json
 import os
@@ -13,6 +14,7 @@ from select_fuzz.config import NodeRole
 from select_fuzz.generation.data import (
     DataGenerationError,
     DataGenerator,
+    DataScenario,
     DistributionKind,
     GeometryValue,
 )
@@ -151,6 +153,42 @@ def test_generated_schema_profiles_accept_deterministic_data(
         schema = generator.generate(target, seed=seed, limits=SchemaLimits())
         bundle = data_generator.generate(schema, seed=seed, rows_per_table=20)
         assert all(len(bundle.rows_by_table[name]) == 20 for name in bundle.table_order)
+
+
+@pytest.mark.parametrize("profile", tuple(SchemaProfile))
+@pytest.mark.parametrize(
+    "scenario",
+    (
+        DataScenario.SEEDED_RANDOM,
+        DataScenario.BOUNDARY,
+        DataScenario.ALL_NULL,
+        DataScenario.MIXED_NULL,
+        DataScenario.DUPLICATE,
+        DataScenario.HOTSPOT,
+    ),
+)
+def test_generated_schema_profiles_accept_every_explicit_data_scenario(
+    profile: SchemaProfile,
+    scenario: DataScenario,
+) -> None:
+    target = FeatureSpec(
+        feature_id="explicit_data_profile",
+        family="data",
+        min_version=(8, 0, 0),
+        compatible_profiles=frozenset({profile.value}),
+        ast_nodes=frozenset({"query_expression"}),
+        guards=frozenset({"read_only_select"}),
+    )
+    schema = SchemaGenerator().generate(target, seed=17, limits=SchemaLimits())
+
+    bundle = DataGenerator(max_rows_per_table=20, max_total_rows=160).generate(
+        schema,
+        seed=17,
+        rows_per_table=20,
+        scenario=scenario,
+    )
+
+    assert all(len(bundle.rows_by_table[name]) == 20 for name in bundle.table_order)
 
 
 @pytest.mark.parametrize(
@@ -332,7 +370,193 @@ def test_distribution_plan_is_mixed_and_explicit() -> None:
             assert len(values) == len(set(values))
 
 
-def test_partition_bucket_values_follow_list_columns_routing() -> None:
+@pytest.mark.parametrize(
+    ("scenario", "expected_kind"),
+    (
+        (DataScenario.SEEDED_RANDOM, DistributionKind.UNIFORM),
+        (DataScenario.BOUNDARY, DistributionKind.BOUNDARY),
+        (DataScenario.ALL_NULL, DistributionKind.ALL_NULL),
+        (DataScenario.MIXED_NULL, DistributionKind.MIXED_NULL),
+        (DataScenario.DUPLICATE, DistributionKind.DUPLICATE),
+        (DataScenario.HOTSPOT, DistributionKind.HOTSPOT),
+    ),
+)
+def test_explicit_data_scenarios_are_typed_and_deterministic(
+    scenario: DataScenario,
+    expected_kind: DistributionKind,
+) -> None:
+    schema = _schema(_regular_table(ColumnDef("payload", "INT", True)))
+    generator = DataGenerator()
+
+    first = generator.generate(
+        schema,
+        seed=20260714,
+        rows_per_table=20,
+        scenario=scenario,
+    )
+    second = generator.generate(
+        schema,
+        seed=20260714,
+        rows_per_table=20,
+        scenario=scenario,
+    )
+
+    assert first.scenario is scenario
+    assert first.distributions["t0"][1].kind is expected_kind
+    assert first.canonical_bytes() == second.canonical_bytes()
+
+
+def test_seeded_random_boundary_duplicate_and_hotspot_shapes() -> None:
+    schema = _schema(_regular_table(ColumnDef("payload", "INT", False)))
+    generator = DataGenerator()
+
+    random_a = generator.generate(
+        schema,
+        seed=1,
+        rows_per_table=20,
+        scenario=DataScenario.SEEDED_RANDOM,
+    )
+    random_b = generator.generate(
+        schema,
+        seed=2,
+        rows_per_table=20,
+        scenario=DataScenario.SEEDED_RANDOM,
+    )
+    boundary = generator.generate(
+        schema,
+        seed=1,
+        rows_per_table=20,
+        scenario=DataScenario.BOUNDARY,
+    )
+    duplicate = generator.generate(
+        schema,
+        seed=1,
+        rows_per_table=20,
+        scenario=DataScenario.DUPLICATE,
+    )
+    hotspot = generator.generate(
+        schema,
+        seed=1,
+        rows_per_table=20,
+        scenario=DataScenario.HOTSPOT,
+    )
+
+    random_values_a = [row[1] for row in random_a.rows_by_table["t0"]]
+    random_values_b = [row[1] for row in random_b.rows_by_table["t0"]]
+    boundary_values = [row[1] for row in boundary.rows_by_table["t0"]]
+    duplicate_values = [row[1] for row in duplicate.rows_by_table["t0"]]
+    hotspot_values = [row[1] for row in hotspot.rows_by_table["t0"]]
+
+    assert random_values_a != random_values_b
+    assert -(2**31) in boundary_values
+    assert 2**31 - 1 in boundary_values
+    assert len(set(duplicate_values)) == 1
+    assert Counter(hotspot_values).most_common(1)[0][1] >= 16
+
+
+def test_null_scenarios_apply_only_when_schema_cardinality_allows_them() -> None:
+    schema = _schema(
+        _regular_table(
+            ColumnDef("nullable_value", "INT", True),
+            ColumnDef("required_value", "INT", False),
+        )
+    )
+    generator = DataGenerator()
+
+    all_null = generator.generate(
+        schema,
+        seed=1,
+        rows_per_table=4,
+        scenario=DataScenario.ALL_NULL,
+    )
+    mixed_null = generator.generate(
+        schema,
+        seed=1,
+        rows_per_table=4,
+        scenario=DataScenario.MIXED_NULL,
+    )
+    single_row = generator.generate(
+        schema,
+        seed=1,
+        rows_per_table=1,
+        scenario=DataScenario.MIXED_NULL,
+    )
+
+    assert all(row[1] is None for row in all_null.rows_by_table["t0"])
+    assert all(row[2] is not None for row in all_null.rows_by_table["t0"])
+    assert all_null.distributions["t0"][2].fallback_reason == (
+        "all_null_requires_nullable_column"
+    )
+    mixed_values = [row[1] for row in mixed_null.rows_by_table["t0"]]
+    assert any(value is None for value in mixed_values)
+    assert any(value is not None for value in mixed_values)
+    assert single_row.distributions["t0"][1].kind is DistributionKind.BOUNDARY
+    assert single_row.distributions["t0"][1].fallback_reason == (
+        "mixed_null_requires_at_least_two_rows"
+    )
+
+
+def test_explicit_scenarios_preserve_unique_and_foreign_key_constraints() -> None:
+    parent = TableDef(
+        "t0",
+        False,
+        (
+            ColumnDef("id", "BIGINT UNSIGNED", False),
+            ColumnDef("code", "INT", False),
+        ),
+        (
+            _primary(),
+            IndexDef("uq_code", (IndexPart(column_name="code"),), unique=True),
+        ),
+    )
+    child = TableDef(
+        "t1",
+        False,
+        (
+            ColumnDef("id", "BIGINT UNSIGNED", False),
+            ColumnDef("parent_id", "BIGINT UNSIGNED", False),
+            ColumnDef("payload", "INT", True),
+        ),
+        (_primary(), IndexDef("ix_parent", (IndexPart(column_name="parent_id"),))),
+        foreign_keys=(ForeignKeyDef("fk_parent", ("parent_id",), "t0", ("id",)),),
+    )
+    schema = _schema(parent, child, profile=SchemaProfile.FOREIGN_KEY_GRAPH)
+
+    for scenario in (
+        DataScenario.SEEDED_RANDOM,
+        DataScenario.BOUNDARY,
+        DataScenario.ALL_NULL,
+        DataScenario.MIXED_NULL,
+        DataScenario.DUPLICATE,
+        DataScenario.HOTSPOT,
+    ):
+        bundle = DataGenerator().generate(
+            schema,
+            seed=7,
+            rows_per_table=10,
+            scenario=scenario,
+        )
+        parent_ids = {row[0] for row in bundle.rows_by_table["t0"]}
+        parent_codes = [row[1] for row in bundle.rows_by_table["t0"]]
+        child_parent_ids = [row[1] for row in bundle.rows_by_table["t1"]]
+        assert len(parent_codes) == len(set(parent_codes))
+        assert all(parent_id in parent_ids for parent_id in child_parent_ids)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    (
+        DataScenario.SEEDED_RANDOM,
+        DataScenario.BOUNDARY,
+        DataScenario.ALL_NULL,
+        DataScenario.MIXED_NULL,
+        DataScenario.DUPLICATE,
+        DataScenario.HOTSPOT,
+    ),
+)
+def test_partition_bucket_values_follow_list_columns_routing(
+    scenario: DataScenario,
+) -> None:
     table = TableDef(
         name="t0",
         temporary=False,
@@ -353,7 +577,12 @@ def test_partition_bucket_values_follow_list_columns_routing() -> None:
     )
     schema = _schema(table, profile=SchemaProfile.PARTITIONED_INNODB)
 
-    bundle = DataGenerator().generate(schema, seed=17, rows_per_table=50)
+    bundle = DataGenerator().generate(
+        schema,
+        seed=17,
+        rows_per_table=50,
+        scenario=scenario,
+    )
 
     assert all(row[1] == row[0] % 7 for row in bundle.rows_by_table["t0"])
 
@@ -533,6 +762,102 @@ def test_string_fk_values_fit_the_shortest_compatible_declaration() -> None:
 
     assert all(isinstance(value, str) and len(value) <= 2 for value in parent_values)
     assert all(value in parent_values for value in child_values)
+
+
+def test_lower_char_functional_index_caps_boundary_source_values() -> None:
+    table = TableDef(
+        "t0",
+        False,
+        (
+            ColumnDef("id", "BIGINT UNSIGNED", False),
+            ColumnDef(
+                "payload",
+                "VARCHAR(255)",
+                True,
+                "utf8mb4",
+                "utf8mb4_0900_ai_ci",
+            ),
+        ),
+        (
+            _primary(),
+            IndexDef(
+                "ix_payload_lower",
+                (IndexPart(expression=IndexExpression.lower_char("payload", 191)),),
+                kind=IndexKind.FUNCTIONAL,
+            ),
+        ),
+    )
+
+    bundle = DataGenerator().generate(
+        _schema(table),
+        seed=804108,
+        rows_per_table=2,
+        scenario=DataScenario.BOUNDARY,
+    )
+    values = [row[1] for row in bundle.rows_by_table["t0"]]
+
+    assert values[-1] == "z" * 191
+    assert all(value is None or len(value) <= 191 for value in values)
+
+
+def test_lower_char_length_limit_propagates_across_foreign_key_columns() -> None:
+    parent = TableDef(
+        "t0",
+        False,
+        (
+            ColumnDef("id", "BIGINT UNSIGNED", False),
+            ColumnDef(
+                "code",
+                "VARCHAR(255)",
+                False,
+                "utf8mb4",
+                "utf8mb4_0900_ai_ci",
+            ),
+        ),
+        (_primary(), IndexDef("ix_code", (IndexPart(column_name="code"),))),
+    )
+    child = TableDef(
+        "t1",
+        False,
+        (
+            ColumnDef("id", "BIGINT UNSIGNED", False),
+            ColumnDef(
+                "parent_code",
+                "VARCHAR(255)",
+                False,
+                "utf8mb4",
+                "utf8mb4_0900_ai_ci",
+            ),
+        ),
+        (
+            _primary(),
+            IndexDef("ix_parent_code", (IndexPart(column_name="parent_code"),)),
+            IndexDef(
+                "ix_parent_code_lower",
+                (
+                    IndexPart(
+                        expression=IndexExpression.lower_char("parent_code", 191)
+                    ),
+                ),
+                kind=IndexKind.FUNCTIONAL,
+            ),
+        ),
+        foreign_keys=(
+            ForeignKeyDef("fk_code", ("parent_code",), "t0", ("code",)),
+        ),
+    )
+
+    bundle = DataGenerator().generate(
+        _schema(parent, child, profile=SchemaProfile.FOREIGN_KEY_GRAPH),
+        seed=804108,
+        rows_per_table=2,
+        scenario=DataScenario.BOUNDARY,
+    )
+    parent_values = [row[1] for row in bundle.rows_by_table["t0"]]
+    child_values = [row[1] for row in bundle.rows_by_table["t1"]]
+
+    assert parent_values[-1] == "z" * 191
+    assert child_values == parent_values
 
 
 def test_multivalue_arrays_are_unsigned_and_duplicate_free() -> None:

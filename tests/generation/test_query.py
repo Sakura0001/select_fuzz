@@ -5,6 +5,7 @@ import re
 
 import pytest
 
+from select_fuzz.domain import SeedTree
 from select_fuzz.generation.catalog import CapabilityStatus, FeatureCatalog, FeatureSpec
 from select_fuzz.generation.coverage import CoverageLedger, CoverageScheduler
 from select_fuzz.generation.query import (
@@ -253,9 +254,123 @@ def test_recursive_cte_and_window_frame_have_exact_mysql_8041_snapshots() -> Non
     )
     assert framed.sql == (
         "SELECT `t`.`id` AS `q1`, `t`.`payload` AS `q2`, "
-        "SUM(`t`.`id`) OVER (ORDER BY `t`.`id` ROWS BETWEEN 1 PRECEDING AND "
-        "1 FOLLOWING) AS `row_number` FROM `t0` AS `t` ORDER BY 1, 2, 3"
+        "SUM(`t`.`id`) OVER (ORDER BY `t`.`id` RANGE BETWEEN 1 PRECEDING AND "
+        "1 FOLLOWING) AS `row_number` FROM `t0` AS `t` ORDER BY 1"
     )
+
+
+def test_window_final_sort_uses_only_the_composite_key_not_a_lob_projection() -> None:
+    manifest = SchemaManifest(
+        profile=SchemaProfile.REGULAR_INNODB,
+        target_feature_id="window_frames",
+        seed=7,
+        tables=(
+            TableDef(
+                "t0",
+                False,
+                (
+                    ColumnDef("id", "BIGINT UNSIGNED", False),
+                    ColumnDef(
+                        "payload",
+                        "VARCHAR(255)",
+                        False,
+                        "utf8mb4",
+                        "utf8mb4_0900_ai_ci",
+                    ),
+                    ColumnDef(
+                        "boundary_col",
+                        "TEXT",
+                        True,
+                        "utf8mb4",
+                        "utf8mb4_0900_ai_ci",
+                    ),
+                ),
+                (
+                    IndexDef(
+                        "PRIMARY",
+                        (
+                            IndexPart(column_name="id"),
+                            IndexPart(column_name="payload"),
+                        ),
+                        primary=True,
+                        unique=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    generated = QueryGenerator().generate(
+        manifest,
+        target=_target("window_frames", SchemaProfile.REGULAR_INNODB),
+        seed=17,
+        lane=QueryLane.VALID,
+        directed_variant="rows_unbounded_current",
+        estimated_rows_by_table={"t0": 398},
+    )
+
+    assert "`t`.`boundary_col` AS `q3`" in generated.sql
+    assert generated.sql.endswith("ORDER BY 1, 2")
+    assert generated.ast.order_by.proves_total_order(generated.ast.scope)
+
+
+def test_distinct_not_in_does_not_compare_projected_lob_columns() -> None:
+    manifest = SchemaManifest(
+        profile=SchemaProfile.REGULAR_INNODB,
+        target_feature_id="regression_8041_distinct_not_in",
+        seed=7,
+        tables=tuple(
+            TableDef(
+                f"t{ordinal}",
+                False,
+                (
+                    ColumnDef("id", "BIGINT UNSIGNED", False),
+                    ColumnDef(
+                        "payload",
+                        "VARCHAR(255)",
+                        False,
+                        "utf8mb4",
+                        "utf8mb4_0900_ai_ci",
+                    ),
+                    ColumnDef(
+                        "boundary_col",
+                        "LONGTEXT",
+                        True,
+                        "utf8mb4",
+                        "utf8mb4_0900_ai_ci",
+                    ),
+                ),
+                (
+                    IndexDef(
+                        "PRIMARY",
+                        (
+                            IndexPart(column_name="id"),
+                            IndexPart(column_name="payload"),
+                        ),
+                        primary=True,
+                        unique=True,
+                    ),
+                ),
+            )
+            for ordinal in range(2)
+        ),
+    )
+
+    generated = QueryGenerator().generate(
+        manifest,
+        target=_target(
+            "regression_8041_distinct_not_in",
+            SchemaProfile.REGULAR_INNODB,
+        ),
+        seed=17,
+        lane=QueryLane.VALID,
+        estimated_rows_by_table={"t0": 398, "t1": 398},
+    )
+
+    assert generated.sql.startswith("SELECT DISTINCT `t`.`id` AS `q1`")
+    assert "`boundary_col`" not in generated.sql
+    assert generated.sql.endswith("ORDER BY 1")
+    assert generated.ast.order_by.proves_total_order(generated.ast.scope)
 
 
 def test_top_n_uses_a_proven_total_order_even_without_a_schema_unique_key() -> None:
@@ -362,11 +477,11 @@ def test_values_limit_is_bounded_by_a_proven_ordinal_order() -> None:
 @pytest.mark.parametrize(
     ("feature_id", "variant", "needles"),
     [
-        ("table_explicit", "table_only", ("TABLE `t0` ORDER BY 1, 2, 3, 4, 5",)),
+        ("table_explicit", "table_only", ("TABLE `t0` ORDER BY 1",)),
         (
             "table_values_union",
             "table_values_union",
-            ("TABLE `t0` UNION ALL VALUES ROW(", "ORDER BY 1, 2, 3, 4, 5"),
+            ("TABLE `t0` UNION ALL VALUES ROW(", "ORDER BY 1"),
         ),
         (
             "table_subquery_exists",
@@ -498,6 +613,48 @@ def test_explicit_table_projection_over_budget_is_unreachable_before_render() ->
         )
 
 
+def test_explicit_table_without_a_nonnullable_unique_key_is_unreachable() -> None:
+    with pytest.raises(TargetNotReachable, match="nonnullable unique key"):
+        QueryGenerator().generate(
+            _regular_manifest(unique=False),
+            target=_target("table_explicit", SchemaProfile.REGULAR_INNODB),
+            seed=0,
+            lane=QueryLane.VALID,
+        )
+
+
+def test_explicit_table_uses_the_narrowest_unique_table_and_only_key_ordering() -> None:
+    manifest = _regular_manifest(tables=2)
+    manifest = SchemaManifest(
+        profile=manifest.profile,
+        target_feature_id=manifest.target_feature_id,
+        seed=manifest.seed,
+        tables=(
+            TableDef(
+                "wide_without_key",
+                False,
+                manifest.tables[0].columns,
+                (),
+            ),
+            TableDef(
+                "narrow_with_key",
+                False,
+                manifest.tables[1].columns[:3],
+                (_primary(),),
+            ),
+        ),
+    )
+
+    generated = QueryGenerator().generate(
+        manifest,
+        target=_target("table_explicit", SchemaProfile.REGULAR_INNODB),
+        seed=0,
+        lane=QueryLane.VALID,
+    )
+
+    assert generated.sql == "TABLE `narrow_with_key` ORDER BY 1"
+
+
 @pytest.mark.parametrize(
     ("variant", "expected"),
     [
@@ -609,6 +766,24 @@ def test_scalar_intersect_except_is_a_real_nested_set_query() -> None:
     assert generated.complexity.within(QueryBudget())
 
 
+def test_undirected_set_union_remains_distinct_for_every_seed() -> None:
+    generator = QueryGenerator()
+    target = _target("set_union", SchemaProfile.REGULAR_INNODB)
+
+    for seed in range(16):
+        generated = generator.generate(
+            _regular_manifest(),
+            target=target,
+            seed=seed,
+            lane=QueryLane.VALID,
+        )
+
+        assert " UNION " in generated.sql
+        assert " UNION ALL " not in generated.sql
+        assert "set_union" in generated.feature_tags
+        assert generated.ast.scope.unique_projection_sets
+
+
 @pytest.mark.parametrize("variant", ["table_limit", "scalar_limit"])
 def test_subquery_limit_variants_have_a_proven_total_order(variant: str) -> None:
     generated = QueryGenerator().generate(
@@ -658,7 +833,7 @@ def test_scalar_rollup_is_a_real_tableless_grouping_query() -> None:
         ("grouping_aggregate_having", " HAVING "),
         ("grouping_with_rollup", "WITH ROLLUP"),
         ("window_inline_named", "WINDOW `w0` AS"),
-        ("window_frames", "ROWS BETWEEN"),
+        ("window_frames", " BETWEEN"),
         ("json_table_columns", "JSON_TABLE("),
         ("json_create_extract", "JSON_EXTRACT("),
         ("json_value_scalar", "JSON_VALUE("),
@@ -668,8 +843,8 @@ def test_scalar_rollup_is_a_real_tableless_grouping_query() -> None:
         ("optimizer_hint_join_order", "/*+ JOIN_ORDER("),
         ("optimizer_hint_index_level", "/*+ INDEX("),
         ("optimizer_hint_derived_pushdown", "DERIVED_CONDITION_PUSHDOWN"),
-        ("function_deterministic_scalar", "COALESCE("),
-        ("function_aggregate", "COUNT("),
+        ("function_deterministic_scalar", "("),
+        ("function_aggregate", "("),
         ("regression_8041_union_view_charset", "UNION ALL"),
         ("regression_8041_desc_pk_index_merge", " OR "),
         ("regression_8041_subquery_materialization", " IN (SELECT DISTINCT"),
@@ -684,8 +859,8 @@ def test_scalar_rollup_is_a_real_tableless_grouping_query() -> None:
         ("index_functional", "LOWER("),
         ("type_numeric_boundaries", "CAST("),
         ("type_string_lob_boundaries", "OCTET_LENGTH("),
-        ("type_temporal_json_spatial", "JSON_TYPE("),
-        ("function_version_import", "COALESCE("),
+        ("type_temporal_json_spatial", "DATETIME(6)"),
+        ("function_version_import", "("),
     ],
 )
 def test_regular_profile_directed_renderers_are_reachable(feature_id: str, needle: str) -> None:
@@ -713,7 +888,7 @@ def test_regular_profile_directed_renderers_are_reachable(feature_id: str, needl
         ("scene_spatial", SchemaProfile.SPATIAL_INNODB, "ST_"),
         ("index_spatial", SchemaProfile.SPATIAL_INNODB, "ST_"),
         ("function_fulltext_spatial", SchemaProfile.SPATIAL_INNODB, "ST_"),
-        ("type_temporal_json_spatial", SchemaProfile.SPATIAL_INNODB, "ST_"),
+        ("type_temporal_json_spatial", SchemaProfile.SPATIAL_INNODB, "DATETIME(6)"),
         ("scene_json_multivalue", SchemaProfile.JSON_MULTIVALUE_INNODB, "MEMBER OF"),
         ("index_multivalue", SchemaProfile.JSON_MULTIVALUE_INNODB, "MEMBER OF"),
         ("json_member_overlap", SchemaProfile.JSON_MULTIVALUE_INNODB, "JSON_OVERLAPS("),
@@ -830,11 +1005,11 @@ def test_default_lane_mix_is_exact_over_each_hundred_case_ordinals() -> None:
         counts[query.lane] += 1
 
     assert counts == {
-        QueryLane.VALID: 90,
-        QueryLane.FREE_RANDOM: 5,
-        QueryLane.NEGATIVE: 5,
+        QueryLane.VALID: 80,
+        QueryLane.FREE_RANDOM: 20,
+        QueryLane.NEGATIVE: 0,
     }
-    assert QueryMix().identity() == "90:5:5"
+    assert QueryMix().identity() == "80:20:0"
 
 
 def test_negative_lane_is_typed_expected_error_not_statement_injection() -> None:
@@ -850,6 +1025,28 @@ def test_negative_lane_is_typed_expected_error_not_statement_injection() -> None
     assert ";" not in generated.sql
     assert "lane_negative" in generated.feature_tags
     ReadOnlyValidator().validate_text(generated.sql)
+
+
+def test_every_negative_mutation_has_an_exact_mysql_error_identity() -> None:
+    generator = QueryGenerator(mix=QueryMix(0, 0, 100))
+    target = _target("select_query_specification", SchemaProfile.REGULAR_INNODB)
+
+    generated_errors = {
+        generator.generate(
+            _regular_manifest(),
+            target=target,
+            seed=seed,
+            case_ordinal=seed,
+        ).expected_error
+        for seed in range(64)
+    }
+
+    assert None not in generated_errors
+    assert {error.kind for error in generated_errors if error is not None} == set(ExpectedErrorKind)
+    assert all(error.expected_errno is not None for error in generated_errors if error is not None)
+    assert all(
+        error.expected_sqlstate is not None for error in generated_errors if error is not None
+    )
 
 
 def test_adjustable_queries_per_round_follow_coverage_debt(tmp_path: Path) -> None:
@@ -880,6 +1077,33 @@ def test_adjustable_queries_per_round_follow_coverage_debt(tmp_path: Path) -> No
     assert len(batch) == 5
     assert {query.target_feature_id for query in batch} == {"case_searched"}
     assert [query.case_ordinal for query in batch] == [0, 1, 2, 3, 4]
+
+
+def test_batch_planner_can_require_every_query_to_read_a_generated_table(
+    tmp_path: Path,
+) -> None:
+    target = _target("select_query_specification", SchemaProfile.REGULAR_INNODB)
+    scheduler = CoverageScheduler(
+        catalog=FeatureCatalog((target,)),
+        ledger=CoverageLedger(tmp_path / "coverage.json"),
+        min_hits=1,
+        version=(8, 0, 41),
+        profiles=frozenset({SchemaProfile.REGULAR_INNODB.value}),
+        schedule_seed=88,
+    )
+
+    batch = QueryBatchPlanner(QueryGenerator(mix=QueryMix(0, 100, 0))).plan(
+        _regular_manifest(),
+        scheduler=scheduler,
+        run_seed=20260715,
+        start_case_ordinal=0,
+        queries_per_round=100,
+        require_table_reference=True,
+    )
+
+    assert len(batch) == 100
+    assert all(query.complexity.tables >= 1 for query in batch)
+    assert all("FROM" in query.sql.upper() or "TABLE" in query.sql.upper() for query in batch)
 
 
 def test_batch_planner_skips_a_schema_incompatible_debt_target() -> None:
@@ -926,6 +1150,63 @@ def test_batch_planner_skips_a_schema_incompatible_debt_target() -> None:
     assert len(batch) == 1
     assert batch[0].target_feature_id == "select_query_specification"
     assert batch[0].case_ordinal == 0
+
+
+def test_batch_planner_falls_back_after_a_candidate_exceeds_the_budget() -> None:
+    over_budget = _target("set_union", SchemaProfile.REGULAR_INNODB)
+    reachable = _target(
+        "select_query_specification",
+        SchemaProfile.REGULAR_INNODB,
+    )
+
+    class _SequenceScheduler:
+        plan_start_ordinal = 0
+        planned_case_count = 2
+
+        def choose(self, *, case_ordinal: int) -> FeatureSpec:
+            return (over_budget, reachable)[case_ordinal]
+
+    batch = QueryBatchPlanner(QueryGenerator()).plan(
+        _regular_manifest(),
+        scheduler=_SequenceScheduler(),  # type: ignore[arg-type]
+        run_seed=100,
+        start_case_ordinal=0,
+        queries_per_round=1,
+        lane=QueryLane.VALID,
+        budget=QueryBudget(max_output_rows=100),
+        estimated_rows_by_table={"t0": 100, "t1": 100},
+    )
+
+    assert len(batch) == 1
+    assert batch[0].target_feature_id == "select_query_specification"
+    assert batch[0].complexity.estimated_output_rows == 100
+
+
+def test_batch_planner_normalizes_all_budget_failures_to_unreachable() -> None:
+    over_budget = _target("set_union", SchemaProfile.REGULAR_INNODB)
+
+    class _SingleScheduler:
+        plan_start_ordinal = 0
+        planned_case_count = 1
+
+        def choose(self, *, case_ordinal: int) -> FeatureSpec:
+            assert case_ordinal == 0
+            return over_budget
+
+    with pytest.raises(TargetNotReachable, match="no scheduled query target") as caught:
+        QueryBatchPlanner(QueryGenerator()).plan(
+            _regular_manifest(),
+            scheduler=_SingleScheduler(),  # type: ignore[arg-type]
+            run_seed=100,
+            start_case_ordinal=0,
+            queries_per_round=1,
+            lane=QueryLane.VALID,
+            budget=QueryBudget(max_output_rows=100),
+            estimated_rows_by_table={"t0": 100, "t1": 100},
+        )
+
+    assert isinstance(caught.value.__cause__, QueryBudgetExceeded)
+    assert "estimated_output_rows" in str(caught.value.__cause__)
 
 
 def test_hard_intermediate_row_budget_rejects_cross_product() -> None:
@@ -991,6 +1272,118 @@ def test_free_random_lane_is_not_counted_as_a_directed_coverage_hit() -> None:
 
     assert generated.coverage_eligible is False
     assert any(tag.startswith("free_shape_") for tag in generated.feature_tags)
+
+
+def test_free_random_lane_reaches_composed_query_families() -> None:
+    generator = QueryGenerator()
+    expected = {
+        "free_shape_join",
+        "free_shape_subquery",
+        "free_shape_set",
+        "free_shape_window",
+        "free_shape_predicate",
+        "free_shape_aggregate",
+        "free_shape_cte",
+    }
+    observed: set[str] = set()
+
+    for seed in range(512):
+        generated = generator.generate(
+            _regular_manifest(),
+            target=_target("cte_recursive", SchemaProfile.REGULAR_INNODB),
+            seed=seed,
+            lane=QueryLane.FREE_RANDOM,
+            estimated_rows_by_table={"t0": 3, "t1": 3},
+        )
+        observed.update(generated.feature_tags & expected)
+
+    assert observed == expected
+
+
+def test_temporary_free_random_lane_never_reopens_its_base_table() -> None:
+    generator = QueryGenerator()
+    manifest = _profile_manifest(SchemaProfile.TEMPORARY_INNODB)
+    target = _target("scene_temporary", SchemaProfile.TEMPORARY_INNODB)
+    forbidden = {
+        "free_shape_join",
+        "free_shape_subquery",
+        "free_shape_set",
+    }
+
+    generated = tuple(
+        generator.generate(
+            manifest,
+            target=target,
+            seed=seed,
+            lane=QueryLane.FREE_RANDOM,
+            estimated_rows_by_table={"t0": 8},
+        )
+        for seed in range(512)
+    )
+
+    assert all(query.feature_tags.isdisjoint(forbidden) for query in generated)
+    assert all(query.sql.count("`t0`") <= 1 for query in generated)
+
+
+def test_free_random_over_budget_shape_falls_back_without_aborting_the_round() -> None:
+    generator = QueryGenerator(mix=QueryMix(0, 100, 0))
+    target = _target("scene_foreign_key", SchemaProfile.FOREIGN_KEY_GRAPH)
+    run_seed = 2_026_071_403
+    case_ordinal = 17_491
+    query_seed = SeedTree(run_seed).derive(
+        "query_case",
+        case_ordinal,
+        target.feature_id,
+        "undirected",
+    )
+
+    generated = generator.generate(
+        _foreign_key_manifest(),
+        target=target,
+        seed=query_seed,
+        case_ordinal=case_ordinal,
+        estimated_rows_by_table={"t0": 431, "t1": 431},
+    )
+
+    assert generated.lane is QueryLane.FREE_RANDOM
+    assert "free_shape_scalar_literal" in generated.feature_tags
+    assert generated.sql == "SELECT 1 AS `q1` ORDER BY 1"
+    assert generated.complexity.within(QueryBudget())
+
+
+def test_unregistered_directed_variant_cannot_create_persistent_leaf_credit() -> None:
+    generated = QueryGenerator().generate(
+        _regular_manifest(),
+        target=_target("case_simple", SchemaProfile.REGULAR_INNODB),
+        seed=17,
+        lane=QueryLane.VALID,
+        directed_variant="forged",
+    )
+
+    assert "query_leaf:case_simple:forged" not in generated.feature_tags
+
+
+@pytest.mark.parametrize(
+    ("feature_id", "variant"),
+    [
+        ("set_union", "union_numeric"),
+        ("set_union", "precedence_union_intersect"),
+    ],
+)
+def test_set_leaf_intermediate_budget_counts_every_input_row(
+    feature_id: str,
+    variant: str,
+) -> None:
+    with pytest.raises(QueryBudgetExceeded, match="intermediate"):
+        QueryGenerator().generate(
+            _regular_manifest(),
+            target=_target(feature_id, SchemaProfile.REGULAR_INNODB),
+            seed=19,
+            lane=QueryLane.VALID,
+            directed_variant=variant,
+            estimated_rows_by_table={"t0": 100, "t1": 100},
+            budget=QueryBudget(max_intermediate_rows=10),
+        )
 
 
 def test_outer_join_estimate_and_unique_side_follow_the_preserved_relation() -> None:

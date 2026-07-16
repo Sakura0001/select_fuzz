@@ -100,9 +100,7 @@ def _is_mysql_8041_type(declaration: str) -> bool:
     if base in {"VARCHAR", "VARBINARY"}:
         return first_raw is not None and second_raw is None and 0 <= int(first_raw) <= 65_535
     if base in {"TIME", "DATETIME", "TIMESTAMP"}:
-        return second_raw is None and (
-            first_raw is None or 0 <= int(first_raw) <= 6
-        )
+        return second_raw is None and (first_raw is None or 0 <= int(first_raw) <= 6)
     return (
         first_raw is None
         and second_raw is None
@@ -118,6 +116,63 @@ class SchemaProfile(StrEnum):
     FULLTEXT_INNODB = "fulltext_innodb"
     SPATIAL_INNODB = "spatial_innodb"
     JSON_MULTIVALUE_INNODB = "json_multivalue_innodb"
+
+
+class BoundaryDeclarationId(StrEnum):
+    """Stable machine IDs for non-JSON, non-spatial type boundaries."""
+
+    TINYINT_SIGNED = "tinyint_signed"
+    TINYINT_UNSIGNED = "tinyint_unsigned"
+    SMALLINT_SIGNED = "smallint_signed"
+    SMALLINT_UNSIGNED = "smallint_unsigned"
+    MEDIUMINT_SIGNED = "mediumint_signed"
+    MEDIUMINT_UNSIGNED = "mediumint_unsigned"
+    INT_SIGNED = "int_signed"
+    INT_UNSIGNED = "int_unsigned"
+    BIGINT_SIGNED = "bigint_signed"
+    BIGINT_UNSIGNED = "bigint_unsigned"
+    BIT_LENGTH_1 = "bit_length_1"
+    BIT_LENGTH_64 = "bit_length_64"
+    DECIMAL_P1_S0 = "decimal_p1_s0"
+    DECIMAL_P1_S1 = "decimal_p1_s1"
+    DECIMAL_P30_S30 = "decimal_p30_s30"
+    DECIMAL_P31_S30 = "decimal_p31_s30"
+    DECIMAL_P65_S0 = "decimal_p65_s0"
+    DECIMAL_P65_S30 = "decimal_p65_s30"
+    FLOAT_SIGNED = "float_signed"
+    FLOAT_UNSIGNED = "float_unsigned"
+    DOUBLE_SIGNED = "double_signed"
+    DOUBLE_UNSIGNED = "double_unsigned"
+    CHAR_LENGTH_0 = "char_length_0"
+    CHAR_LENGTH_1 = "char_length_1"
+    CHAR_LENGTH_MAX = "char_length_max"
+    VARCHAR_LENGTH_0 = "varchar_length_0"
+    VARCHAR_LENGTH_1 = "varchar_length_1"
+    VARCHAR_LENGTH_MAX = "varchar_length_max"
+    BINARY_LENGTH_0 = "binary_length_0"
+    BINARY_LENGTH_1 = "binary_length_1"
+    BINARY_LENGTH_MAX = "binary_length_max"
+    VARBINARY_LENGTH_0 = "varbinary_length_0"
+    VARBINARY_LENGTH_1 = "varbinary_length_1"
+    VARBINARY_LENGTH_MAX = "varbinary_length_max"
+    DATE = "date"
+    TIME_FSP_0 = "time_fsp_0"
+    TIME_FSP_6 = "time_fsp_6"
+    DATETIME_FSP_0 = "datetime_fsp_0"
+    DATETIME_FSP_6 = "datetime_fsp_6"
+    TIMESTAMP_FSP_0 = "timestamp_fsp_0"
+    TIMESTAMP_FSP_6 = "timestamp_fsp_6"
+    YEAR = "year"
+    TINYTEXT = "tinytext"
+    TEXT = "text"
+    MEDIUMTEXT = "mediumtext"
+    LONGTEXT = "longtext"
+    TINYBLOB = "tinyblob"
+    BLOB = "blob"
+    MEDIUMBLOB = "mediumblob"
+    LONGBLOB = "longblob"
+    ENUM = "enum"
+    SET = "set"
 
 
 class IndexKind(StrEnum):
@@ -269,6 +324,28 @@ class ColumnDef:
 
 
 @dataclass(frozen=True, slots=True)
+class BoundaryDeclaration:
+    """One model-valid type declaration with a stable coverage identity."""
+
+    boundary_id: BoundaryDeclarationId
+    declaration: str
+    tags: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.boundary_id, BoundaryDeclarationId):
+            raise TypeError("boundary_id must be a BoundaryDeclarationId")
+        if not isinstance(self.declaration, str):
+            raise TypeError("declaration must be a string")
+        if not isinstance(self.tags, frozenset) or any(
+            not isinstance(tag, str) for tag in self.tags
+        ):
+            raise TypeError("tags must be a frozenset of strings")
+        if not self.tags <= {"deprecated"}:
+            raise ValueError("boundary declaration has an unsupported tag")
+        ColumnDef("boundary", self.declaration, True)
+
+
+@dataclass(frozen=True, slots=True)
 class IndexExpression:
     """A closed set of deterministic MySQL 8.0.41 functional-key templates."""
 
@@ -367,7 +444,10 @@ class IndexDef:
             raise TypeError("visible must be a boolean")
         if self.primary and not self.visible:
             raise ValueError("a primary index cannot be invisible")
-        if self.kind in {IndexKind.FULLTEXT, IndexKind.SPATIAL, IndexKind.MULTIVALUE} and self.primary:
+        if (
+            self.kind in {IndexKind.FULLTEXT, IndexKind.SPATIAL, IndexKind.MULTIVALUE}
+            and self.primary
+        ):
             raise ValueError("special indexes cannot be primary")
 
     @property
@@ -662,59 +742,99 @@ class SchemaGenerator:
         self.rules = rules
 
     @staticmethod
-    def declaration_pool(limits: SchemaLimits) -> tuple[str, ...]:
-        """Expose isolated grammar boundaries, including context-dependent maxima."""
+    def boundary_declarations(
+        limits: SchemaLimits,
+    ) -> tuple[BoundaryDeclaration, ...]:
+        """Enumerate model-valid non-JSON, non-spatial declaration boundaries."""
 
         varchar_max = min(16_383, limits.max_varchar_characters)
         varbinary_max = min(65_535, limits.max_varbinary_bytes)
+
+        def boundary(
+            boundary_id: BoundaryDeclarationId,
+            declaration: str,
+            *,
+            deprecated: bool = False,
+        ) -> BoundaryDeclaration:
+            tags = frozenset({"deprecated"}) if deprecated else frozenset()
+            return BoundaryDeclaration(boundary_id, declaration, tags)
+
         return (
-            "TINYINT",
-            "TINYINT UNSIGNED",
-            "SMALLINT",
-            "SMALLINT UNSIGNED",
-            "MEDIUMINT",
-            "MEDIUMINT UNSIGNED",
-            "INT",
-            "INT UNSIGNED",
-            "BIGINT",
-            "BIGINT UNSIGNED",
-            "BIT(1)",
-            "BIT(64)",
-            "DECIMAL(1,0)",
-            "DECIMAL(65,30)",
-            "FLOAT",
-            "DOUBLE",
-            "CHAR(1)",
-            "CHAR(0)",
-            "CHAR(255)",
-            "VARCHAR(0)",
-            "VARCHAR(1)",
-            f"VARCHAR({varchar_max})",
-            "BINARY(1)",
-            "BINARY(0)",
-            "BINARY(255)",
-            "VARBINARY(0)",
-            "VARBINARY(1)",
-            f"VARBINARY({varbinary_max})",
-            "DATE",
-            "TIME(0)",
-            "TIME(6)",
-            "DATETIME(0)",
-            "DATETIME(6)",
-            "TIMESTAMP(0)",
-            "TIMESTAMP(6)",
-            "YEAR",
-            "TINYTEXT",
-            "TEXT",
-            "MEDIUMTEXT",
-            "LONGTEXT",
-            "TINYBLOB",
-            "BLOB",
-            "MEDIUMBLOB",
-            "LONGBLOB",
+            boundary(BoundaryDeclarationId.TINYINT_SIGNED, "TINYINT"),
+            boundary(BoundaryDeclarationId.TINYINT_UNSIGNED, "TINYINT UNSIGNED"),
+            boundary(BoundaryDeclarationId.SMALLINT_SIGNED, "SMALLINT"),
+            boundary(BoundaryDeclarationId.SMALLINT_UNSIGNED, "SMALLINT UNSIGNED"),
+            boundary(BoundaryDeclarationId.MEDIUMINT_SIGNED, "MEDIUMINT"),
+            boundary(BoundaryDeclarationId.MEDIUMINT_UNSIGNED, "MEDIUMINT UNSIGNED"),
+            boundary(BoundaryDeclarationId.INT_SIGNED, "INT"),
+            boundary(BoundaryDeclarationId.INT_UNSIGNED, "INT UNSIGNED"),
+            boundary(BoundaryDeclarationId.BIGINT_SIGNED, "BIGINT"),
+            boundary(BoundaryDeclarationId.BIGINT_UNSIGNED, "BIGINT UNSIGNED"),
+            boundary(BoundaryDeclarationId.BIT_LENGTH_1, "BIT(1)"),
+            boundary(BoundaryDeclarationId.BIT_LENGTH_64, "BIT(64)"),
+            boundary(BoundaryDeclarationId.DECIMAL_P1_S0, "DECIMAL(1,0)"),
+            boundary(BoundaryDeclarationId.DECIMAL_P1_S1, "DECIMAL(1,1)"),
+            boundary(BoundaryDeclarationId.DECIMAL_P30_S30, "DECIMAL(30,30)"),
+            boundary(BoundaryDeclarationId.DECIMAL_P31_S30, "DECIMAL(31,30)"),
+            boundary(BoundaryDeclarationId.DECIMAL_P65_S0, "DECIMAL(65,0)"),
+            boundary(BoundaryDeclarationId.DECIMAL_P65_S30, "DECIMAL(65,30)"),
+            boundary(BoundaryDeclarationId.FLOAT_SIGNED, "FLOAT"),
+            boundary(
+                BoundaryDeclarationId.FLOAT_UNSIGNED,
+                "FLOAT UNSIGNED",
+                deprecated=True,
+            ),
+            boundary(BoundaryDeclarationId.DOUBLE_SIGNED, "DOUBLE"),
+            boundary(
+                BoundaryDeclarationId.DOUBLE_UNSIGNED,
+                "DOUBLE UNSIGNED",
+                deprecated=True,
+            ),
+            boundary(BoundaryDeclarationId.CHAR_LENGTH_0, "CHAR(0)"),
+            boundary(BoundaryDeclarationId.CHAR_LENGTH_1, "CHAR(1)"),
+            boundary(BoundaryDeclarationId.CHAR_LENGTH_MAX, "CHAR(255)"),
+            boundary(BoundaryDeclarationId.VARCHAR_LENGTH_0, "VARCHAR(0)"),
+            boundary(BoundaryDeclarationId.VARCHAR_LENGTH_1, "VARCHAR(1)"),
+            boundary(
+                BoundaryDeclarationId.VARCHAR_LENGTH_MAX,
+                f"VARCHAR({varchar_max})",
+            ),
+            boundary(BoundaryDeclarationId.BINARY_LENGTH_0, "BINARY(0)"),
+            boundary(BoundaryDeclarationId.BINARY_LENGTH_1, "BINARY(1)"),
+            boundary(BoundaryDeclarationId.BINARY_LENGTH_MAX, "BINARY(255)"),
+            boundary(BoundaryDeclarationId.VARBINARY_LENGTH_0, "VARBINARY(0)"),
+            boundary(BoundaryDeclarationId.VARBINARY_LENGTH_1, "VARBINARY(1)"),
+            boundary(
+                BoundaryDeclarationId.VARBINARY_LENGTH_MAX,
+                f"VARBINARY({varbinary_max})",
+            ),
+            boundary(BoundaryDeclarationId.DATE, "DATE"),
+            boundary(BoundaryDeclarationId.TIME_FSP_0, "TIME(0)"),
+            boundary(BoundaryDeclarationId.TIME_FSP_6, "TIME(6)"),
+            boundary(BoundaryDeclarationId.DATETIME_FSP_0, "DATETIME(0)"),
+            boundary(BoundaryDeclarationId.DATETIME_FSP_6, "DATETIME(6)"),
+            boundary(BoundaryDeclarationId.TIMESTAMP_FSP_0, "TIMESTAMP(0)"),
+            boundary(BoundaryDeclarationId.TIMESTAMP_FSP_6, "TIMESTAMP(6)"),
+            boundary(BoundaryDeclarationId.YEAR, "YEAR"),
+            boundary(BoundaryDeclarationId.TINYTEXT, "TINYTEXT"),
+            boundary(BoundaryDeclarationId.TEXT, "TEXT"),
+            boundary(BoundaryDeclarationId.MEDIUMTEXT, "MEDIUMTEXT"),
+            boundary(BoundaryDeclarationId.LONGTEXT, "LONGTEXT"),
+            boundary(BoundaryDeclarationId.TINYBLOB, "TINYBLOB"),
+            boundary(BoundaryDeclarationId.BLOB, "BLOB"),
+            boundary(BoundaryDeclarationId.MEDIUMBLOB, "MEDIUMBLOB"),
+            boundary(BoundaryDeclarationId.LONGBLOB, "LONGBLOB"),
+            boundary(BoundaryDeclarationId.ENUM, "ENUM('a','z')"),
+            boundary(BoundaryDeclarationId.SET, "SET('a','b','c')"),
+        )
+
+    @classmethod
+    def declaration_pool(cls, limits: SchemaLimits) -> tuple[str, ...]:
+        """Expose isolated grammar boundaries, including legacy special types."""
+
+        non_special = tuple(boundary.declaration for boundary in cls.boundary_declarations(limits))
+        return non_special + (
             "JSON",
-            "ENUM('a','z')",
-            "SET('a','b','c')",
             "GEOMETRY",
             "POINT",
             "LINESTRING",
@@ -726,31 +846,42 @@ class SchemaGenerator:
         )
 
     @classmethod
-    def executable_boundary_pool(cls, limits: SchemaLimits) -> tuple[str, ...]:
-        """Return boundaries that fit beside the mandatory columns in a real table."""
+    def executable_boundary_declarations(
+        cls, limits: SchemaLimits
+    ) -> tuple[BoundaryDeclaration, ...]:
+        """Return typed non-special boundaries that fit beside required columns."""
 
         available = min(limits.row_byte_budget, 65_535) - 2048
         if available <= 0:
             raise ValueError("boundary lane requires at least 2049 row bytes")
         varchar_max = min(16_383, limits.max_varchar_characters, available // 4)
         varbinary_max = min(65_535, limits.max_varbinary_bytes, available)
-        declarations: list[str] = []
         grammar_varchar_max = f"VARCHAR({min(16_383, limits.max_varchar_characters)})"
         grammar_varbinary_max = f"VARBINARY({min(65_535, limits.max_varbinary_bytes)})"
-        for declaration in cls.declaration_pool(limits):
+        executable: list[BoundaryDeclaration] = []
+        for boundary in cls.boundary_declarations(limits):
+            declaration = boundary.declaration
             if declaration == grammar_varchar_max and declaration not in {
                 "VARCHAR(0)",
                 "VARCHAR(1)",
             }:
-                declarations.append(f"VARCHAR({max(1, varchar_max)})")
+                declaration = f"VARCHAR({max(1, varchar_max)})"
             elif declaration == grammar_varbinary_max and declaration not in {
                 "VARBINARY(0)",
                 "VARBINARY(1)",
             }:
-                declarations.append(f"VARBINARY({max(1, varbinary_max)})")
-            else:
-                declarations.append(declaration)
-        return tuple(declarations)
+                declaration = f"VARBINARY({max(1, varbinary_max)})"
+            executable.append(replace(boundary, declaration=declaration))
+        return tuple(executable)
+
+    @classmethod
+    def executable_boundary_pool(cls, limits: SchemaLimits) -> tuple[str, ...]:
+        """Return boundaries that fit beside the mandatory columns in a real table."""
+
+        non_special = tuple(
+            boundary.declaration for boundary in cls.executable_boundary_declarations(limits)
+        )
+        return non_special + cls.declaration_pool(limits)[len(cls.boundary_declarations(limits)) :]
 
     @classmethod
     def boundary_column(
@@ -788,6 +919,44 @@ class SchemaGenerator:
             return ColumnDef(name, declaration, False, srid=4326)
         return ColumnDef(name, declaration, True)
 
+    @classmethod
+    def typed_boundary_column(
+        cls,
+        *,
+        name: str,
+        boundary_id: BoundaryDeclarationId,
+        limits: SchemaLimits,
+    ) -> ColumnDef:
+        """Build a production boundary column without JSON or spatial types."""
+
+        if not isinstance(boundary_id, BoundaryDeclarationId):
+            raise TypeError("boundary_id must be a BoundaryDeclarationId")
+        boundary = next(
+            item
+            for item in cls.executable_boundary_declarations(limits)
+            if item.boundary_id is boundary_id
+        )
+        declaration = boundary.declaration
+        base_type = declaration.split("(", 1)[0].split(" ", 1)[0]
+        if base_type in {
+            "CHAR",
+            "VARCHAR",
+            "TINYTEXT",
+            "TEXT",
+            "MEDIUMTEXT",
+            "LONGTEXT",
+            "ENUM",
+            "SET",
+        }:
+            return ColumnDef(
+                name,
+                declaration,
+                True,
+                "utf8mb4",
+                "utf8mb4_0900_ai_ci",
+            )
+        return ColumnDef(name, declaration, True)
+
     def generate(
         self,
         target: FeatureSpec,
@@ -795,6 +964,7 @@ class SchemaGenerator:
         seed: int,
         limits: SchemaLimits,
         boundary_ordinal: int | None = None,
+        typed_boundary_id: BoundaryDeclarationId | None = None,
     ) -> SchemaManifest:
         if not isinstance(seed, int) or isinstance(seed, bool):
             raise TypeError("seed must be an integer")
@@ -811,36 +981,51 @@ class SchemaGenerator:
             or boundary_ordinal < 0
         ):
             raise ValueError("boundary ordinal must be a nonnegative integer")
-        if boundary_ordinal is not None:
+        if typed_boundary_id is not None and not isinstance(
+            typed_boundary_id, BoundaryDeclarationId
+        ):
+            raise TypeError("typed_boundary_id must be a BoundaryDeclarationId")
+        if boundary_ordinal is not None and typed_boundary_id is not None:
+            raise ValueError("only one boundary lane may be selected")
+        boundary_selected = boundary_ordinal is not None or typed_boundary_id is not None
+        if boundary_selected:
             if SchemaProfile.REGULAR_INNODB.value not in compatible:
                 raise ValueError("boundary lane requires a regular_innodb target")
-            if limits.min_columns > 3 or limits.max_columns < 3:
-                raise ValueError("boundary lane requires a three-column table")
+            if limits.max_columns < 3:
+                raise ValueError("boundary lane requires at least three columns")
             profile = SchemaProfile.REGULAR_INNODB
         else:
             profile_rng = random.Random(
                 tree.derive(target.feature_id, limits.identity(), "profile")
             )
             profile = supported[profile_rng.choice(compatible)]
-        identity = limits.identity() + (
-            "" if boundary_ordinal is None else f":boundary={boundary_ordinal}"
-        )
-        if (
-            profile is SchemaProfile.TEMPORARY_INNODB
-            and limits.row_format == "COMPRESSED"
-        ):
+        boundary_identity = ""
+        if boundary_ordinal is not None:
+            boundary_identity = f":boundary={boundary_ordinal}"
+        elif typed_boundary_id is not None:
+            boundary_identity = f":typed_boundary={typed_boundary_id.value}"
+        identity = limits.identity() + boundary_identity
+        if profile is SchemaProfile.TEMPORARY_INNODB and limits.row_format == "COMPRESSED":
             raise ValueError("temporary_innodb does not support COMPRESSED row format")
-        minimum_tables = max(limits.min_tables, 2 if profile is SchemaProfile.FOREIGN_KEY_GRAPH else 1)
+        minimum_tables = max(
+            limits.min_tables, 2 if profile is SchemaProfile.FOREIGN_KEY_GRAPH else 1
+        )
         if minimum_tables > limits.max_tables:
             raise ValueError("foreign_key_graph requires at least two tables")
-        if profile in {
-            SchemaProfile.FOREIGN_KEY_GRAPH,
-            SchemaProfile.FULLTEXT_INNODB,
-            SchemaProfile.SPATIAL_INNODB,
-            SchemaProfile.JSON_MULTIVALUE_INNODB,
-        } and limits.max_indexes_per_table < 2:
+        if (
+            profile
+            in {
+                SchemaProfile.FOREIGN_KEY_GRAPH,
+                SchemaProfile.FULLTEXT_INNODB,
+                SchemaProfile.SPATIAL_INNODB,
+                SchemaProfile.JSON_MULTIVALUE_INNODB,
+            }
+            and limits.max_indexes_per_table < 2
+        ):
             raise ValueError(f"{profile.value} requires a primary and a special index")
-        count_rng = random.Random(tree.derive(target.feature_id, identity, profile.value, "table_count"))
+        count_rng = random.Random(
+            tree.derive(target.feature_id, identity, profile.value, "table_count")
+        )
         table_count = count_rng.randint(minimum_tables, limits.max_tables)
         tables = tuple(
             self._build_table(
@@ -851,6 +1036,7 @@ class SchemaGenerator:
                 path=(target.feature_id, identity, profile.value),
                 limits=limits,
                 boundary_ordinal=boundary_ordinal if index == 0 else None,
+                typed_boundary_id=typed_boundary_id if index == 0 else None,
             )
             for index in range(table_count)
         )
@@ -875,28 +1061,26 @@ class SchemaGenerator:
         path: tuple[str, ...],
         limits: SchemaLimits,
         boundary_ordinal: int | None,
+        typed_boundary_id: BoundaryDeclarationId | None,
     ) -> TableDef:
         name = f"t{table_index}"
         partition = None
         if profile is SchemaProfile.PARTITIONED_INNODB:
-            partition_rng = random.Random(
-                tree.derive(*path, "table", table_index, "partition")
-            )
+            partition_rng = random.Random(tree.derive(*path, "table", table_index, "partition"))
             methods = ["HASH", "KEY", "RANGE", "LIST", "RANGE COLUMNS"]
             if limits.max_columns >= 3 and _effective_index_budget(limits) >= 9:
                 methods.append("LIST COLUMNS")
             method = partition_rng.choice(methods)
             partition = PartitionDef(
                 method=method,
-                columns=("partition_bucket",)
-                if method == "LIST COLUMNS"
-                else ("id",),
+                columns=("partition_bucket",) if method == "LIST COLUMNS" else ("id",),
                 partitions=partition_rng.randint(1, min(16, limits.max_partitions)),
             )
         column_rng = random.Random(tree.derive(*path, "table", table_index, "column_count"))
+        boundary_selected = boundary_ordinal is not None or typed_boundary_id is not None
         column_count = (
-            3
-            if boundary_ordinal is not None
+            max(3, limits.min_columns)
+            if boundary_selected
             else column_rng.randint(limits.min_columns, limits.max_columns)
         )
         columns = self._required_columns(
@@ -911,6 +1095,14 @@ class SchemaGenerator:
                 self.boundary_column(
                     name="boundary_col",
                     ordinal=boundary_ordinal,
+                    limits=limits,
+                )
+            )
+        elif typed_boundary_id is not None:
+            columns.append(
+                self.typed_boundary_column(
+                    name="boundary_col",
+                    boundary_id=typed_boundary_id,
                     limits=limits,
                 )
             )
@@ -941,15 +1133,11 @@ class SchemaGenerator:
             primary_modes = ["none", "single"]
             if composite_bytes <= _effective_index_budget(limits):
                 primary_modes.append("composite")
-            primary_rng = random.Random(
-                tree.derive(*path, "table", table_index, "primary_key")
-            )
+            primary_rng = random.Random(tree.derive(*path, "table", table_index, "primary_key"))
             primary_mode = primary_rng.choice(primary_modes)
             if primary_mode == "composite":
                 columns = [
-                    replace(column, nullable=False)
-                    if column.name == "payload"
-                    else column
+                    replace(column, nullable=False) if column.name == "payload" else column
                     for column in columns
                 ]
 
@@ -968,9 +1156,7 @@ class SchemaGenerator:
             edges = [
                 ForeignKeyDef(
                     name=f"fk_t{table_index}_parent",
-                    columns=("parent_id", "parent_tenant_id")
-                    if composite
-                    else ("parent_id",),
+                    columns=("parent_id", "parent_tenant_id") if composite else ("parent_id",),
                     referenced_table="t0",
                     referenced_columns=("id", "tenant_id") if composite else ("id",),
                 )
@@ -1022,9 +1208,7 @@ class SchemaGenerator:
                     ColumnDef("parent_id", "BIGINT UNSIGNED", nullable_fk),
                 ]
                 if limits.max_columns >= 3 and _effective_index_budget(limits) >= 16:
-                    columns.append(
-                        ColumnDef("parent_tenant_id", "BIGINT UNSIGNED", nullable_fk)
-                    )
+                    columns.append(ColumnDef("parent_tenant_id", "BIGINT UNSIGNED", nullable_fk))
                 if (
                     table_index == 2
                     and table_count >= 3
@@ -1108,7 +1292,9 @@ class SchemaGenerator:
             declaration = rng.choice(("TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT"))
             return ColumnDef(name, declaration, nullable, "utf8mb4", "utf8mb4_0900_ai_ci")
         elif family == 13:
-            declaration = rng.choice(("TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB", "JSON"))
+            # JSON has a dedicated opt-in profile. Keep default fuzz focused on
+            # ordinary scalar/LOB types until JSON expansion is explicitly enabled.
+            declaration = rng.choice(("TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"))
         elif family == 14:
             return ColumnDef(
                 name,
@@ -1278,15 +1464,12 @@ class SchemaGenerator:
                     )
                 )
             unique_suffix = (
-                ("id",)
-                + tuple(name for name in partition_columns if name != "id")
+                ("id",) + tuple(name for name in partition_columns if name != "id")
                 if profile is SchemaProfile.PARTITIONED_INNODB
                 else ()
             )
             by_name = {column.name: column for column in columns}
-            unique_suffix_bytes = sum(
-                _fixed_index_bytes(by_name[name]) for name in unique_suffix
-            )
+            unique_suffix_bytes = sum(_fixed_index_bytes(by_name[name]) for name in unique_suffix)
             unique_prefix = min(
                 payload_characters,
                 32,
@@ -1302,9 +1485,7 @@ class SchemaGenerator:
                                 prefix_length=unique_prefix,
                             ),
                         )
-                        + tuple(
-                            IndexPart(column_name=name) for name in unique_suffix
-                        ),
+                        + tuple(IndexPart(column_name=name) for name in unique_suffix),
                         unique=True,
                     )
                 )
@@ -1339,9 +1520,7 @@ class SchemaGenerator:
                         (
                             IndexPart(
                                 column_name=random_column.name,
-                                direction=rng.choice(
-                                    (SortDirection.ASC, SortDirection.DESC)
-                                ),
+                                direction=rng.choice((SortDirection.ASC, SortDirection.DESC)),
                             ),
                         ),
                     )
@@ -1401,6 +1580,8 @@ def _inline_column_share(limits: SchemaLimits) -> int:
 
 
 __all__ = [
+    "BoundaryDeclaration",
+    "BoundaryDeclarationId",
     "ColumnDef",
     "ForeignKeyDef",
     "IndexDef",

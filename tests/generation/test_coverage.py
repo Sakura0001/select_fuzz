@@ -14,6 +14,7 @@ from select_fuzz.generation.coverage import (
     CoverageLedger,
     CoveragePlanExhaustedError,
     CoverageScheduler,
+    WeightedCoverageScheduler,
 )
 
 
@@ -34,6 +35,49 @@ def _checkpoint_from_process(path: str, worker: int) -> None:
     ledger.record("shared", hits=worker + 1)
     ledger.record(f"worker_{worker}")
     ledger.checkpoint()
+
+
+def test_weighted_scheduler_is_seeded_random_with_bounded_debt_boost(
+    tmp_path: Path,
+) -> None:
+    ledger = CoverageLedger(
+        tmp_path / "coverage.json",
+        counts={"shape_saturated": 10, "shape_debt": 0, "shape_heavy": 10},
+    )
+    catalog = FeatureCatalog(
+        (
+            _spec("shape_saturated", weight=1),
+            _spec("shape_debt", weight=1),
+            _spec("shape_heavy", weight=5),
+        )
+    )
+    first = WeightedCoverageScheduler(
+        catalog=catalog,
+        ledger=ledger,
+        min_hits=10,
+        version=(8, 0, 41),
+        schedule_seed=20260715,
+        plan_start_ordinal=100,
+        max_debt_boost=4.0,
+    )
+    second = WeightedCoverageScheduler(
+        catalog=catalog,
+        ledger=ledger,
+        min_hits=10,
+        version=(8, 0, 41),
+        schedule_seed=20260715,
+        plan_start_ordinal=100,
+        max_debt_boost=4.0,
+    )
+
+    selected = [first.choose(case_ordinal=ordinal).feature_id for ordinal in range(100, 1100)]
+
+    assert selected == [
+        second.choose(case_ordinal=ordinal).feature_id for ordinal in range(100, 1100)
+    ]
+    assert set(selected) == {"shape_saturated", "shape_debt", "shape_heavy"}
+    assert selected.count("shape_debt") > selected.count("shape_saturated")
+    assert selected.count("shape_heavy") > selected.count("shape_debt")
 
 
 def test_scheduler_strictly_prefers_largest_coverage_debt(tmp_path: Path) -> None:
@@ -383,6 +427,6 @@ def test_official_catalog_v2_is_consumable_when_present() -> None:
         spec.feature_id for spec in catalog.evidence_lock_gaps(version=(8, 0, 41))
     }
 
-    assert targets == {"select_query_specification"}
-    assert evidence_gaps == {"cte_recursive"}
+    assert targets == {"select_query_specification", "cte_recursive"}
+    assert evidence_gaps == set()
     assert len(catalog.catalogued_gaps(version=(8, 0, 41))) == 62

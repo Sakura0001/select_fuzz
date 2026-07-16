@@ -8,6 +8,7 @@ import pytest
 import yaml
 from yaml.constructor import ConstructorError
 
+import select_fuzz.generation.catalog as catalog_module
 from select_fuzz.generation.catalog import CapabilityStatus, FeatureCatalog
 from select_fuzz.generation.catalog_schema import (
     ALLOWED_CATEGORIES,
@@ -69,14 +70,7 @@ def test_source_hash_scope_and_refresh_state_are_explicit() -> None:
     sources = _sources(_catalog())
     verified = {source["source_id"] for source in sources if source["lock_state"] == "verified"}
 
-    assert verified == {
-        "grammar_8041",
-        "parse_tree_8041",
-        "release_8019",
-        "release_8022",
-        "release_8031",
-        "release_8041",
-    }
+    assert verified == REVIEWED_SOURCE_IDS
     for source in sources:
         expected_scope = (
             "response_bytes" if source["kind"] == "exact_source" else "docs_body_text_v1"
@@ -283,7 +277,36 @@ def test_loaded_catalog_is_distinct_from_generator_supported_registry() -> None:
     assert registered.directed_target("select_query_specification").evidence_lock_ready
 
 
-def test_refresh_required_parent_or_variant_evidence_cannot_be_scheduled() -> None:
+def test_verified_parent_and_variant_evidence_can_be_scheduled() -> None:
+    registered = FeatureCatalog.from_yaml(
+        CATALOG_PATH,
+        generator_supported_ids=frozenset({"cte_recursive"}),
+    )
+
+    spec = registered.directed_target("cte_recursive")
+    assert spec.capability_status is CapabilityStatus.GENERATOR_SUPPORTED
+    assert spec.evidence_lock_ready
+    assert [item.feature_id for item in registered.signature_targets(version=(8, 0, 41))] == [
+        "cte_recursive"
+    ]
+    assert registered.evidence_lock_gaps(version=(8, 0, 41)) == ()
+
+
+def test_refresh_required_parent_or_variant_evidence_cannot_be_scheduled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog = _mutated_catalog()
+    release = next(
+        source for source in _sources(catalog) if source["source_id"] == "release_8001"
+    )
+    release["lock_state"] = "refresh_required"
+    release["content_sha256"] = None
+    monkeypatch.setattr(
+        catalog_module,
+        "load_and_validate_catalog",
+        lambda _path: catalog,
+    )
+
     registered = FeatureCatalog.from_yaml(
         CATALOG_PATH,
         generator_supported_ids=frozenset({"cte_recursive"}),

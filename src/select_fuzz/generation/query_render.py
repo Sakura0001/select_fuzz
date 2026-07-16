@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from select_fuzz.generation.query_ast import (
+    BetweenExpression,
     BinaryExpression,
     CaseExpression,
     CastExpression,
@@ -12,18 +13,25 @@ from select_fuzz.generation.query_ast import (
     FunctionCall,
     FunctionalLowerExpression,
     InvalidFunctionArity,
+    IndexHint,
+    InListExpression,
     JsonMemberOf,
     JsonTableRelation,
+    JoinKind,
     JoinRelation,
     Literal,
+    LikeExpression,
     MatchAgainst,
+    MixedSetQuery,
     NamedRelation,
     ParenthesizedQuery,
     Projection,
     QueryAst,
     QueryBody,
+    RegisteredFunctionCall,
     Relation,
     RowExpression,
+    SelectModifier,
     SelectQuery,
     SetQuery,
     Star,
@@ -34,6 +42,8 @@ from select_fuzz.generation.query_ast import (
     UnaryExpression,
     UnaryOperator,
     ValuesQuery,
+    WindowFrame,
+    WindowFrameBound,
     WindowFunction,
     WindowSpec,
     require_identifier,
@@ -73,12 +83,33 @@ def render_expression(expression: Expression) -> str:
         operand = render_expression(expression.operand)
         if expression.operator is UnaryOperator.NOT:
             return f"(NOT {operand})"
+        if expression.operator in {UnaryOperator.PLUS, UnaryOperator.MINUS}:
+            return f"({expression.operator.value}{operand})"
         return f"({operand} {expression.operator.value})"
+    if isinstance(expression, BetweenExpression):
+        negated = " NOT" if expression.negated else ""
+        return (
+            f"({render_expression(expression.value)}{negated} BETWEEN "
+            f"{render_expression(expression.lower)} AND {render_expression(expression.upper)})"
+        )
+    if isinstance(expression, InListExpression):
+        negated = " NOT" if expression.negated else ""
+        options = ", ".join(render_expression(option) for option in expression.options)
+        return f"({render_expression(expression.value)}{negated} IN ({options}))"
+    if isinstance(expression, LikeExpression):
+        negated = " NOT" if expression.negated else ""
+        return (
+            f"({render_expression(expression.value)}{negated} LIKE "
+            f"{render_expression(expression.pattern)} ESCAPE {quote_text(expression.escape)})"
+        )
     if isinstance(expression, FunctionCall):
         arguments = ", ".join(render_expression(argument) for argument in expression.args)
         if expression.distinct:
             arguments = "DISTINCT " + arguments
         return f"{expression.name.value}({arguments})"
+    if isinstance(expression, RegisteredFunctionCall):
+        arguments = ", ".join(render_expression(argument) for argument in expression.args)
+        return f"{expression.signature.sql_name}({arguments})"
     if isinstance(expression, FunctionalLowerExpression):
         return (
             f"CAST(LOWER({render_expression(expression.operand)}) AS "
@@ -126,13 +157,19 @@ def render_expression(expression: Expression) -> str:
         mode = " IN BOOLEAN MODE" if expression.boolean_mode else ""
         return f"MATCH({columns}) AGAINST({quote_text(expression.search)}{mode})"
     if isinstance(expression, WindowFunction):
-        argument = "" if expression.argument is None else render_expression(expression.argument)
+        window_arguments = (
+            (() if expression.argument is None else (expression.argument,))
+            + expression.extra_arguments
+        )
+        rendered_arguments = ", ".join(
+            render_expression(argument) for argument in window_arguments
+        )
         window = (
             quote_identifier(expression.window)
             if isinstance(expression.window, str)
             else _render_window_spec(expression.window)
         )
-        return f"{expression.function}({argument}) OVER {window}"
+        return f"{expression.function}({rendered_arguments}) OVER {window}"
     raise TypeError(f"unsupported expression node: {type(expression).__name__}")
 
 
@@ -141,6 +178,12 @@ def _render_projection(projection: Projection) -> str:
     if projection.alias is not None:
         rendered += f" AS {quote_identifier(projection.alias)}"
     return rendered
+
+
+def _render_window_frame_bound(bound: WindowFrameBound) -> str:
+    if bound.offset is None:
+        return bound.kind.value
+    return f"{bound.offset} {bound.kind.value}"
 
 
 def _render_window_spec(window: WindowSpec) -> str:
@@ -153,9 +196,21 @@ def _render_window_spec(window: WindowSpec) -> str:
         "ORDER BY " + ", ".join(render_expression(item) for item in window.order.expressions)
     )
     if window.frame is not None:
-        preceding, following = window.frame
-        pieces.append(f"ROWS BETWEEN {preceding} PRECEDING AND {following} FOLLOWING")
+        frame = window.frame
+        assert isinstance(frame, WindowFrame)
+        pieces.append(
+            f"{window.frame_unit.value} BETWEEN {_render_window_frame_bound(frame.start)} "
+            f"AND {_render_window_frame_bound(frame.end)}"
+        )
     return "(" + " ".join(pieces) + ")"
+
+
+def _render_index_hint(hint: IndexHint) -> str:
+    scope = "" if hint.scope is None else f" FOR {hint.scope.value}"
+    indexes = ", ".join(
+        "PRIMARY" if index == "PRIMARY" else quote_identifier(index) for index in hint.indexes
+    )
+    return f"{hint.action.value} INDEX{scope} ({indexes})"
 
 
 def render_relation(relation: Relation) -> str:
@@ -167,9 +222,12 @@ def render_relation(relation: Relation) -> str:
                 + ", ".join(quote_identifier(item) for item in relation.partitions)
                 + ")"
             )
-        return (
+        rendered = (
             f"{quote_identifier(relation.table)}{partitions} AS {quote_identifier(relation.alias)}"
         )
+        if relation.index_hints:
+            rendered += " " + " ".join(_render_index_hint(hint) for hint in relation.index_hints)
+        return rendered
     if isinstance(relation, NamedRelation):
         return f"{quote_identifier(relation.name)} AS {quote_identifier(relation.alias)}"
     if isinstance(relation, DerivedRelation):
@@ -192,12 +250,24 @@ def render_relation(relation: Relation) -> str:
             f"AS {quote_identifier(relation.alias)}"
         )
     if isinstance(relation, JoinRelation):
-        rendered = (
-            f"{render_relation(relation.left)} {relation.kind.value} "
-            f"{render_relation(relation.right)}"
-        )
+        left = render_relation(relation.left)
+        right = render_relation(relation.right)
+        if isinstance(relation.left, JoinRelation):
+            left = f"({left})"
+        if isinstance(relation.right, JoinRelation):
+            right = f"({right})"
+        if relation.kind is JoinKind.COMMA:
+            rendered = f"{left}, {right}"
+        else:
+            rendered = f"{left} {relation.kind.value} {right}"
         if relation.predicate is not None:
             rendered += f" ON {render_expression(relation.predicate)}"
+        elif relation.using_columns:
+            rendered += (
+                " USING ("
+                + ", ".join(quote_identifier(column) for column in relation.using_columns)
+                + ")"
+            )
         return rendered
     raise TypeError(f"unsupported relation node: {type(relation).__name__}")
 
@@ -207,11 +277,27 @@ def render_query_body(query: QueryBody) -> str:
         hint = ""
         if query.optimizer_hint is not None:
             hint = f" /*+ {query.optimizer_hint} */"
-        distinct = " DISTINCT" if query.distinct else ""
+        options: list[str] = []
+        if query.distinct:
+            options.append("DISTINCT")
+        for modifier in (
+            SelectModifier.ALL,
+            SelectModifier.DISTINCTROW,
+            SelectModifier.HIGH_PRIORITY,
+            SelectModifier.STRAIGHT_JOIN,
+            SelectModifier.SQL_CALC_FOUND_ROWS,
+            SelectModifier.SQL_NO_CACHE,
+            SelectModifier.SQL_SMALL_RESULT,
+            SelectModifier.SQL_BIG_RESULT,
+            SelectModifier.SQL_BUFFER_RESULT,
+        ):
+            if modifier in query.modifiers:
+                options.append(modifier.value)
+        rendered_options = "" if not options else " " + " ".join(options)
         rendered = (
             "SELECT"
             + hint
-            + distinct
+            + rendered_options
             + " "
             + ", ".join(_render_projection(item) for item in query.projection)
         )
@@ -236,6 +322,12 @@ def render_query_body(query: QueryBody) -> str:
     if isinstance(query, SetQuery):
         operator = query.operator.value + (" ALL" if query.all else "")
         return f" {operator} ".join(_render_set_branch(branch) for branch in query.branches)
+    if isinstance(query, MixedSetQuery):
+        rendered = _render_set_branch(query.first)
+        for operation in query.operations:
+            operator = operation.operator.value + (" ALL" if operation.all else "")
+            rendered += f" {operator} {_render_set_branch(operation.query)}"
+        return rendered
     if isinstance(query, ValuesQuery):
         return "VALUES " + ", ".join(
             "ROW(" + ", ".join(render_expression(item) for item in row) + ")" for row in query.rows
@@ -258,7 +350,7 @@ def render_query_body(query: QueryBody) -> str:
 
 def _render_set_branch(query: QueryBody) -> str:
     rendered = render_query_body(query)
-    if isinstance(query, SetQuery):
+    if isinstance(query, (SetQuery, MixedSetQuery)):
         return f"({rendered})"
     return rendered
 
@@ -277,10 +369,15 @@ def render_query_ast(query: QueryAst) -> str:
             )
         prefix = f"WITH{recursive} " + ", ".join(ctes) + " "
     rendered = prefix + render_query_body(query.body)
-    order = []
-    for ordinal in query.order_by.ordinals:
-        suffix = " DESC" if ordinal in query.order_by.descending else ""
-        order.append(f"{ordinal}{suffix}")
+    order: list[str] = []
+    if query.order_by.ordinals:
+        for ordinal in query.order_by.ordinals:
+            suffix = " DESC" if ordinal in query.order_by.descending else ""
+            order.append(f"{ordinal}{suffix}")
+    elif query.order_by.aliases:
+        order.extend(quote_identifier(alias) for alias in query.order_by.aliases)
+    else:
+        order.extend(render_expression(expression) for expression in query.order_by.expressions)
     rendered += " ORDER BY " + ", ".join(order)
     if query.limit is not None:
         rendered += f" LIMIT {query.limit}"

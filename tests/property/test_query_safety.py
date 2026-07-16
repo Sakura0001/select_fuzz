@@ -4,6 +4,7 @@ from hypothesis import given, settings, strategies as st
 
 from select_fuzz.generation.catalog import FeatureSpec
 from select_fuzz.generation.query import QueryBudget, QueryGenerator, QueryLane
+from select_fuzz.generation.query_render import quote_identifier, render_expression
 from select_fuzz.generation.query_safety import ReadOnlyValidator
 from select_fuzz.generation.schema import (
     ColumnDef,
@@ -171,9 +172,18 @@ def test_ten_thousand_generated_queries_are_safe_bounded_and_byte_stable(
     order_suffix = first.sql.rsplit(" ORDER BY ", maxsplit=1)[1]
     if " LIMIT " in order_suffix:
         order_suffix = order_suffix.split(" LIMIT ", maxsplit=1)[0]
-    assert [item.removesuffix(" DESC") for item in order_suffix.split(", ")] == [
-        str(i) for i in range(1, first.ast.scope.projection_count + 1)
-    ]
+    if first.ast.order_by.ordinals:
+        expected_order = [
+            f"{ordinal}{' DESC' if ordinal in first.ast.order_by.descending else ''}"
+            for ordinal in first.ast.order_by.ordinals
+        ]
+    elif first.ast.order_by.aliases:
+        expected_order = [quote_identifier(alias) for alias in first.ast.order_by.aliases]
+    else:
+        expected_order = [
+            render_expression(expression) for expression in first.ast.order_by.expressions
+        ]
+    assert order_suffix.split(", ") == expected_order
     if first.ast.limit is not None or first.ast.has_window:
         assert first.ast.order_by.proves_total_order(first.ast.scope)
         assert first.ast.window_orders_are_total()

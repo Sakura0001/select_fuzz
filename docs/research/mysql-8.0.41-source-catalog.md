@@ -66,11 +66,11 @@ Loading is not generator support. `FeatureCatalog` round-trips all 64 reviewed v
 rows, while `capability_status` is derived from the internal generator registry.
 Only explicitly registered variants are returned as scheduling targets; every other
 loaded row is exposed as a `catalogued_gap`. The current registry contains all 64
-reviewed variants with typed renderers and tests, but registration is not sufficient
-for production scheduling: the variant's own evidence and its parent feature evidence
-must all reference `verified` source locks. At this snapshot 31 variants are
-evidence-ready; `refresh_required` evidence is reported as an evidence-lock gap and is
-never scheduled.
+reviewed variants with typed renderers and tests, and all 64 are evidence-ready because
+their own evidence and parent feature evidence reference verified source locks. The
+default production scope intentionally schedules 51 of them and excludes 13
+JSON/FULLTEXT/SPATIAL targets; catalog support and production-scope inclusion are
+separate decisions.
 
 ## Initial coverage
 
@@ -88,7 +88,8 @@ The first slice covers the following independently measurable families:
   `SELECT`, `TABLE`, and `VALUES` query primaries.
 - Global and grouped aggregates, HAVING, ROLLUP, and `GROUPING`.
 - Ranking, navigation, value, and aggregate windows; inline and named windows;
-  `ROWS` and `RANGE` frames; unsupported window constructs as negative mutations.
+  `ROWS` and `RANGE` frames. Window forms rejected by MySQL 8.0.41 are fail-closed
+  exclusions, not valid-lane or negative-lane mutations.
 - All `JSON_TABLE` column forms and implicit correlation, plus safe JSON function
   families and multivalue-index predicates.
 - Simple and searched `CASE`, control-flow functions, optimizer-hint scopes,
@@ -150,15 +151,11 @@ script/style/noscript/SVG content, decodes character references, applies NFC, co
 whitespace, and hashes UTF-8 visible text. Locator matching runs against the same
 normalized body, so page chrome cannot satisfy evidence.
 
-As of this snapshot, the two exact-tag sources plus the 8.0.19, 8.0.22, 8.0.31,
-and 8.0.41 release notes are `verified`. The 8.0.31 normalized body has SHA-256
-`35b88b00431217e20b23bdd635ca48f807cb22083163159dc5f1298f55b081f8`; the
-8.0.41 normalized body has SHA-256
-`a48124031d81275a43585468e5e26f8c2842729284f05671374b8dd3925d59f4`.
-The other 17 documentation records are explicitly `refresh_required` with null hashes
-because network permission was unavailable after the stable scope was introduced.
-This is an intentional fail-closed state: the verifier refuses to report success until
-those pages are fetched, inspected, and locked under `docs_body_text_v1`.
+As of the 2026-07-14 snapshot, all 23 source records are `verified`, including both
+exact-tag source files, versioned release notes, manual snapshots, and version-reference
+snapshots. The verifier checks 96 locators against the same normalized content used for
+the stored hashes. There are no `refresh_required` source records in this snapshot;
+future hash or locator drift remains fail-closed.
 
 Only sources referenced by this catalog slice are retained. Adding unused pages does
 not increase coverage; adding a feature or variant requires granular evidence and a

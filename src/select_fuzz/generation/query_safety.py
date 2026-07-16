@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from select_fuzz.generation.function_registry import DETERMINISTIC_FUNCTION_SIGNATURES
+
 
 class UnsafeQuery(ValueError):
     """SQL is not an admissible deterministic read-only query."""
@@ -84,6 +86,10 @@ _NONDETERMINISTIC_KEYWORDS = frozenset(
     }
 )
 
+_REGISTERED_FUNCTION_NAMES = frozenset(
+    signature.sql_name for signature in DETERMINISTIC_FUNCTION_SIGNATURES
+)
+
 _ALLOWED_CALL_TOKENS = frozenset(
     {
         # Closed deterministic function set rendered by query_ast/query_render.
@@ -91,42 +97,85 @@ _ALLOWED_CALL_TOKENS = frozenset(
         "AGAINST",
         "ALL",
         "ANY",
+        "AVG",
+        "BIT_AND",
+        "BIT_OR",
+        "BIT_XOR",
         "CAST",
         "CHAR",
         "COALESCE",
         "CONCAT",
+        "CONVERT",
         "COUNT",
         "COLUMNS",
+        "CUME_DIST",
+        "DATE_ADD",
+        "DATE_SUB",
         "DATETIME",
         "DECIMAL",
+        "DENSE_RANK",
+        "FIRST_VALUE",
+        "GROUP_CONCAT",
+        "GROUPING",
         "JSON_EXTRACT",
+        "JSON_ARRAY",
+        "JSON_ARRAYAGG",
         "JSON_OBJECT",
         "JSON_OVERLAPS",
         "JSON_SCHEMA_VALID",
         "JSON_TABLE",
         "JSON_TYPE",
+        "JSON_UNQUOTE",
         "JSON_VALUE",
+        "LAG",
+        "LAST_VALUE",
+        "LEAD",
         "LOWER",
         "MATCH",
         "MAX",
         "MIN",
+        "NTH_VALUE",
+        "NTILE",
         "OCTET_LENGTH",
+        "PERCENT_RANK",
         "ROW",
         "ROW_NUMBER",
+        "RANK",
+        "REGEXP_LIKE",
         "ST_ASBINARY",
+        "ST_ASTEXT",
         "ST_GEOMFROMTEXT",
         "ST_ISVALID",
+        "STDDEV_POP",
+        "STDDEV_SAMP",
         "SUM",
+        "TIMESTAMPADD",
+        "TIMESTAMPDIFF",
+        "VAR_POP",
+        "VAR_SAMP",
         # Grammar tokens that may immediately precede a parenthesized node.
         "AND",
         "AS",
+        "BETWEEN",
+        "BINARY",
+        "BY",
+        "CASE",
+        "DISTINCT",
+        "DISTINCTROW",
+        "DIV",
+        "ELSE",
         "EXCEPT",
         "EXISTS",
         "FROM",
         "HAVING",
+        "HIGH_PRIORITY",
         "IN",
+        "INDEX",
         "INTERSECT",
+        "JOIN",
         "LATERAL",
+        "LIKE",
+        "MOD",
         "NOT",
         "OF",
         "ON",
@@ -134,12 +183,22 @@ _ALLOWED_CALL_TOKENS = frozenset(
         "OVER",
         "PARTITION",
         "SELECT",
+        "SQL_BIG_RESULT",
+        "SQL_BUFFER_RESULT",
+        "SQL_CALC_FOUND_ROWS",
+        "SQL_SMALL_RESULT",
+        "SOME",
+        "STRAIGHT_JOIN",
+        "THEN",
         "UNION",
+        "USING",
         "VALUES",
         "WHEN",
         "WHERE",
+        "VARCHAR",
+        "XOR",
     }
-)
+) | _REGISTERED_FUNCTION_NAMES
 
 _QUOTED_CALL = re.compile(r"`(?:``|[^`])+`\s*\(")
 _CTE_WITH_COLUMNS = re.compile(
@@ -208,9 +267,7 @@ def _masked_sql(sql: str, *, preserve_optimizer_hints: bool = False) -> str:
             index = end + 2
             continue
         if char == "#" or (
-            sql.startswith("--", index)
-            and index + 2 < length
-            and sql[index + 2].isspace()
+            sql.startswith("--", index) and index + 2 < length and sql[index + 2].isspace()
         ):
             end = sql.find("\n", index)
             if end < 0:
@@ -253,6 +310,18 @@ class ReadOnlyValidator:
         if words[0] == "WITH" and "SELECT" not in words:
             raise UnsafeQuery("WITH query must contain SELECT")
         forbidden = _FORBIDDEN_STATEMENT_WORDS & set(words)
+        for function_name in forbidden & _REGISTERED_FUNCTION_NAMES:
+            word_count = len(re.findall(rf"\b{re.escape(function_name)}\b", upper))
+            call_count = len(
+                re.findall(rf"\b{re.escape(function_name)}\s*\(", upper)
+            )
+            if word_count == call_count:
+                forbidden = forbidden - {function_name}
+        if "USE" in forbidden:
+            use_count = len(re.findall(r"\bUSE\b", upper))
+            use_index_count = len(re.findall(r"\bUSE\s+INDEX\b", upper))
+            if use_count == use_index_count:
+                forbidden = forbidden - {"USE"}
         if forbidden:
             raise UnsafeQuery(f"forbidden statement token: {sorted(forbidden)[0]}")
         if "@" in masked:

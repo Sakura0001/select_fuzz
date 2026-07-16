@@ -32,7 +32,11 @@ class DataGenerationError(ValueError):
 
 
 class DistributionKind(StrEnum):
+    ALL_NULL = "all_null"
     BOUNDARY = "boundary"
+    DUPLICATE = "duplicate"
+    HOTSPOT = "hotspot"
+    MIXED_NULL = "mixed_null"
     UNIFORM = "uniform"
     ZIPF = "zipf"
     LOW_CARDINALITY = "low_cardinality"
@@ -41,11 +45,24 @@ class DistributionKind(StrEnum):
     CORRELATED = "correlated"
 
 
+class DataScenario(StrEnum):
+    """A deterministic data shape applied to ordinary, unconstrained columns."""
+
+    MIXED = "mixed"
+    SEEDED_RANDOM = "seeded_random"
+    BOUNDARY = "boundary"
+    ALL_NULL = "all_null"
+    MIXED_NULL = "mixed_null"
+    DUPLICATE = "duplicate"
+    HOTSPOT = "hotspot"
+
+
 @dataclass(frozen=True, slots=True)
 class DistributionPlan:
     column_name: str
     kind: DistributionKind
     unique_prefix_length: int | None = None
+    fallback_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,10 +105,13 @@ class DataBundle:
     distributions: Mapping[str, tuple[DistributionPlan, ...]]
     table_order: tuple[str, ...]
     payload_sha256: str
+    scenario: DataScenario = DataScenario.MIXED
 
     def __post_init__(self) -> None:
         if not isinstance(self.seed, int) or isinstance(self.seed, bool):
             raise TypeError("data seed must be an integer")
+        if not isinstance(self.scenario, DataScenario):
+            raise TypeError("data scenario must be a DataScenario")
         object.__setattr__(self, "inserts_sql", tuple(self.inserts_sql))
         object.__setattr__(self, "table_order", tuple(self.table_order))
         object.__setattr__(
@@ -163,10 +183,19 @@ class DataBundle:
                 name: [plan.kind.value for plan in self.distributions[name]]
                 for name in self.table_order
             },
+            "distribution_fallbacks": {
+                name: {
+                    plan.column_name: plan.fallback_reason
+                    for plan in self.distributions[name]
+                    if plan.fallback_reason is not None
+                }
+                for name in self.table_order
+            },
             "insert_sql": list(self.inserts_sql),
             "payload_hex": {name: self.payload[name].hex() for name in self.table_order},
             "payload_sha256": self.payload_sha256,
             "schema_sha256": self.schema_sha256,
+            "scenario": self.scenario.value,
             "seed": self.seed,
             "table_order": self.table_order,
         }
@@ -193,6 +222,10 @@ _INTEGER_BOUNDS: Mapping[str, tuple[int, int]] = {
     "MEDIUMINT": (-(2**23), 2**23 - 1),
     "INT": (-(2**31), 2**31 - 1),
     "BIGINT": (-(2**63), 2**63 - 1),
+}
+_FLOAT_BOUNDS: Mapping[str, tuple[float, float]] = {
+    "FLOAT": (1.175494351e-38, 3.402823466e38),
+    "DOUBLE": (2.2250738585072014e-308, 1.7976931348623157e308),
 }
 _TEXT_TYPES = frozenset(
     {"CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET"}
@@ -259,11 +292,14 @@ class DataGenerator:
         *,
         seed: int,
         rows_per_table: int | Mapping[str, int],
+        scenario: DataScenario = DataScenario.MIXED,
     ) -> DataBundle:
         if not isinstance(schema, SchemaManifest):
             raise TypeError("schema must be a SchemaManifest")
         if not isinstance(seed, int) or isinstance(seed, bool):
             raise TypeError("seed must be an integer")
+        if not isinstance(scenario, DataScenario):
+            raise TypeError("scenario must be a DataScenario")
         counts = self._resolve_counts(schema, rows_per_table)
         table_order = self._table_order(schema)
         tables = {table.name: table for table in schema.tables}
@@ -279,6 +315,7 @@ class DataGenerator:
                 counts[table_name],
                 value_length_limits.get(table_name, {}),
                 tree,
+                scenario,
             )
             distributions[table_name] = plans
             rows_by_table[table_name] = self._generate_table_rows(
@@ -319,6 +356,7 @@ class DataGenerator:
             distributions=distributions,
             table_order=table_order,
             payload_sha256=_combined_payload_digest(table_order, payload),
+            scenario=scenario,
         )
 
     def _resolve_counts(
@@ -376,6 +414,7 @@ class DataGenerator:
     ) -> dict[str, dict[str, int]]:
         tables = {table.name: table for table in schema.tables}
         parents: dict[tuple[str, str], tuple[str, str]] = {}
+        functional_limits: dict[tuple[str, str], int] = {}
 
         def find(node: tuple[str, str]) -> tuple[str, str]:
             parents.setdefault(node, node)
@@ -388,6 +427,33 @@ class DataGenerator:
             left_root, right_root = find(left), find(right)
             if left_root != right_root:
                 parents[right_root] = left_root
+
+        for table in schema.tables:
+            for index in table.indexes:
+                for part in index.parts:
+                    expression = part.expression
+                    if (
+                        expression is None
+                        or expression.kind is not IndexExpressionKind.LOWER_CHAR
+                    ):
+                        continue
+                    column = table.column(expression.column_name)
+                    if column.base_type not in {
+                        "CHAR",
+                        "VARCHAR",
+                        "TINYTEXT",
+                        "TEXT",
+                        "MEDIUMTEXT",
+                        "LONGTEXT",
+                    }:
+                        continue
+                    assert expression.cast_length is not None
+                    node = (table.name, column.name)
+                    find(node)
+                    functional_limits[node] = min(
+                        functional_limits.get(node, expression.cast_length),
+                        expression.cast_length,
+                    )
 
         for table in schema.tables:
             for foreign_key in table.foreign_keys:
@@ -405,7 +471,12 @@ class DataGenerator:
         group_limits: dict[tuple[str, str], int] = {}
         for node in tuple(parents):
             table_name, column_name = node
-            length = _first_size(tables[table_name].column(column_name).mysql_type)
+            column = tables[table_name].column(column_name)
+            if column.base_type in {"CHAR", "VARCHAR", "BINARY", "VARBINARY"}:
+                length = _first_size(column.mysql_type)
+            else:
+                length = functional_limits[node]
+            length = min(length, functional_limits.get(node, length))
             root = find(node)
             group_limits[root] = min(group_limits.get(root, length), length)
         result: dict[str, dict[str, int]] = {}
@@ -420,6 +491,7 @@ class DataGenerator:
         row_count: int,
         value_length_limits: Mapping[str, int],
         tree: SeedTree,
+        scenario: DataScenario,
     ) -> tuple[DistributionPlan, ...]:
         fk_columns = {
             column_name
@@ -439,10 +511,17 @@ class DataGenerator:
         offset = tree.derive("table", table.name, "distribution") % len(_DISTRIBUTION_CYCLE)
         plans: list[DistributionPlan] = []
         for position, column in enumerate(table.columns):
+            fallback_reason: str | None = None
             if column.name == "id" or column.name in forced_unique or column.name in multivalue_columns:
                 kind = DistributionKind.UNIQUE
             elif column.name in fk_columns or column.name in partition_columns:
                 kind = DistributionKind.CORRELATED
+            elif scenario is not DataScenario.MIXED:
+                kind, fallback_reason = self._scenario_distribution(
+                    scenario,
+                    column,
+                    row_count,
+                )
             else:
                 kind = _DISTRIBUTION_CYCLE[(position - 1 + offset) % len(_DISTRIBUTION_CYCLE)]
                 if (
@@ -467,8 +546,50 @@ class DataGenerator:
                 raise DataGenerationError(
                     f"unique index on {table.name}.{column.name} cannot hold {row_count} rows"
                 )
-            plans.append(DistributionPlan(column.name, kind, prefix_length))
+            plans.append(
+                DistributionPlan(
+                    column.name,
+                    kind,
+                    prefix_length,
+                    fallback_reason,
+                )
+            )
         return tuple(plans)
+
+    @staticmethod
+    def _scenario_distribution(
+        scenario: DataScenario,
+        column: ColumnDef,
+        row_count: int,
+    ) -> tuple[DistributionKind, str | None]:
+        if scenario is DataScenario.SEEDED_RANDOM:
+            return (DistributionKind.UNIFORM, None)
+        if scenario is DataScenario.BOUNDARY:
+            return (DistributionKind.BOUNDARY, None)
+        if scenario is DataScenario.DUPLICATE:
+            return (DistributionKind.DUPLICATE, None)
+        if scenario is DataScenario.HOTSPOT:
+            return (DistributionKind.HOTSPOT, None)
+        if scenario is DataScenario.ALL_NULL:
+            if column.nullable:
+                return (DistributionKind.ALL_NULL, None)
+            return (
+                DistributionKind.BOUNDARY,
+                "all_null_requires_nullable_column",
+            )
+        if scenario is DataScenario.MIXED_NULL:
+            if not column.nullable:
+                return (
+                    DistributionKind.BOUNDARY,
+                    "mixed_null_requires_nullable_column",
+                )
+            if row_count < 2:
+                return (
+                    DistributionKind.BOUNDARY,
+                    "mixed_null_requires_at_least_two_rows",
+                )
+            return (DistributionKind.MIXED_NULL, None)
+        raise ValueError(f"unsupported explicit data scenario: {scenario.value}")
 
     @staticmethod
     def _forced_unique_columns(table: TableDef) -> dict[str, int | None]:
@@ -703,6 +824,25 @@ class DataGenerator:
         unique_prefix_length: int | None,
         value_length_limit: int | None,
     ) -> CellValue:
+        if distribution is DistributionKind.ALL_NULL:
+            return None
+        if distribution is DistributionKind.MIXED_NULL:
+            if row_index % 2 == 0:
+                return None
+            distribution = DistributionKind.UNIFORM
+        elif distribution in {DistributionKind.DUPLICATE, DistributionKind.HOTSPOT}:
+            if distribution is DistributionKind.DUPLICATE:
+                effective_row_index = 0
+            else:
+                hot_rows = math.ceil(row_count * 0.8)
+                effective_row_index = (
+                    0 if row_index < hot_rows else row_index - hot_rows + 1
+                )
+            row_index = effective_row_index
+            distribution = DistributionKind.LOW_CARDINALITY
+            # Geometry consults its RNG for every distribution. Re-seeding on the
+            # effective index keeps the requested duplicate/hotspot value exact.
+            rng = random.Random(effective_row_index)
         if distribution is DistributionKind.NULL_HEAVY and column.nullable and rng.randrange(10) < 7:
             return None
         base = column.base_type
@@ -779,9 +919,19 @@ class DataGenerator:
             return minimum + row_index
         if distribution is DistributionKind.BOUNDARY:
             candidates = tuple(
-                value
-                for value in (minimum, maximum, 0, 1, -1)
-                if minimum <= value <= maximum
+                dict.fromkeys(
+                    value
+                    for value in (
+                        minimum,
+                        minimum + 1,
+                        -1,
+                        0,
+                        1,
+                        maximum - 1,
+                        maximum,
+                    )
+                    if minimum <= value <= maximum
+                )
             )
             return candidates[row_index % len(candidates)]
         if distribution is DistributionKind.UNIFORM:
@@ -827,15 +977,21 @@ class DataGenerator:
     ) -> float:
         base = column.base_type
         unsigned = column.mysql_type.endswith(" UNSIGNED")
-        maximum = 3.4e38 if base == "FLOAT" else 1.7e308
+        smallest, maximum = _FLOAT_BOUNDS[base]
         if distribution is DistributionKind.BOUNDARY:
-            boundary_values = (0.0, 1.0, maximum) if unsigned else (
-                0.0,
-                -0.0,
-                1.0,
-                -1.0,
-                maximum,
-                -maximum,
+            boundary_values = (
+                (0.0, smallest, 1.0, maximum)
+                if unsigned
+                else (
+                    -maximum,
+                    -smallest,
+                    -1.0,
+                    -0.0,
+                    0.0,
+                    1.0,
+                    smallest,
+                    maximum,
+                )
             )
             return boundary_values[row_index % len(boundary_values)]
         if distribution is DistributionKind.UNIFORM:
@@ -890,7 +1046,25 @@ class DataGenerator:
                 raise DataGenerationError("text prefix is too short for unique values")
             value = _base36(row_index).rjust(width, "0")
         elif distribution is DistributionKind.BOUNDARY:
-            value = ("", "a", "z" * min(capacity, 64))[row_index % 3]
+            unicode_value = (
+                "汉🙂"
+                if column.charset in {None, "utf8mb4"}
+                else "汉字"
+                if column.charset == "utf8mb3"
+                else "Az09"
+            )
+            values = (
+                "",
+                "a",
+                "\\\x00\t\n\r\x1a'\"",
+                unicode_value,
+                "tail ",
+            )
+            value = (
+                "z" * capacity
+                if row_index == row_count - 1
+                else values[row_index % len(values)]
+            )
         elif distribution is DistributionKind.LOW_CARDINALITY:
             value = ("alpha", "beta", "gamma", "delta")[row_index % 4]
         elif distribution is DistributionKind.ZIPF:
@@ -898,9 +1072,9 @@ class DataGenerator:
         elif distribution is DistributionKind.CORRELATED:
             value = f"group_{row_index // 2:08d}"
         elif distribution is DistributionKind.UNIFORM:
-            value = f"u_{rng.getrandbits(64):016x}_{row_index:08d}"
+            value = f"{rng.getrandbits(64):016x}_u_{row_index:08d}"
         else:
-            value = f"unique_{row_index:020d}_{rng.getrandbits(32):08x}"
+            value = f"{rng.getrandbits(32):08x}_value_{row_index:020d}"
         return value[:capacity]
 
     def _text_capacity(self, column: ColumnDef) -> int:
@@ -950,13 +1124,24 @@ class DataGenerator:
                 raise DataGenerationError("binary prefix is too short for unique values")
             return row_index.to_bytes(width, "big")
         if distribution is DistributionKind.BOUNDARY:
-            values = (b"", b"\x00", b"\xff" * min(capacity, 64))
-            return values[row_index % len(values)]
+            values = (
+                b"",
+                b"\x00",
+                b"\\\x00\t\n\r\x1a",
+            )
+            value = (
+                b"\xff" * capacity
+                if row_index == row_count - 1
+                else values[row_index % len(values)]
+            )
+            return value[:capacity]
         if distribution is DistributionKind.LOW_CARDINALITY:
             return (b"a", b"b", b"c", b"d")[row_index % 4][:capacity]
         if distribution is DistributionKind.CORRELATED:
             return (f"group_{row_index // 2:08d}".encode("ascii"))[:capacity]
-        token = row_index.to_bytes(8, "big", signed=False) + rng.getrandbits(64).to_bytes(8, "big")
+        token = rng.getrandbits(64).to_bytes(8, "big") + row_index.to_bytes(
+            8, "big", signed=False
+        )
         return token[:capacity]
 
     def _json_value(
@@ -1081,10 +1266,36 @@ class DataGenerator:
         fsp = _optional_size(column.mysql_type)
         if column.base_type == "TIMESTAMP":
             minimum = datetime(1970, 1, 1, 0, 0, 1)
-            maximum = datetime(2038, 1, 19, 3, 14, 6)
+            maximum = datetime(2038, 1, 19, 3, 14, 7)
         else:
             minimum = datetime(1000, 1, 1)
             maximum = datetime(9999, 12, 31, 23, 59, 59)
+        if fsp == 0:
+            maximum_fraction = 0
+        elif column.base_type == "TIMESTAMP":
+            maximum_fraction = 5 * 10 ** (fsp - 1) - 1
+        else:
+            maximum_fraction = 10**fsp - 1
+        if distribution is DistributionKind.BOUNDARY:
+            if fsp == 0:
+                candidates = (
+                    (minimum, 0),
+                    (minimum + timedelta(seconds=1), 0),
+                    (maximum - timedelta(seconds=1), 0),
+                    (maximum, 0),
+                )
+            else:
+                candidates = (
+                    (minimum, 0),
+                    (minimum, 1),
+                    (maximum, max(0, maximum_fraction - 1)),
+                    (maximum, maximum_fraction),
+                )
+            value, fraction_value = candidates[row_index % len(candidates)]
+            rendered = value.strftime("%Y-%m-%d %H:%M:%S")
+            if fsp:
+                rendered += f".{fraction_value:0{fsp}d}"
+            return rendered
         span_seconds = int((maximum - minimum).total_seconds())
         seconds = DataGenerator._bounded_integer(
             0, span_seconds, distribution, row_index, rng
@@ -1092,7 +1303,10 @@ class DataGenerator:
         value = minimum + timedelta(seconds=seconds)
         rendered = value.strftime("%Y-%m-%d %H:%M:%S")
         if fsp:
-            rendered += f".{row_index % (10**fsp):0{fsp}d}"
+            fraction_value = row_index % (10**fsp)
+            if value == maximum:
+                fraction_value = min(fraction_value, maximum_fraction)
+            rendered += f".{fraction_value:0{fsp}d}"
         return rendered
 
     @staticmethod
@@ -1414,6 +1628,7 @@ __all__ = [
     "DataBundle",
     "DataGenerationError",
     "DataGenerator",
+    "DataScenario",
     "DistributionKind",
     "DistributionPlan",
     "GeometryValue",

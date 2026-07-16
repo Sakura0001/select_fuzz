@@ -2,7 +2,7 @@ schema_version: 2
 target_product: MySQL Community Server
 target_version: "8.0.41"
 raw_web_sql_policy: signatures_only_never_execute
-checked_at: "2026-07-12"
+checked_at: "2026-07-14"
 
 guard_definitions:
   - alias_required
@@ -54,7 +54,7 @@ sources:
     hash_scope: response_bytes
     lock_state: verified
     content_sha256: c8ce0eb7c683f47d555cb08657521a18dc2895e04b1f3a658d81d7181ac142e6
-    checked_at: "2026-07-12"
+    checked_at: "2026-07-14"
     locators:
       all_or_any: {match_kind: literal, pattern: "all_or_any:"}
       common_table_expr: {match_kind: literal, pattern: "common_table_expr:"}
@@ -97,7 +97,7 @@ sources:
     hash_scope: response_bytes
     lock_state: verified
     content_sha256: 428c4468d989cb8d5c0c8e005ccaee77521490aa8f2de61eaff9cc290f5e7b7e
-    checked_at: "2026-07-12"
+    checked_at: "2026-07-14"
     locators:
       pt_derived_table: {match_kind: literal, pattern: "class PT_derived_table"}
       pt_group: {match_kind: literal, pattern: "class PT_group"}
@@ -115,15 +115,16 @@ sources:
     version: "8.0.1"
     url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-1.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: b5c1d5e6f54c40e8495fb8350de9ef57e55c6d939f778494da9ecaf0724032d3
+    checked_at: "2026-07-14"
     locators:
       common_table_expressions:
         {match_kind: regex, pattern: "(?is)common.{0,80}table.{0,80}expression"}
       descending_indexes:
         {match_kind: regex, pattern: "(?is)descending.{0,80}index"}
-      join_order_hints: {match_kind: literal, pattern: "JOIN_ORDER"}
+      join_order_hints:
+        {match_kind: regex, pattern: "(?is)hints.{0,80}order.{0,80}join.{0,80}tables"}
       recursive_common_table_expressions:
         {match_kind: regex, pattern: "(?is)recursive.{0,80}common.{0,80}table"}
   - source_id: release_8002
@@ -131,9 +132,9 @@ sources:
     version: "8.0.2"
     url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-2.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: e2181405b2570b04f31d4a106c7f300787ce7782cf5ee97235f1a29155c8d11f
+    checked_at: "2026-07-14"
     locators:
       window_functions: {match_kind: regex, pattern: "(?is)window.{0,80}function"}
   - source_id: release_8004
@@ -141,9 +142,9 @@ sources:
     version: "8.0.4"
     url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-4.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: 0a3114de327a804afd26f67f31aba65d537de855fbf3d3b55f300f30d340d264
+    checked_at: "2026-07-14"
     locators:
       json_table_function: {match_kind: literal, pattern: "JSON_TABLE"}
   - source_id: release_8013
@@ -151,9 +152,9 @@ sources:
     version: "8.0.13"
     url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-13.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: 8670811589776bdc543b7fdbc47bbcf12bd83ed5d599b1513799e07f9c1ab242
+    checked_at: "2026-07-14"
     locators:
       functional_key_parts:
         {match_kind: regex, pattern: "(?is)functional.{0,80}key.{0,80}part"}
@@ -162,9 +163,9 @@ sources:
     version: "8.0.14"
     url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-14.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: 09b38891eb6c3bcd82dc41cae9db94e9737eb4a37ae3cc08a9b02305809f4274
+    checked_at: "2026-07-14"
     locators:
       lateral_derived_tables:
         {match_kind: regex, pattern: "(?is)lateral.{0,80}derived.{0,80}table"}
@@ -173,9 +174,9 @@ sources:
     version: "8.0.17"
     url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-17.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: 8dc503a21974a5fd26547bc38b6c9f1fd095310972f172c1427f71cf04eb3508
+    checked_at: "2026-07-14"
     locators:
       json_schema_validation: {match_kind: literal, pattern: "JSON_SCHEMA_VALID"}
       multivalued_indexes:
@@ -187,7 +188,7 @@ sources:
     hash_scope: docs_body_text_v1
     lock_state: verified
     content_sha256: ace7b004cee0b437dcaed24c513e92178f1627c578c66a0f3f65d7cb021461d3
-    checked_at: "2026-07-12"
+    checked_at: "2026-07-14"
     locators:
       explicit_table_values:
         {match_kind: regex, pattern: "(?is)TABLE.{0,200}VALUES.{0,200}statement"}
@@ -196,9 +197,9 @@ sources:
     version: "8.0.20"
     url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-20.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: 45f8a8d7e30254cedaa4907b104d91c2617663e3da85e5f9f4ba254d945cc143
+    checked_at: "2026-07-14"
     locators:
       index_level_hints:
         {match_kind: regex, pattern: "(?is)index.{0,80}level.{0,80}optimizer.{0,80}hint"}
@@ -207,9 +208,9 @@ sources:
     version: "8.0.21"
     url: https://dev.mysql.com/doc/relnotes/mysql/8.0/en/news-8-0-21.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: fda9536b1b1ebb001ac421081b3f8dfaee04d4563632d0d05cea7e9938af055e
+    checked_at: "2026-07-14"
     locators:
       json_value_function: {match_kind: literal, pattern: "JSON_VALUE"}
   - source_id: release_8022
@@ -219,7 +220,7 @@ sources:
     hash_scope: docs_body_text_v1
     lock_state: verified
     content_sha256: 6f6b9b5ff9c8e58f63bca13625a51addfc345160d7c7d667ca7515362d2e6b85
-    checked_at: "2026-07-12"
+    checked_at: "2026-07-14"
     locators:
       derived_condition_pushdown:
         {match_kind: regex, pattern: "(?is)derived.{0,80}condition.{0,80}pushdown"}
@@ -232,7 +233,7 @@ sources:
     hash_scope: docs_body_text_v1
     lock_state: verified
     content_sha256: 35b88b00431217e20b23bdd635ca48f807cb22083163159dc5f1298f55b081f8
-    checked_at: "2026-07-12"
+    checked_at: "2026-07-14"
     locators:
       except_operator: {match_kind: literal, pattern: "EXCEPT"}
       intersect_operator: {match_kind: literal, pattern: "INTERSECT"}
@@ -245,7 +246,7 @@ sources:
     hash_scope: docs_body_text_v1
     lock_state: verified
     content_sha256: a48124031d81275a43585468e5e26f8c2842729284f05671374b8dd3925d59f4
-    checked_at: "2026-07-12"
+    checked_at: "2026-07-14"
     locators:
       bugs_fixed: {match_kind: literal, pattern: "Bugs Fixed"}
       descending_primary_index_merge:
@@ -269,15 +270,15 @@ sources:
     version: "8.0"
     url: https://dev.mysql.com/doc/refman/8.0/en/create-index.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: b8ef1feca61cb0a09dd9ca6648388b9357317c329884794ea84a476bfad8f8b1
+    checked_at: "2026-07-14"
     locators:
       column_prefix_key_parts:
         {match_kind: regex, pattern: "(?is)column.{0,80}prefix.{0,80}key.{0,80}part"}
       create_index_grammar: {match_kind: literal, pattern: "CREATE INDEX"}
       descending_key_parts:
-        {match_kind: regex, pattern: "(?is)descending.{0,80}key.{0,80}part"}
+        {match_kind: regex, pattern: "(?is)key.{0,40}part.{0,120}ascending.{0,40}descending"}
       fulltext_indexes: {match_kind: literal, pattern: "FULLTEXT"}
       functional_key_parts:
         {match_kind: regex, pattern: "(?is)functional.{0,80}key.{0,80}part"}
@@ -291,9 +292,9 @@ sources:
     version: "8.0"
     url: https://dev.mysql.com/doc/refman/8.0/en/partitioning-limitations.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: ac5103e481e3c1aca15819492e4537854b7eb10bb9177b1e85e3b6d5292be803
+    checked_at: "2026-07-14"
     locators:
       partition_incompatibilities:
         {match_kind: regex, pattern: "(?is)partition.{0,80}limitation"}
@@ -304,9 +305,9 @@ sources:
     version: "8.0"
     url: https://dev.mysql.com/doc/refman/8.0/en/create-table-foreign-keys.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: ebec64098d26808b4b264f506464b7889e8a0d752d1eb9b6127c10faf7803ff5
+    checked_at: "2026-07-14"
     locators:
       foreign_key_restrictions:
         {match_kind: regex, pattern: "(?is)foreign.{0,20}key.{0,100}restriction"}
@@ -315,9 +316,9 @@ sources:
     version: "8.0"
     url: https://dev.mysql.com/doc/refman/8.0/en/fulltext-restrictions.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: e9eb5f345ba3579dbe01154740200b058ad1605c710291a2b86195ae2efa79b8
+    checked_at: "2026-07-14"
     locators:
       fulltext_restrictions:
         {match_kind: regex, pattern: "(?is)full.{0,20}text.{0,100}restriction"}
@@ -326,9 +327,9 @@ sources:
     version: "8.0"
     url: https://dev.mysql.com/doc/refman/8.0/en/spatial-index-optimization.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: b2203fcc982e080b7c980c2ff92770a787c2c8fa0ed7decca2b478a5db764c57
+    checked_at: "2026-07-14"
     locators:
       spatial_index_requirements:
         {match_kind: regex, pattern: "(?is)spatial.{0,80}index.{0,200}SRID"}
@@ -337,9 +338,9 @@ sources:
     version: "8.0"
     url: https://dev.mysql.com/doc/refman/8.0/en/data-types.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: bb54f223f6e6c4474c8e6345d47734b84ed5d20220e73c9a88224a2f5d797be1
+    checked_at: "2026-07-14"
     locators:
       data_type_categories:
         {match_kind: regex, pattern: "(?is)data.{0,20}type.{0,80}categor"}
@@ -348,15 +349,15 @@ sources:
       string_data_types:
         {match_kind: regex, pattern: "(?is)string.{0,80}data.{0,20}type"}
       temporal_json_spatial_types:
-        {match_kind: regex, pattern: "(?is)temporal.{0,500}JSON.{0,500}spatial"}
+        {match_kind: regex, pattern: "(?is)date.{0,40}time.{0,120}spatial.{0,80}JSON"}
   - source_id: manual_storage
     kind: manual_snapshot
     version: "8.0"
     url: https://dev.mysql.com/doc/refman/8.0/en/storage-requirements.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: 55eb9b14b655d9b74117ea11f9a2c69bdd9a78b26605cfdc138415a43e21f1f3
+    checked_at: "2026-07-14"
     locators:
       numeric_storage_requirements:
         {match_kind: regex, pattern: "(?is)storage.{0,80}requirements.{0,300}numeric"}
@@ -369,9 +370,9 @@ sources:
     version: "8.0"
     url: https://dev.mysql.com/doc/refman/8.0/en/innodb-limits.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: 60b4f21d5e96960f2dc20fbd048276abcf57ff3217dd2bf2a4c1256268dc2d33
+    checked_at: "2026-07-14"
     locators:
       innodb_index_limits:
         {match_kind: regex, pattern: "(?is)InnoDB.{0,80}limit.{0,500}index"}
@@ -382,9 +383,9 @@ sources:
     version: "8.0"
     url: https://dev.mysql.com/doc/mysqld-version-reference/en/built-in-functions.html
     hash_scope: docs_body_text_v1
-    lock_state: refresh_required
-    content_sha256: null
-    checked_at: "2026-07-12"
+    lock_state: verified
+    content_sha256: d572b5e204253fa8d39a447164d4a603156d00e88d01017b307d89a03abad833
+    checked_at: "2026-07-14"
     locators:
       builtin_function_table:
         {match_kind: regex, pattern: "(?is)built.{0,20}in.{0,80}function"}

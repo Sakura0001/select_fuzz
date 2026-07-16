@@ -20,14 +20,17 @@ from select_fuzz.generation.query_ast import (
     JsonMemberOf,
     Literal,
     MatchAgainst,
+    MixedSetQuery,
     OrderBy,
     ParenthesizedQuery,
     Projection,
     QueryAst,
     QueryScope,
     RowExpression,
+    SelectModifier,
     SelectQuery,
     SetOperator,
+    SetOperation,
     SetQuery,
     SqlType,
     Star,
@@ -36,6 +39,9 @@ from select_fuzz.generation.query_ast import (
     TableRelation,
     ValuesQuery,
     WindowFunction,
+    WindowFrame,
+    WindowFrameBound,
+    WindowFrameBoundKind,
     WindowOrder,
     WindowSpec,
     require_identifier,
@@ -90,8 +96,37 @@ TABLE = TableRelation("items", "t")
         (lambda: WindowOrder((NUMBER,), 1), TypeError),
         (lambda: WindowOrder((NUMBER,), False, -1), ValueError),
         (lambda: WindowOrder((NUMBER,), False, True), ValueError),
+        (
+            lambda: WindowFrame(  # type: ignore[arg-type]
+                "bad", WindowFrameBound(WindowFrameBoundKind.CURRENT_ROW)
+            ),
+            TypeError,
+        ),
+        (
+            lambda: WindowSpec(  # type: ignore[arg-type]
+                ("bad",), WindowOrder((NUMBER,), True)
+            ),
+            TypeError,
+        ),
+        (lambda: WindowSpec((), "bad"), TypeError),  # type: ignore[arg-type]
         (lambda: WindowSpec((), WindowOrder((NUMBER,), True), frame=(0, -1)), ValueError),
         (lambda: WindowSpec((), WindowOrder((NUMBER,), True), frame=(True, 0)), ValueError),
+        (lambda: WindowFrameBound(WindowFrameBoundKind.PRECEDING), ValueError),
+        (lambda: WindowFrameBound(WindowFrameBoundKind.CURRENT_ROW, 1), ValueError),
+        (
+            lambda: WindowFrame(
+                WindowFrameBound(WindowFrameBoundKind.UNBOUNDED_FOLLOWING),
+                WindowFrameBound(WindowFrameBoundKind.UNBOUNDED_FOLLOWING),
+            ),
+            ValueError,
+        ),
+        (
+            lambda: WindowFrame(
+                WindowFrameBound(WindowFrameBoundKind.CURRENT_ROW),
+                WindowFrameBound(WindowFrameBoundKind.PRECEDING, 1),
+            ),
+            ValueError,
+        ),
         (
             lambda: WindowFunction("AVG", NUMBER, WindowOrder((NUMBER,), True), SqlType.NUMERIC),
             ValueError,
@@ -107,10 +142,33 @@ TABLE = TableRelation("items", "t")
             ValueError,
         ),
         (
+            lambda: WindowFunction(
+                "NTH_VALUE", NUMBER, WindowOrder((NUMBER,), True), SqlType.NUMERIC
+            ),
+            ValueError,
+        ),
+        (
+            lambda: WindowFunction(
+                "LAG",
+                NUMBER,
+                WindowOrder((NUMBER,), True),
+                SqlType.NUMERIC,
+                (NUMBER, NUMBER, NUMBER),
+            ),
+            ValueError,
+        ),
+        (
+            lambda: WindowFunction(  # type: ignore[arg-type]
+                "ROW_NUMBER", None, object(), SqlType.NUMERIC
+            ),
+            TypeError,
+        ),
+        (
             lambda: JoinRelation(TABLE, TABLE, JoinKind.NATURAL_LEFT, NUMBER),
             ValueError,
         ),
-        (lambda: JoinRelation(TABLE, TABLE, JoinKind.INNER), ValueError),
+        (lambda: JoinRelation(TABLE, TABLE, JoinKind.COMMA, NUMBER), ValueError),
+        (lambda: JoinRelation(TABLE, TABLE, JoinKind.STRAIGHT), ValueError),
         (lambda: DerivedRelation(SELECT, "d", lateral=1), TypeError),
         (lambda: DerivedRelation(SELECT, "d", columns=("Bad-Name",)), ValueError),
         (lambda: DerivedRelation(SELECT, "d", columns=("renamed", "renamed")), ValueError),
@@ -125,14 +183,68 @@ TABLE = TableRelation("items", "t")
         ),
         (lambda: getattr(ast_nodes, "TableQuery")("Bad-Name"), ValueError),
         (lambda: SelectQuery(()), ValueError),
+        (lambda: SelectQuery((Projection(Star()),)), ValueError),
+        (lambda: SelectQuery((Projection(Star(), "wild"),), source=TABLE), ValueError),
+        (
+            lambda: SelectQuery(
+                (Projection(Star()), Projection(NUMBER)),
+                source=TABLE,
+            ),
+            ValueError,
+        ),
+        (lambda: SelectQuery((Projection(Star("u")),), source=TABLE), ValueError),
         (lambda: SelectQuery((Projection(NUMBER),), with_rollup=True), ValueError),
+        (
+            lambda: SelectQuery(
+                (Projection(NUMBER),),
+                modifiers=("ALL",),  # type: ignore[arg-type]
+            ),
+            TypeError,
+        ),
+        (
+            lambda: SelectQuery(
+                (Projection(NUMBER),),
+                modifiers=(SelectModifier.ALL, SelectModifier.ALL),
+            ),
+            ValueError,
+        ),
+        (
+            lambda: SelectQuery(
+                (Projection(NUMBER),),
+                modifiers=(SelectModifier.ALL, SelectModifier.DISTINCTROW),
+            ),
+            ValueError,
+        ),
+        (
+            lambda: SelectQuery(
+                (Projection(NUMBER),),
+                distinct=True,
+                modifiers=(SelectModifier.ALL,),
+            ),
+            ValueError,
+        ),
         (
             lambda: SelectQuery((Projection(NUMBER),), optimizer_hint="HASH_JOIN(t, u)"),
             ValueError,
         ),
         (lambda: SetQuery((SELECT,), SetOperator.UNION), ValueError),
-        (lambda: SetQuery((SELECT, SELECT), SetOperator.INTERSECT, all=True), ValueError),
-        (lambda: SetQuery((SELECT, SELECT), SetOperator.EXCEPT, all=True), ValueError),
+        (
+            lambda: MixedSetQuery(
+                SELECT,
+                (SetOperation(SetOperator.UNION, SELECT),),
+            ),
+            ValueError,
+        ),
+        (
+            lambda: MixedSetQuery(
+                SELECT,
+                (
+                    SetOperation(SetOperator.UNION, SELECT),
+                    SetOperation(SetOperator.UNION, SELECT),
+                ),
+            ),
+            ValueError,
+        ),
         (lambda: ValuesQuery(()), ValueError),
         (lambda: ValuesQuery(((),)), ValueError),
         (lambda: ValuesQuery(((NUMBER,), (NUMBER, TEXT))), ValueError),
@@ -148,6 +260,24 @@ TABLE = TableRelation("items", "t")
         (lambda: OrderBy((True,)), ValueError),
         (lambda: OrderBy((1,), frozenset({"1"})), TypeError),
         (lambda: OrderBy((1,), frozenset({2})), ValueError),
+        (lambda: OrderBy((), aliases=("q1",)), ValueError),
+        (
+            lambda: OrderBy(
+                (),
+                aliases=("q1",),
+                expressions=(NUMBER,),
+                projection_ordinals=(1,),
+            ),
+            ValueError,
+        ),
+        (
+            lambda: OrderBy(
+                (),
+                expressions=(Star("t"),),
+                projection_ordinals=(1,),
+            ),
+            ValueError,
+        ),
     ],
 )
 def test_closed_ast_rejects_invalid_boundary_values(
@@ -166,6 +296,43 @@ def test_order_proofs_cover_cardinality_uniqueness_and_out_of_scope_paths() -> N
     assert OrderBy((1,)).proves_total_order(QueryScope(1, max_rows=1))
     assert OrderBy((1, 2)).proves_total_order(QueryScope(2, frozenset({frozenset({1, 2})})))
     assert not OrderBy((1,)).proves_total_order(QueryScope(2, frozenset({frozenset({1, 2})})))
+
+
+def test_alias_and_expression_orders_are_exact_projection_proofs() -> None:
+    body = SelectQuery((Projection(COLUMN, "q1"),), TABLE)
+    scope = QueryScope(1, frozenset({frozenset({1})}), 8)
+    alias_order = QueryAst(
+        body,
+        OrderBy((), aliases=("q1",), projection_ordinals=(1,)),
+        scope,
+    )
+    expression_order = QueryAst(
+        body,
+        OrderBy((), expressions=(COLUMN,), projection_ordinals=(1,)),
+        scope,
+    )
+
+    assert render_query_ast(alias_order).endswith("ORDER BY `q1`")
+    assert render_query_ast(expression_order).endswith("ORDER BY `t`.`id`")
+    assert alias_order.order_by.proves_total_order(scope)
+    assert expression_order.order_by.proves_total_order(scope)
+
+    with pytest.raises(ValueError, match="exceeds the SELECT projection"):
+        QueryAst(
+            body,
+            OrderBy((), aliases=("q1",), projection_ordinals=(2,)),
+            QueryScope(2, frozenset({frozenset({2})}), 8),
+        )
+    duplicate_alias = SelectQuery(
+        (Projection(COLUMN, "q1"), Projection(NUMBER, "q1")),
+        TABLE,
+    )
+    with pytest.raises(ValueError, match="identify one projection"):
+        QueryAst(
+            duplicate_alias,
+            OrderBy((), aliases=("q1",), projection_ordinals=(1,)),
+            QueryScope(2, frozenset({frozenset({1})}), 8),
+        )
 
 
 def test_derived_relation_accepts_an_exact_explicit_column_list() -> None:
@@ -208,6 +375,38 @@ def test_query_ast_accepts_limit_zero_and_validates_offset_contract() -> None:
         QueryAst(SELECT, OrderBy((1,)), QueryScope(1), limit=0, offset=-1)
     with pytest.raises(TypeError, match="integer"):
         QueryAst(SELECT, OrderBy((1,)), QueryScope(1), limit=0, offset=True)
+
+
+def test_sql_buffer_result_is_limited_to_the_outermost_query_block() -> None:
+    buffered = SelectQuery(
+        (Projection(NUMBER),),
+        modifiers=(SelectModifier.SQL_BUFFER_RESULT,),
+    )
+    scope = QueryScope(1, max_rows=1)
+
+    assert QueryAst(buffered, OrderBy((1,)), scope).body is buffered
+    assert QueryAst(ParenthesizedQuery(buffered), OrderBy((1,)), scope).body == (
+        ParenthesizedQuery(buffered)
+    )
+
+    nested_bodies = (
+        SetQuery((buffered, SELECT), SetOperator.UNION),
+        SelectQuery(
+            (Projection(ColumnRef("d", "value", SqlType.NUMERIC)),),
+            DerivedRelation(buffered, "d", columns=("value",)),
+        ),
+    )
+    for body in nested_bodies:
+        with pytest.raises(ValueError, match="only in the outermost query block"):
+            QueryAst(body, OrderBy((1,)), scope)
+
+    with pytest.raises(ValueError, match="only in the outermost query block"):
+        QueryAst(
+            SELECT,
+            OrderBy((1,)),
+            scope,
+            ctes=(Cte("buffered", ("value",), buffered),),
+        )
 
 
 def test_query_ast_caps_limit_and_offset_at_mysql_unsigned_bigint() -> None:

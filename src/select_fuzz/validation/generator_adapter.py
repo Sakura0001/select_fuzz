@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from select_fuzz.domain import SeedTree
 from select_fuzz.generation.catalog import FeatureSpec
 from select_fuzz.generation.query import QueryGenerator
 from select_fuzz.generation.schema import SchemaGenerator, SchemaLimits
@@ -55,7 +56,7 @@ def normalize_catalog_nodes(spec: FeatureSpec) -> frozenset[str]:
     if "json_value" in feature_id:
         nodes.add("json_value")
     if feature_id.startswith("cte_"):
-        nodes.add("cte_recursive" if "recursive" in feature_id else "cte")
+        nodes.add("cte_recursive" if feature_id == "cte_recursive" else "cte")
     if feature_id.startswith("set_union"):
         nodes.add("set_union")
     if feature_id == "set_union":
@@ -518,66 +519,88 @@ class ProductionGeneratorAdapter:
         }
         actual_feature_id = routing.get(feature_id, feature_id)
         target = self._specs[actual_feature_id]
-        manifest = self.schema_generator.generate(target, seed=seed, limits=self.limits)
-        generated = self.query_generator.generate(
-            manifest,
-            target=target,
-            seed=seed,
-            case_ordinal=0,
-            lane=query_runtime.QueryLane.VALID,
-            require_top_n=feature_id == "validation_top_n",
-            directed_variant=(
-                "scalar_literal"
-                if feature_id == "validation_scalar_literal"
-                else "scalar_aggregate"
-                if feature_id == "validation_scalar_aggregate"
-                else "left"
-                if feature_id == "validation_join_left"
-                else "left_subquery"
-                if feature_id == "validation_join_left_subquery"
-                else "values_only"
-                if feature_id == "validation_values_only"
-                else "values_limit"
-                if feature_id == "validation_values_limit"
-                else "table_only"
-                if feature_id == "validation_table_only"
-                else "table_values_union"
-                if feature_id == "validation_table_values_union_all"
-                else "table_values_union_distinct"
-                if feature_id == "validation_table_values_union_distinct"
-                else "scalar_branch_local_top_n"
-                if feature_id == "validation_scalar_set_branch_local_top_n"
-                else "table_subquery"
-                if feature_id == "validation_table_subquery"
-                else "limit_zero"
-                if feature_id == "validation_scalar_limit_zero"
-                else "table_limit_zero"
-                if feature_id == "validation_table_limit_zero"
-                else "limit_zero_offset"
-                if feature_id == "validation_scalar_offset_limit_zero"
-                else "table_limit_zero_offset"
-                if feature_id == "validation_table_offset_limit_zero"
-                else "scalar_offset_limit"
-                if feature_id == "validation_scalar_offset_limit"
-                else "table_offset_limit"
-                if feature_id == "validation_table_offset_limit"
-                else "explicit_columns"
-                if feature_id == "validation_derived_explicit_columns"
-                else "inner_cast"
-                if feature_id == "validation_join_cast"
-                else "inner_subquery"
-                if feature_id == "validation_join_inner_subquery"
-                else "scalar_intersect_except"
-                if feature_id == "validation_scalar_intersect_except"
-                else "scalar_limit"
-                if feature_id == "validation_scalar_subquery_limit"
-                else "table_limit"
-                if feature_id == "validation_table_subquery_limit"
-                else "scalar_rollup"
-                if feature_id == "validation_scalar_rollup"
-                else None
-            ),
+        directed_variant = (
+            "scalar_literal"
+            if feature_id == "validation_scalar_literal"
+            else "scalar_aggregate"
+            if feature_id == "validation_scalar_aggregate"
+            else "left"
+            if feature_id == "validation_join_left"
+            else "left_subquery"
+            if feature_id == "validation_join_left_subquery"
+            else "values_only"
+            if feature_id == "validation_values_only"
+            else "values_limit"
+            if feature_id == "validation_values_limit"
+            else "table_only"
+            if feature_id == "validation_table_only"
+            else "table_values_union"
+            if feature_id == "validation_table_values_union_all"
+            else "table_values_union_distinct"
+            if feature_id == "validation_table_values_union_distinct"
+            else "scalar_branch_local_top_n"
+            if feature_id == "validation_scalar_set_branch_local_top_n"
+            else "table_subquery"
+            if feature_id == "validation_table_subquery"
+            else "limit_zero"
+            if feature_id == "validation_scalar_limit_zero"
+            else "table_limit_zero"
+            if feature_id == "validation_table_limit_zero"
+            else "limit_zero_offset"
+            if feature_id == "validation_scalar_offset_limit_zero"
+            else "table_limit_zero_offset"
+            if feature_id == "validation_table_offset_limit_zero"
+            else "scalar_offset_limit"
+            if feature_id == "validation_scalar_offset_limit"
+            else "table_offset_limit"
+            if feature_id == "validation_table_offset_limit"
+            else "explicit_columns"
+            if feature_id == "validation_derived_explicit_columns"
+            else "inner_cast"
+            if feature_id == "validation_join_cast"
+            else "inner_subquery"
+            if feature_id == "validation_join_inner_subquery"
+            else "scalar_intersect_except"
+            if feature_id == "validation_scalar_intersect_except"
+            else "scalar_limit"
+            if feature_id == "validation_scalar_subquery_limit"
+            else "table_limit"
+            if feature_id == "validation_table_subquery_limit"
+            else "scalar_rollup"
+            if feature_id == "validation_scalar_rollup"
+            else None
         )
+        tree = SeedTree(seed)
+        last_unreachable: query_runtime.TargetNotReachable | None = None
+        for schema_attempt in range(32):
+            schema_seed = (
+                seed
+                if schema_attempt == 0
+                else tree.derive("validation_schema_retry", schema_attempt)
+            )
+            manifest = self.schema_generator.generate(
+                target,
+                seed=schema_seed,
+                limits=self.limits,
+            )
+            try:
+                generated = self.query_generator.generate(
+                    manifest,
+                    target=target,
+                    seed=seed,
+                    case_ordinal=0,
+                    lane=query_runtime.QueryLane.VALID,
+                    require_top_n=feature_id == "validation_top_n",
+                    directed_variant=directed_variant,
+                )
+            except query_runtime.TargetNotReachable as error:
+                last_unreachable = error
+                continue
+            break
+        else:
+            raise query_runtime.TargetNotReachable(
+                "validation witness is unreachable after 32 schema attempts"
+            ) from last_unreachable
         return GeneratedWitness(
             sql=generated.sql,
             signature=SignatureExtractor("8.0.41").extract(generated.sql),

@@ -8,6 +8,7 @@ import yaml
 
 from select_fuzz.generation.catalog import FeatureSpec
 from select_fuzz.generation.schema import (
+    BoundaryDeclarationId,
     ColumnDef,
     ForeignKeyDef,
     IndexDef,
@@ -167,9 +168,15 @@ def test_declaration_pool_contains_mysql_8041_legal_boundaries() -> None:
         "BIT(1)",
         "BIT(64)",
         "DECIMAL(1,0)",
+        "DECIMAL(1,1)",
+        "DECIMAL(30,30)",
+        "DECIMAL(31,30)",
+        "DECIMAL(65,0)",
         "DECIMAL(65,30)",
         "FLOAT",
+        "FLOAT UNSIGNED",
         "DOUBLE",
+        "DOUBLE UNSIGNED",
         "CHAR(0)",
         "CHAR(1)",
         "CHAR(255)",
@@ -207,6 +214,142 @@ def test_declaration_pool_contains_mysql_8041_legal_boundaries() -> None:
     } <= declarations
 
 
+def test_non_special_boundaries_have_stable_machine_enumerable_ids() -> None:
+    boundaries = SchemaGenerator.boundary_declarations(SchemaLimits())
+
+    assert tuple(boundary.boundary_id for boundary in boundaries) == tuple(
+        BoundaryDeclarationId
+    )
+    assert len({boundary.boundary_id for boundary in boundaries}) == len(boundaries)
+    assert len({boundary.declaration for boundary in boundaries}) == len(boundaries)
+    assert {
+        boundary.declaration for boundary in boundaries
+    } <= set(SchemaGenerator.declaration_pool(SchemaLimits()))
+    assert all(
+        boundary.declaration != "JSON"
+        and not boundary.declaration.startswith(
+            (
+                "GEOMETRY",
+                "POINT",
+                "LINESTRING",
+                "POLYGON",
+                "MULTIPOINT",
+                "MULTILINESTRING",
+                "MULTIPOLYGON",
+            )
+        )
+        for boundary in boundaries
+    )
+    for boundary in boundaries:
+        assert ColumnDef("boundary", boundary.declaration, True).mysql_type == (
+            boundary.declaration
+        )
+
+
+def test_decimal_boundary_ids_cover_precision_and_scale_edges() -> None:
+    declarations_by_id = {
+        boundary.boundary_id: boundary.declaration
+        for boundary in SchemaGenerator.boundary_declarations(SchemaLimits())
+    }
+
+    assert {
+        BoundaryDeclarationId.DECIMAL_P1_S0: "DECIMAL(1,0)",
+        BoundaryDeclarationId.DECIMAL_P1_S1: "DECIMAL(1,1)",
+        BoundaryDeclarationId.DECIMAL_P30_S30: "DECIMAL(30,30)",
+        BoundaryDeclarationId.DECIMAL_P31_S30: "DECIMAL(31,30)",
+        BoundaryDeclarationId.DECIMAL_P65_S0: "DECIMAL(65,0)",
+        BoundaryDeclarationId.DECIMAL_P65_S30: "DECIMAL(65,30)",
+    }.items() <= declarations_by_id.items()
+
+
+def test_unsigned_float_boundaries_are_valid_but_tagged_deprecated() -> None:
+    boundaries_by_id = {
+        boundary.boundary_id: boundary
+        for boundary in SchemaGenerator.boundary_declarations(SchemaLimits())
+    }
+
+    assert boundaries_by_id[BoundaryDeclarationId.FLOAT_UNSIGNED].declaration == (
+        "FLOAT UNSIGNED"
+    )
+    assert boundaries_by_id[BoundaryDeclarationId.DOUBLE_UNSIGNED].declaration == (
+        "DOUBLE UNSIGNED"
+    )
+    assert boundaries_by_id[BoundaryDeclarationId.FLOAT_UNSIGNED].tags == frozenset(
+        {"deprecated"}
+    )
+    assert boundaries_by_id[BoundaryDeclarationId.DOUBLE_UNSIGNED].tags == frozenset(
+        {"deprecated"}
+    )
+
+
+def test_boundary_ids_cover_integer_bit_string_lob_temporal_and_enum_edges() -> None:
+    declarations_by_id = {
+        boundary.boundary_id: boundary.declaration
+        for boundary in SchemaGenerator.boundary_declarations(SchemaLimits())
+    }
+
+    expected = {
+        BoundaryDeclarationId.TINYINT_SIGNED: "TINYINT",
+        BoundaryDeclarationId.TINYINT_UNSIGNED: "TINYINT UNSIGNED",
+        BoundaryDeclarationId.SMALLINT_SIGNED: "SMALLINT",
+        BoundaryDeclarationId.SMALLINT_UNSIGNED: "SMALLINT UNSIGNED",
+        BoundaryDeclarationId.MEDIUMINT_SIGNED: "MEDIUMINT",
+        BoundaryDeclarationId.MEDIUMINT_UNSIGNED: "MEDIUMINT UNSIGNED",
+        BoundaryDeclarationId.INT_SIGNED: "INT",
+        BoundaryDeclarationId.INT_UNSIGNED: "INT UNSIGNED",
+        BoundaryDeclarationId.BIGINT_SIGNED: "BIGINT",
+        BoundaryDeclarationId.BIGINT_UNSIGNED: "BIGINT UNSIGNED",
+        BoundaryDeclarationId.BIT_LENGTH_1: "BIT(1)",
+        BoundaryDeclarationId.BIT_LENGTH_64: "BIT(64)",
+        BoundaryDeclarationId.CHAR_LENGTH_0: "CHAR(0)",
+        BoundaryDeclarationId.CHAR_LENGTH_1: "CHAR(1)",
+        BoundaryDeclarationId.CHAR_LENGTH_MAX: "CHAR(255)",
+        BoundaryDeclarationId.VARCHAR_LENGTH_0: "VARCHAR(0)",
+        BoundaryDeclarationId.VARCHAR_LENGTH_1: "VARCHAR(1)",
+        BoundaryDeclarationId.VARCHAR_LENGTH_MAX: "VARCHAR(16383)",
+        BoundaryDeclarationId.BINARY_LENGTH_0: "BINARY(0)",
+        BoundaryDeclarationId.BINARY_LENGTH_1: "BINARY(1)",
+        BoundaryDeclarationId.BINARY_LENGTH_MAX: "BINARY(255)",
+        BoundaryDeclarationId.VARBINARY_LENGTH_0: "VARBINARY(0)",
+        BoundaryDeclarationId.VARBINARY_LENGTH_1: "VARBINARY(1)",
+        BoundaryDeclarationId.VARBINARY_LENGTH_MAX: "VARBINARY(65535)",
+        BoundaryDeclarationId.DATE: "DATE",
+        BoundaryDeclarationId.TIME_FSP_0: "TIME(0)",
+        BoundaryDeclarationId.TIME_FSP_6: "TIME(6)",
+        BoundaryDeclarationId.DATETIME_FSP_0: "DATETIME(0)",
+        BoundaryDeclarationId.DATETIME_FSP_6: "DATETIME(6)",
+        BoundaryDeclarationId.TIMESTAMP_FSP_0: "TIMESTAMP(0)",
+        BoundaryDeclarationId.TIMESTAMP_FSP_6: "TIMESTAMP(6)",
+        BoundaryDeclarationId.YEAR: "YEAR",
+        BoundaryDeclarationId.TINYTEXT: "TINYTEXT",
+        BoundaryDeclarationId.TEXT: "TEXT",
+        BoundaryDeclarationId.MEDIUMTEXT: "MEDIUMTEXT",
+        BoundaryDeclarationId.LONGTEXT: "LONGTEXT",
+        BoundaryDeclarationId.TINYBLOB: "TINYBLOB",
+        BoundaryDeclarationId.BLOB: "BLOB",
+        BoundaryDeclarationId.MEDIUMBLOB: "MEDIUMBLOB",
+        BoundaryDeclarationId.LONGBLOB: "LONGBLOB",
+        BoundaryDeclarationId.ENUM: "ENUM('a','z')",
+        BoundaryDeclarationId.SET: "SET('a','b','c')",
+    }
+
+    assert expected.items() <= declarations_by_id.items()
+
+
+def test_contextual_max_boundary_ids_follow_schema_limits() -> None:
+    boundaries_by_id = {
+        boundary.boundary_id: boundary.declaration
+        for boundary in SchemaGenerator.boundary_declarations(
+            SchemaLimits(max_varchar_characters=128, max_varbinary_bytes=256)
+        )
+    }
+
+    assert boundaries_by_id[BoundaryDeclarationId.VARCHAR_LENGTH_MAX] == "VARCHAR(128)"
+    assert boundaries_by_id[BoundaryDeclarationId.VARBINARY_LENGTH_MAX] == (
+        "VARBINARY(256)"
+    )
+
+
 def test_every_boundary_declaration_is_reachable_through_directed_lane() -> None:
     generator = SchemaGenerator()
     limits = SchemaLimits(
@@ -233,6 +376,74 @@ def test_every_boundary_declaration_is_reachable_through_directed_lane() -> None
     assert reached == set(pool)
     assert "VARBINARY(65535)" not in reached
     assert "VARCHAR(16383)" not in reached
+
+
+def test_every_typed_boundary_is_reachable_without_json_or_spatial_types() -> None:
+    generator = SchemaGenerator()
+    limits = SchemaLimits(
+        min_tables=1,
+        max_tables=1,
+        min_columns=4,
+        max_columns=4,
+    )
+    target = _target(SchemaProfile.REGULAR_INNODB)
+    boundaries = generator.executable_boundary_declarations(limits)
+    reached: dict[BoundaryDeclarationId, str] = {}
+
+    for boundary in boundaries:
+        manifest = generator.generate(
+            target,
+            seed=8,
+            limits=limits,
+            typed_boundary_id=boundary.boundary_id,
+        )
+        declaration = manifest.tables[0].column("boundary_col").mysql_type
+        reached[boundary.boundary_id] = declaration
+        SchemaRules.mysql_8041().validate(manifest, limits=limits)
+        assert len(manifest.tables[0].columns) == 4
+
+    assert reached == {
+        boundary.boundary_id: boundary.declaration for boundary in boundaries
+    }
+    assert all(
+        declaration != "JSON"
+        and not declaration.startswith(
+            (
+                "GEOMETRY",
+                "POINT",
+                "LINESTRING",
+                "POLYGON",
+                "MULTIPOINT",
+                "MULTILINESTRING",
+                "MULTIPOLYGON",
+            )
+        )
+        for declaration in reached.values()
+    )
+
+
+def test_schema_generator_rejects_conflicting_boundary_lanes() -> None:
+    with pytest.raises(ValueError, match="only one boundary lane"):
+        SchemaGenerator().generate(
+            _target(SchemaProfile.REGULAR_INNODB),
+            seed=8,
+            limits=SchemaLimits(min_columns=3, max_columns=3),
+            boundary_ordinal=0,
+            typed_boundary_id=BoundaryDeclarationId.TINYINT_SIGNED,
+        )
+    with pytest.raises(TypeError, match="typed_boundary_id"):
+        SchemaGenerator().generate(
+            _target(SchemaProfile.REGULAR_INNODB),
+            seed=8,
+            limits=SchemaLimits(min_columns=3, max_columns=3),
+            typed_boundary_id="tinyint_signed",  # type: ignore[arg-type]
+        )
+    with pytest.raises(TypeError, match="boundary_id"):
+        SchemaGenerator.typed_boundary_column(
+            name="boundary_col",
+            boundary_id="tinyint_signed",  # type: ignore[arg-type]
+            limits=SchemaLimits(),
+        )
 
 
 def test_random_manifest_lane_reaches_wide_contextual_string_lengths() -> None:

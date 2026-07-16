@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -92,9 +93,7 @@ class CoverageLedger:
         self._validate_entry(feature_id, hits)
         with self._lock:
             self._counts[feature_id] = self._counts.get(feature_id, 0) + hits
-            self._pending_deltas[feature_id] = (
-                self._pending_deltas.get(feature_id, 0) + hits
-            )
+            self._pending_deltas[feature_id] = self._pending_deltas.get(feature_id, 0) + hits
 
     def hits(self, feature_id: str) -> int:
         with self._lock:
@@ -122,18 +121,19 @@ class CoverageLedger:
             self._pending_deltas = {}
         replaced = False
         try:
-            persisted = (
-                type(self).load(self.path).snapshot() if self.path.exists() else {}
-            )
+            persisted = type(self).load(self.path).snapshot() if self.path.exists() else {}
             merged = dict(persisted)
             for feature_id, hits in pending_batch.items():
                 merged[feature_id] = merged.get(feature_id, 0) + hits
-            payload = json.dumps(
-                {"schema_version": 1, "counts": merged},
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8") + b"\n"
+            payload = (
+                json.dumps(
+                    {"schema_version": 1, "counts": merged},
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+            )
             with temporary.open("xb") as stream:
                 stream.write(payload)
                 stream.flush()
@@ -211,8 +211,7 @@ class CoverageScheduler:
         self.plan_start_ordinal = plan_start_ordinal
         self._enabled_specs = self._load_enabled()
         completed_cycles = min(
-            self.ledger.hits(spec.feature_id) // self.min_hits
-            for spec in self._enabled_specs
+            self.ledger.hits(spec.feature_id) // self.min_hits for spec in self._enabled_specs
         )
         self.cycle_number = completed_cycles + 1
         self.cycle_target_hits = self.cycle_number * self.min_hits
@@ -221,6 +220,12 @@ class CoverageScheduler:
     @property
     def planned_case_count(self) -> int:
         return len(self._debt_plan)
+
+    @property
+    def enabled_specs(self) -> tuple[FeatureSpec, ...]:
+        """All compatible targets, including targets outside the current debt batch."""
+
+        return self._enabled_specs
 
     @property
     def plan_end_ordinal(self) -> int:
@@ -234,9 +239,7 @@ class CoverageScheduler:
             or isinstance(start_case_ordinal, bool)
             or start_case_ordinal < self.plan_end_ordinal
         ):
-            raise ValueError(
-                "start_case_ordinal must be at least the current plan end ordinal"
-            )
+            raise ValueError("start_case_ordinal must be at least the current plan end ordinal")
         return type(self)(
             catalog=self.catalog,
             ledger=self.ledger,
@@ -267,21 +270,13 @@ class CoverageScheduler:
         tree = SeedTree(self.schedule_seed)
         plan: list[FeatureSpec] = []
         for level in range(max(debts.values(), default=0)):
-            level_specs = [
-                spec for spec in self._enabled_specs if debts[spec.feature_id] > level
-            ]
-            level_specs.sort(
-                key=lambda spec: tree.derive("coverage", level, spec.feature_id)
-            )
+            level_specs = [spec for spec in self._enabled_specs if debts[spec.feature_id] > level]
+            level_specs.sort(key=lambda spec: tree.derive("coverage", level, spec.feature_id))
             plan.extend(level_specs)
         return tuple(plan)
 
     def choose(self, *, case_ordinal: int) -> FeatureSpec:
-        if (
-            not isinstance(case_ordinal, int)
-            or isinstance(case_ordinal, bool)
-            or case_ordinal < 0
-        ):
+        if not isinstance(case_ordinal, int) or isinstance(case_ordinal, bool) or case_ordinal < 0:
             raise ValueError("case_ordinal must be a nonnegative integer")
         batch_ordinal = case_ordinal - self.plan_start_ordinal
         if batch_ordinal < 0:
@@ -296,8 +291,7 @@ class CoverageScheduler:
         weights = [max(1, round(spec.weight * 1000)) for spec in self._enabled_specs]
         total_weight = sum(weights)
         ticket = (
-            SeedTree(self.schedule_seed).derive("coverage", "weighted", case_ordinal)
-            % total_weight
+            SeedTree(self.schedule_seed).derive("coverage", "weighted", case_ordinal) % total_weight
         )
         for spec, weight in zip(self._enabled_specs, weights, strict=True):
             if ticket < weight:
@@ -310,3 +304,48 @@ class CoverageScheduler:
             self.ledger.hits(spec.feature_id) >= self.cycle_target_hits
             for spec in self._enabled_specs
         )
+
+
+class WeightedCoverageScheduler(CoverageScheduler):
+    """Seeded weighted-random selection with coverage debt as a bounded bias.
+
+    Unlike the exhaustive debt plan, every compatible target remains selectable
+    for every case. Missing coverage increases probability without turning fuzz
+    generation into a fixed enumeration.
+    """
+
+    def __init__(self, *args: object, max_debt_boost: float = 4.0, **kwargs: object) -> None:
+        if (
+            not isinstance(max_debt_boost, (int, float))
+            or isinstance(max_debt_boost, bool)
+            or not math.isfinite(max_debt_boost)
+            or max_debt_boost < 0
+        ):
+            raise ValueError("max_debt_boost must be a finite nonnegative number")
+        self.max_debt_boost = float(max_debt_boost)
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+
+    def choose(self, *, case_ordinal: int) -> FeatureSpec:
+        if (
+            not isinstance(case_ordinal, int)
+            or isinstance(case_ordinal, bool)
+            or case_ordinal < self.plan_start_ordinal
+        ):
+            raise ValueError("case_ordinal predates this coverage plan")
+        weighted: list[tuple[FeatureSpec, int]] = []
+        for spec in self.enabled_specs:
+            debt_ratio = min(
+                1.0,
+                max(0, self.cycle_target_hits - self.ledger.hits(spec.feature_id))
+                / self.min_hits,
+            )
+            effective = spec.weight * (1.0 + self.max_debt_boost * debt_ratio)
+            weighted.append((spec, max(1, round(effective * 1000))))
+        ticket = SeedTree(self.schedule_seed).derive(
+            "coverage", "weighted_fuzz", case_ordinal
+        ) % sum(weight for _, weight in weighted)
+        for spec, weight in weighted:
+            if ticket < weight:
+                return spec
+            ticket -= weight
+        raise AssertionError("weighted fuzz selection exhausted")  # pragma: no cover

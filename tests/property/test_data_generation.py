@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
+
 from hypothesis import given, settings, strategies as st
 
-from select_fuzz.generation.data import DataGenerator
+from select_fuzz.generation.data import DataGenerator, DataScenario
 from select_fuzz.generation.schema import (
     ColumnDef,
     IndexDef,
@@ -81,3 +83,50 @@ def test_payload_hashes_and_insert_batches_cover_exactly_the_configured_rows(
     assert set(bundle.sha256_by_table) == {"t0"}
     assert len(bundle.sha256_by_table["t0"]) == 64
     assert len(bundle.inserts_sql) == (rows + 6) // 7
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    seed=st.integers(min_value=0, max_value=2**64 - 1),
+    rows=st.integers(min_value=0, max_value=40),
+    scenario=st.sampled_from(
+        (
+            DataScenario.SEEDED_RANDOM,
+            DataScenario.BOUNDARY,
+            DataScenario.ALL_NULL,
+            DataScenario.MIXED_NULL,
+            DataScenario.DUPLICATE,
+            DataScenario.HOTSPOT,
+        )
+    ),
+)
+def test_explicit_scenarios_remain_constraint_safe_across_seeds_and_cardinalities(
+    seed: int,
+    rows: int,
+    scenario: DataScenario,
+) -> None:
+    schema = _property_schema(partitioned=bool(seed & 1))
+    bundle = DataGenerator(
+        max_rows_per_table=40,
+        max_total_rows=40,
+    ).generate(
+        schema,
+        seed=seed,
+        rows_per_table=rows,
+        scenario=scenario,
+    )
+    generated_rows = bundle.rows_by_table["t0"]
+    payload_position = 2 if schema.tables[0].partition is not None else 1
+    payload_values = [row[payload_position] for row in generated_rows]
+
+    assert len({row[0] for row in generated_rows}) == rows
+    if scenario is DataScenario.ALL_NULL:
+        assert all(value is None for value in payload_values)
+    elif scenario is DataScenario.MIXED_NULL and rows >= 2:
+        assert any(value is None for value in payload_values)
+        assert any(value is not None for value in payload_values)
+    elif scenario is DataScenario.DUPLICATE and rows:
+        assert len(set(payload_values)) == 1
+    elif scenario is DataScenario.HOTSPOT and rows:
+        dominant = Counter(payload_values).most_common(1)[0][1]
+        assert dominant >= (rows * 4 + 4) // 5

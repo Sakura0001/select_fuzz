@@ -35,12 +35,12 @@ def test_catalog_ast_terms_are_normalized_for_discovered_shape_matching() -> Non
     assert capability.evidence_ready is True
 
 
-def test_unverified_catalog_evidence_remains_blocked() -> None:
+def test_newly_verified_nonrecursive_cte_has_a_matching_witness() -> None:
     adapter = ProductionGeneratorAdapter()
     signature = adapter.signature_for_feature("cte_nonrecursive")
     capability = adapter.capability_for_feature("cte_nonrecursive")
     result = CapabilityAuditor().audit(signature, capability, generator=adapter)
-    assert result.status is Reachability.BLOCKED_EVIDENCE
+    assert result.status is Reachability.SUPPORTED
 
 
 def test_isolated_reaudit_loads_a_fresh_compatible_generator_graph() -> None:
@@ -104,7 +104,7 @@ def test_discovered_relation_and_ordering_requirements_match_real_catalog(
         ("VALUES ROW(1)", Reachability.SUPPORTED),
         (
             "SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS(value INT PATH '$')) AS jt",
-            Reachability.BLOCKED_EVIDENCE,
+            Reachability.SUPPORTED,
         ),
     ],
 )

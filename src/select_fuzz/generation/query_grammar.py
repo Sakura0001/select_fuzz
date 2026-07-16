@@ -262,6 +262,14 @@ class TypeFamily(StrEnum):
     SPATIAL = "spatial"
 
 
+class FunctionValueProfile(StrEnum):
+    """Deterministic value fixtures used to exercise function input domains."""
+
+    NORMAL = "normal"
+    BOUNDARY = "boundary"
+    SPECIAL = "special"
+
+
 _NUMERIC_TYPES = frozenset(
     {
         "TINYINT",
@@ -382,12 +390,15 @@ class GrammarQueryConfig:
     max_repeat: int = 2
     max_tables_per_query_block: int = 4
     correlated_column_percent: int = 20
+    function_value_profile: FunctionValueProfile = FunctionValueProfile.NORMAL
 
     def __post_init__(self) -> None:
         for name in ("compatible_type_percent", "correlated_column_percent"):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 100:
                 raise ValueError(f"{name} must be an integer from 0 to 100")
+        if not isinstance(self.function_value_profile, FunctionValueProfile):
+            raise ValueError("function_value_profile must be a FunctionValueProfile")
         for name in (
             "max_expansion_depth",
             "max_expansion_steps",
@@ -679,6 +690,72 @@ _FUNCTION_ARGUMENT_SQL: Mapping[FunctionArgument, str] = MappingProxyType(
         FunctionArgument.IPV6_BINARY: "X'20010db8000000000000000000000001'",
     }
 )
+
+_FUNCTION_ARGUMENT_SQL_BY_PROFILE: Mapping[
+    FunctionValueProfile,
+    Mapping[FunctionArgument, str],
+] = MappingProxyType(
+    {
+        FunctionValueProfile.NORMAL: _FUNCTION_ARGUMENT_SQL,
+        FunctionValueProfile.BOUNDARY: MappingProxyType(
+            {
+                **_FUNCTION_ARGUMENT_SQL,
+                FunctionArgument.NUMBER: "0",
+                FunctionArgument.UNIT_NUMBER: "1",
+                FunctionArgument.INTEGER: "1",
+                FunctionArgument.INTEGER_TWO: "1",
+                FunctionArgument.INTEGER_THREE: "1",
+                FunctionArgument.BASE_SIXTEEN: "2",
+                FunctionArgument.TEXT: "''",
+                FunctionArgument.TEXT_ALT: "''",
+                FunctionArgument.SQL_TEXT: "'SELECT 0'",
+                FunctionArgument.SEPARATOR: "''",
+                FunctionArgument.DATE: "'1000-01-01'",
+                FunctionArgument.DATETIME: "'1000-01-01 00:00:00.000000'",
+                FunctionArgument.TIME: "'00:00:00.000000'",
+                FunctionArgument.PERIOD: "190001",
+                FunctionArgument.YEAR_NUMBER: "1000",
+                FunctionArgument.DAY_NUMBER: "730120",
+                FunctionArgument.SHA_BITS: "224",
+                FunctionArgument.BASE64_TEXT: "'AA=='",
+                FunctionArgument.HEX_TEXT: "'00FF'",
+                FunctionArgument.IPV4_TEXT: "'0.0.0.0'",
+                FunctionArgument.IPV4_NUMBER: "0",
+                FunctionArgument.IPV6_TEXT: "'::'",
+                FunctionArgument.IPV6_BINARY: "X'00000000000000000000000000000000'",
+            }
+        ),
+        FunctionValueProfile.SPECIAL: MappingProxyType(
+            {
+                **_FUNCTION_ARGUMENT_SQL,
+                FunctionArgument.TEXT: "CONVERT(X'6100275C00' USING utf8mb4)",
+                FunctionArgument.TEXT_ALT: "CONVERT(X'CEB1CEB2' USING utf8mb4)",
+                FunctionArgument.SQL_TEXT: "CONVERT(X'53454C4543542030' USING utf8mb4)",
+                FunctionArgument.SEPARATOR: "'|'",
+                FunctionArgument.DATE: "'9999-12-31'",
+                FunctionArgument.DATETIME: "'9999-12-31 23:59:59.999999'",
+                FunctionArgument.TIME: "'23:59:59.999999'",
+                FunctionArgument.PERIOD: "999912",
+                FunctionArgument.YEAR_NUMBER: "9999",
+                FunctionArgument.DAY_NUMBER: "3652059",
+                FunctionArgument.SHA_BITS: "512",
+                FunctionArgument.BASE64_TEXT: "'////'",
+                FunctionArgument.HEX_TEXT: "'00FF7F'",
+                FunctionArgument.IPV4_TEXT: "'255.255.255.255'",
+                FunctionArgument.IPV4_NUMBER: "4294967295",
+                FunctionArgument.IPV6_TEXT: "'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff'",
+                FunctionArgument.IPV6_BINARY: "X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF'",
+            }
+        ),
+    }
+)
+
+
+def _function_argument_sql(
+    argument: FunctionArgument,
+    profile: FunctionValueProfile,
+) -> str:
+    return _FUNCTION_ARGUMENT_SQL_BY_PROFILE[profile][argument]
 
 
 def _registered_function_symbols() -> dict[
@@ -1474,7 +1551,18 @@ class GrammarQueryGenerator:
         *,
         null_position: int | None,
     ) -> str:
-        arguments = [_FUNCTION_ARGUMENT_SQL[argument] for argument in signature.arguments]
+        arguments = [
+            _function_argument_sql(argument, context.config.function_value_profile)
+            for argument in signature.arguments
+        ]
+        if (
+            context.config.function_value_profile is FunctionValueProfile.BOUNDARY
+            and signature.sql_name == "LOG"
+            and len(arguments) == 2
+        ):
+            # LOG(X, B) rejects a base of 1 with warning 3020; use the
+            # smallest valid base and argument for the boundary witness.
+            arguments = ["2", "2"]
         if null_position is not None:
             arguments[null_position] = "NULL"
         context.scope.last_value_family = {
@@ -2131,6 +2219,7 @@ __all__ = [
     "GrammarSchema",
     "GrammarSymbol",
     "GrammarTable",
+    "FunctionValueProfile",
     "Multiplicity",
     "SelectGrammar",
     "TypeFamily",

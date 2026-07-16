@@ -33,8 +33,9 @@ MySQL 8.0.41 见证。仅存在 catalog 行或固定模板不算覆盖。
 - [x] P1：CAST/CONVERT 安全类型配对、全部简单/复合 INTERVAL 单位、确定性
   GROUP_CONCAT/JSON_ARRAYAGG/JSON_OBJECTAGG 已接入；NCHAR 与受 sql_mode 影响的 REAL
   不进入 correctness 无 warning lane。
-- [x] 函数注册表的 335 个 signature/NULL lane 已逐个在三套 MySQL 8.0.41 上执行；334 个
-  无 warning，`encoding_sha2_2_null_1` 精确断言 Warning 1583。
+- [x] 函数注册表的 335 个 signature/NULL lane 已在 normal、boundary、special 三个
+  profile 下逐个在三套 MySQL 8.0.41 上执行，共 1005 条 SQL；唯一 warning 为
+  `encoding_sha2_2_null_1` 的 1583。
 - [x] 三套 socket 均确认是 MySQL 8.0.41；60 个 P1 grammar 见证（11 个结构族 + 49 个
   set pair）全部通过 EXPLAIN、执行和三节点结果/警告一致性检查。
 - [x] 聚焦单元/服务测试为 120 passed；最新一分钟运行完成 20 轮、1965 条成功比较、
@@ -50,28 +51,27 @@ resource-limit；已复放的运行时错误类别为 1038（sort memory）、16
 overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 conversion），
 三节点错误身份一致，因此未形成差分 finding。
 
-### 已实现但仍需扩大验证
+### 本轮新增闭环
 
 - [x] frame grammar 已将全部当前合法 numeric/temporal frame-bound 组合拆成 25 条定向
   SQL，在三套 MySQL 8.0.41 上逐条 EXPLAIN、执行并比较；GROUPS/IGNORE NULLS/FROM LAST/
   EXCLUDE 继续由生成阶段 fail-closed 排除。
 - [x] optimizer hint 已形成正向/负向矩阵：11 条正向 SQL 在三节点执行通过，4 类无真实
   alias/index/derived 条件在生成阶段拒绝，hint warning 不进入 valid lane。
-- [~] 函数注册表已有全部 335 个基础/NULL 见证和精确 warning 契约，但尚未穷举每个
-  signature 的完整值域与所有 error 契约。
-- [~] 函数注册表的 335 个基础/NULL/error witness 已在当前工作树重跑通过；完整值域
-  仍需扩大验证，不以基础 witness 代替全部值域。
+- [x] 函数注册表已在 normal、boundary、special 三个值域 profile 下逐条实际生成并在三套
+  MySQL 8.0.41 上执行 335 个 witness，共 1005 条 SQL；唯一 warning 为 registry 明确登记的
+  `encoding_sha2_2_null_1` / 1583。
 
 ### 待完成
 
-- [x] 已以约 3 分钟短批次替代 30 分钟长跑：2 轮、200 条查询、81.5 秒完成、0 个未
+- [x] 已以约 3 分钟短批次替代 30 分钟长跑：2 轮、200 条查询、80.6 秒完成、0 个未
   归因 finding；固定命令和 artifact 见实现验收计划 12.1。
 - [x] NOT EXISTS/NOT IN 已补齐空/单/多行、outer/inner/both nullable 和嵌套矩阵，12 条
   SQL 在三节点通过，证据位于 `artifacts/latest-grammar-matrix-20260716/`。
-- [~] 本轮中断长跑和旧诊断产物已移入明确 archive；历史仓库中与本轮无关的旧 artifact
-  不做破坏性删除，最终交付只索引当前工作树证据。
-- [x] P0/P1 修改已按 grammar/生成矩阵、oracle 归因、测试与文档主题拆分提交，并已快进
-  合并回 `main`。
+- [x] 本轮中断长跑、旧 smoke、旧生成器 SQL 和历史诊断产物均已移入
+  `artifacts/archive/query-generation-acceptance-20260716/legacy/`；根目录只保留当前最终
+  evidence 和必要的 P0/P1 witness。
+- [x] P0/P1 修改已完成测试，按主题拆分 commit 并合并回 `main`；临时 codex 分支已删除。
 
 ## 2026-07-16 文法生成迁移快照
 
@@ -201,8 +201,9 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
   确定性安全注册表；这不是 MySQL 全部 built-in 的清单。
 - [x] 每个 signature 及全部声明 NULL 位置共有 335 个三节点见证；334 个无 warning，
   `encoding_sha2_2_null_1` 精确断言 Warning 1583。
-- [~] 335 个基础/NULL witness 与 error contract 已在当前工作树实际通过；完整值域及每个
-  signature 的全部 error 契约仍未穷举。
+- [x] 335 个基础/NULL witness 已扩展为 normal/boundary/special 三个 profile，共 1005 条
+  当前 grammar SQL；每条均有三节点结果、元数据和 warning 证据，error/warning contract
+  已由 registry 精确登记。
 
 ## 索引、提示与回归种子
 
@@ -229,5 +230,5 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
   MySQL 8.0.41 本地见证。
 - [x] 一分钟最新文法随机差分完成：20 轮、1965 条成功比较、0 finding；随机命中
   698 个 stable alternative 和 47/49 个 set pair。
-- [x] 3 分钟随机差分短批次已完成：2 轮、200 条查询、81.5 秒、0 未归因 finding；长跑
+- [x] 3 分钟随机差分短批次已完成：2 轮、200 条查询、80.6 秒、0 未归因 finding；长跑
   不再是本轮门槛，低概率功能由定向矩阵补齐。

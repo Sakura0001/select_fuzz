@@ -137,6 +137,21 @@ def test_plan_dependent_field_origin_flags_are_advisory() -> None:
     assert result.verdict is OracleVerdict.MATCH
 
 
+def test_binary_character_set_id_is_advisory_when_binary_semantics_match() -> None:
+    baseline = ColumnMeta("v", 11, True, False, True, character_set_id=255, flags=128)
+    custom = ColumnMeta("v", 11, True, False, True, character_set_id=63, flags=128)
+
+    result = compare_three_nodes(
+        (
+            _success(NodeRole.BASELINE, (baseline,), ()),
+            _success(NodeRole.CUSTOM_OFF, (baseline,), ()),
+            _success(NodeRole.CUSTOM_ON, (custom,), ()),
+        )
+    )
+
+    assert result.verdict is OracleVerdict.MATCH
+
+
 def test_value_semantic_field_flags_remain_strict() -> None:
     plain = ColumnMeta("v", 254, True, False, False, flags=0)
     mysql_set = ColumnMeta("v", 254, True, False, False, flags=2048)
@@ -585,7 +600,7 @@ def test_error_identity_requires_errno_sqlstate_and_normalized_message() -> None
     assert not any(pair.matched for pair in result.pairwise)
 
 
-def test_all_timeout_is_over_budget_but_partial_timeout_is_mismatch() -> None:
+def test_timeout_vs_success_with_identical_results_is_over_budget() -> None:
     all_timeout = tuple(
         _failure(role, ExecutionStatus.TIMEOUT, f"query timeout connection id {index}")
         for index, role in enumerate(NodeRole, start=1)
@@ -600,8 +615,22 @@ def test_all_timeout_is_over_budget_but_partial_timeout_is_mismatch() -> None:
         _success(NodeRole.CUSTOM_ON, (INT,), ((1,),)),
     )
     result = compare_three_nodes(partial)
-    assert result.verdict is OracleVerdict.RESULT_MISMATCH
+    assert result.verdict is OracleVerdict.OVER_BUDGET
     assert len(result.pairwise) == 3
+
+    different_success = (
+        all_timeout[0],
+        _success(NodeRole.CUSTOM_OFF, (INT,), ((1,),)),
+        _success(NodeRole.CUSTOM_ON, (INT,), ((2,),)),
+    )
+    assert compare_three_nodes(different_success).verdict is OracleVerdict.RESULT_MISMATCH
+
+    mixed_resource = (
+        all_timeout[0],
+        _failure(NodeRole.CUSTOM_OFF, ExecutionStatus.ERROR, "result row limit exceeded", errno=65001),
+        _success(NodeRole.CUSTOM_ON, (INT,), ((1,),)),
+    )
+    assert compare_three_nodes(mixed_resource).verdict is OracleVerdict.OVER_BUDGET
 
 
 def test_success_error_mix_is_result_mismatch() -> None:

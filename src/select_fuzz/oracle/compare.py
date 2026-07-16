@@ -11,6 +11,7 @@ from itertools import combinations
 
 from select_fuzz.config import NodeRole
 from select_fuzz.domain.models import ColumnMeta, ExecutionStatus, NodeExecution
+from select_fuzz.execution.mysql import INTERNAL_RESULT_LIMIT_ERRNO
 from select_fuzz.oracle.canonical import (
     CanonicalValue,
     FloatCell,
@@ -314,16 +315,30 @@ def _semantic_column_metadata(column: ColumnMeta) -> tuple[object, ...]:
         if column.flags is None
         else column.flags & ~_ADVISORY_FIELD_FLAG_MASK
     )
+    # MySQL may report the binary character-set ID as 63 or 255 depending on
+    # whether an expression was materialized or merged.  Once the protocol
+    # marks a result binary, that ID is not a text interpretation contract;
+    # retain it in the raw artifact but do not turn the plan choice into a
+    # differential finding.
+    character_set_id = None if column.binary else column.character_set_id
     return (
         column.name,
         column.type_code,
         column.nullable,
         column.unsigned,
         column.binary,
-        column.character_set_id,
+        character_set_id,
         column.column_length,
         column.decimals,
         flags,
+    )
+
+
+def _is_resource_limited(execution: NodeExecution) -> bool:
+    return execution.status is ExecutionStatus.TIMEOUT or (
+        execution.status is ExecutionStatus.ERROR
+        and execution.error is not None
+        and execution.error.errno == INTERNAL_RESULT_LIMIT_ERRNO
     )
 
 
@@ -333,6 +348,41 @@ def _compare_pair(
     budget: _FuzzyComparisonBudget,
 ) -> PairwiseComparison:
     if left.status is not right.status:
+        if _is_resource_limited(left) and _is_resource_limited(right):
+            return PairwiseComparison(
+                left.role,
+                right.role,
+                True,
+                "resource_limit",
+                "both nodes reached the execution resource limit",
+            )
+        if _is_resource_limited(left) and right.status is ExecutionStatus.SUCCESS:
+            return PairwiseComparison(
+                left.role,
+                right.role,
+                True,
+                "resource_limit",
+                "one node reached the execution resource limit",
+            )
+        if _is_resource_limited(right) and left.status is ExecutionStatus.SUCCESS:
+            return PairwiseComparison(
+                left.role,
+                right.role,
+                True,
+                "resource_limit",
+                "one node reached the execution resource limit",
+            )
+        if {
+            left.status,
+            right.status,
+        } == {ExecutionStatus.TIMEOUT, ExecutionStatus.SUCCESS}:
+            return PairwiseComparison(
+                left.role,
+                right.role,
+                True,
+                "timeout",
+                "one node reached the execution resource limit",
+            )
         return PairwiseComparison(
             left.role,
             right.role,
@@ -383,7 +433,16 @@ def compare_three_nodes(executions: Iterable[NodeExecution]) -> OracleResult:
     pairwise = tuple(
         _compare_pair(left, right, budget) for left, right in combinations(ordered, 2)
     )
-    if all(execution.status is ExecutionStatus.TIMEOUT for execution in ordered):
+    if all(_is_resource_limited(execution) for execution in ordered):
+        verdict = OracleVerdict.OVER_BUDGET
+    elif (
+        any(_is_resource_limited(execution) for execution in ordered)
+        and all(
+            _is_resource_limited(execution) or execution.status is ExecutionStatus.SUCCESS
+            for execution in ordered
+        )
+        and all(pair.matched for pair in pairwise)
+    ):
         verdict = OracleVerdict.OVER_BUDGET
     elif all(pair.matched for pair in pairwise):
         verdict = OracleVerdict.MATCH

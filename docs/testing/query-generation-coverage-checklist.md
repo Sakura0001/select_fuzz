@@ -70,7 +70,8 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
   SQL 在三节点通过，证据位于 `artifacts/latest-grammar-matrix-20260716/`。
 - [~] 本轮中断长跑和旧诊断产物已移入明确 archive；历史仓库中与本轮无关的旧 artifact
   不做破坏性删除，最终交付只索引当前工作树证据。
-- [~] P0/P1 修改已完成测试，待按主题拆分 commit 并合并回 `main`。
+- [x] P0/P1 修改已按 grammar/生成矩阵、oracle 归因、测试与文档主题拆分提交，并已快进
+  合并回 `main`（当前 HEAD `ab199de`）。
 
 ## 2026-07-16 文法生成迁移快照
 

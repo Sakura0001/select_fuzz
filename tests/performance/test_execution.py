@@ -13,15 +13,12 @@ from select_fuzz.performance.tree import Family, ShapeBoundary
 
 
 def _nodes() -> tuple[NodeConfig, ...]:
-    return tuple(
-        NodeConfig(role=role, host=f"{role.value}.example") for role in NodeRole
-    )
+    return tuple(NodeConfig(role=role, host=f"{role.value}.example") for role in NodeRole)
 
 
 def _tree(seconds: float) -> str:
     return (
-        "-> Table scan on t (cost=1 rows=100) "
-        f"(actual time=0..{seconds * 1000} rows=100 loops=1)"
+        f"-> Table scan on t (cost=1 rows=100) (actual time=0..{seconds * 1000} rows=100 loops=1)"
     )
 
 
@@ -218,9 +215,9 @@ class _Diagnostics:
 
 def test_diagnostics_are_collected_for_each_node_without_changing_query_elapsed() -> None:
     diagnostics = _Diagnostics()
-    run = FormalRunner(
-        _nodes(), _Runner(), PerformancePolicy(), diagnostics=diagnostics
-    ).run(_frozen())
+    run = FormalRunner(_nodes(), _Runner(), PerformancePolicy(), diagnostics=diagnostics).run(
+        _frozen()
+    )
 
     assert set(diagnostics.before_roles) == set(NodeRole)
     assert set(diagnostics.after_roles) == set(NodeRole)

@@ -34,18 +34,20 @@ class PerformancePolicy:
     max_start_skew_ms: float = 100.0
     scale_multiplier: float = 2.0
     max_table_rows: int = 50_000_000
-    workload_kind: str = "cpu_dense"
+    workload_kind: str = "seeded_fuzz"
     cache_state: str = "unverified"
 
     @classmethod
     def from_config(cls, config: PerformanceConfig) -> PerformancePolicy:
+        calibration_upper = min(config.calibration_max_seconds, config.formal_timeout_seconds)
+        calibration_lower = min(config.calibration_min_seconds, calibration_upper)
         return cls(
             worker_count=config.workers,
             queries_per_round=config.queries_per_round,
             calibration_runs_per_reference=config.calibration_runs_per_reference,
             calibration_band_seconds=(
-                config.calibration_min_seconds,
-                config.calibration_max_seconds,
+                calibration_lower,
+                calibration_upper,
             ),
             max_calibration_rounds=config.max_calibration_rounds,
             formal_timeout_seconds=config.formal_timeout_seconds,
@@ -80,8 +82,8 @@ class PerformancePolicy:
             raise ValueError("threshold and skew limit must be nonnegative")
         if self.scale_multiplier <= 1:
             raise ValueError("scale_multiplier must be greater than one")
-        if self.workload_kind != "cpu_dense":
-            raise ValueError("performance mode is restricted to cpu_dense workloads")
+        if self.workload_kind != "seeded_fuzz":
+            raise ValueError("performance mode is restricted to seeded_fuzz workloads")
         if self.cache_state != "unverified":
             raise ValueError("cache state must remain unverified")
 
@@ -154,9 +156,7 @@ class ScaleKnobs:
             name: min(row_cap, max(1, math.ceil(getattr(self, name) * factor)))
             for name in count_names
         }
-        values["aggregate_groups"] = min(
-            values["aggregate_groups"], values["aggregate_input_rows"]
-        )
+        values["aggregate_groups"] = min(values["aggregate_groups"], values["aggregate_input_rows"])
         values["window_frame_rows"] = min(
             values["window_frame_rows"], values["window_partition_rows"]
         )
@@ -195,9 +195,7 @@ class CalibrationAttempt:
     sql: str
     samples_seconds: Mapping[NodeRole, tuple[float | None, ...]]
     medians_seconds: Mapping[NodeRole, float]
-    failure_categories: Mapping[NodeRole, tuple[str | None, ...]] = field(
-        default_factory=dict
-    )
+    failure_categories: Mapping[NodeRole, tuple[str | None, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -207,17 +205,12 @@ class CalibrationAttempt:
                 {role: tuple(values) for role, values in self.samples_seconds.items()}
             ),
         )
-        object.__setattr__(
-            self, "medians_seconds", MappingProxyType(dict(self.medians_seconds))
-        )
+        object.__setattr__(self, "medians_seconds", MappingProxyType(dict(self.medians_seconds)))
         object.__setattr__(
             self,
             "failure_categories",
             MappingProxyType(
-                {
-                    role: tuple(values)
-                    for role, values in self.failure_categories.items()
-                }
+                {role: tuple(values) for role, values in self.failure_categories.items()}
             ),
         )
 
@@ -236,16 +229,9 @@ class FrozenCase:
     attempts: tuple[CalibrationAttempt, ...]
 
     def __post_init__(self) -> None:
-        if (
-            not self.case_id
-            or not self.template_id
-            or not self.database
-            or not self.sql.strip()
-        ):
+        if not self.case_id or not self.template_id or not self.database or not self.sql.strip():
             raise ValueError("frozen case identifiers and SQL must not be empty")
-        object.__setattr__(
-            self, "medians_seconds", MappingProxyType(dict(self.medians_seconds))
-        )
+        object.__setattr__(self, "medians_seconds", MappingProxyType(dict(self.medians_seconds)))
         object.__setattr__(self, "attempts", tuple(self.attempts))
 
 

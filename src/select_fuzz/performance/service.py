@@ -19,6 +19,7 @@ from select_fuzz.performance.models import (
     FrozenCase,
     PerformancePolicy,
     ScaleKnobs,
+    Verdict,
 )
 from select_fuzz.performance.oracle import assess
 
@@ -30,8 +31,8 @@ class ServiceTemplate(PerformanceTemplate, Protocol):
     def for_case(self, round_number: int, query_number: int) -> Self: ...
 
 
-class CalibrationServicePort(Protocol):
-    def calibrate(
+class CasePreparationPort(Protocol):
+    def prepare(
         self, template: PerformanceTemplate, initial: ScaleKnobs, *, database: str
     ) -> FrozenCase: ...
 
@@ -41,9 +42,7 @@ class FormalServicePort(Protocol):
 
 
 class PerformanceRecordPort(Protocol):
-    def record(
-        self, frozen: FrozenCase, run: FormalRun, assessment: Assessment
-    ) -> object: ...
+    def record(self, frozen: FrozenCase, run: FormalRun, assessment: Assessment) -> object: ...
 
     def record_calibration_failure(
         self,
@@ -61,17 +60,23 @@ class PerformanceServiceResult:
     rounds_started: int
     rounds_completed: int
     rejected: int
-    calibration_failures: int
+    setup_failures: int
 
     @property
     def queries_completed(self) -> int:
         return len(self.assessments)
 
+    @property
+    def calibration_failures(self) -> int:
+        """Compatibility alias for pre-shared-round callers and event readers."""
+
+        return self.setup_failures
+
 
 class PerformanceService:
     def __init__(
         self,
-        calibration: CalibrationServicePort,
+        preparation: CasePreparationPort,
         formal: FormalServicePort,
         recorder: PerformanceRecordPort,
         *,
@@ -79,14 +84,12 @@ class PerformanceService:
         policy: PerformancePolicy,
         retry_waiter: Callable[[Event, float], bool] | None = None,
     ) -> None:
-        self._calibration = calibration
+        self._preparation = preparation
         self._formal = formal
         self._recorder = recorder
         self._database_name = database_name
         self._policy = policy
-        self._retry_waiter = retry_waiter or (
-            lambda stop, seconds: stop.wait(seconds)
-        )
+        self._retry_waiter = retry_waiter or (lambda stop, seconds: stop.wait(seconds))
 
     def run(
         self,
@@ -104,9 +107,7 @@ class PerformanceService:
         ):
             raise ValueError("rounds must be a positive integer when supplied")
         per_round = (
-            self._policy.queries_per_round
-            if queries_per_round is None
-            else queries_per_round
+            self._policy.queries_per_round if queries_per_round is None else queries_per_round
         )
         if not isinstance(per_round, int) or isinstance(per_round, bool) or per_round <= 0:
             raise ValueError("queries_per_round must be a positive integer")
@@ -114,15 +115,18 @@ class PerformanceService:
         rounds_started = 0
         rounds_completed = 0
         rejected = 0
-        calibration_failures = 0
+        setup_failures = 0
         active_stop = stop_event or Event()
         round_number = 1
         template_cursor = 0
 
         def result() -> PerformanceServiceResult:
             return PerformanceServiceResult(
-                tuple(results), rounds_started, rounds_completed,
-                rejected, calibration_failures,
+                tuple(results),
+                rounds_started,
+                rounds_completed,
+                rejected,
+                setup_failures,
             )
 
         while rounds is None or round_number <= rounds:
@@ -130,6 +134,7 @@ class PerformanceService:
                 return result()
             database = self._database_name(round_number)
             rounds_started += 1
+            terminate_current_round = False
             for query_number in range(1, per_round + 1):
                 template = catalog[template_cursor % len(catalog)]
                 template_cursor += 1
@@ -141,7 +146,7 @@ class PerformanceService:
                 infrastructure_attempt = 0
                 while frozen is None:
                     try:
-                        frozen = self._calibration.calibrate(
+                        frozen = self._preparation.prepare(
                             case_template,
                             case_template.initial_scale,
                             database=database,
@@ -162,16 +167,20 @@ class PerformanceService:
                             case_template, error.attempts, error, attempt_number=1
                         )
                         rejected += 1
-                        calibration_failures += 1
+                        setup_failures += 1
+                        terminate_current_round = True
                         break
                     except CalibrationExhausted as error:
                         self._recorder.record_calibration_failure(
                             case_template, error.attempts, attempt_number=1
                         )
                         rejected += 1
-                        calibration_failures += 1
+                        setup_failures += 1
+                        terminate_current_round = True
                         break
                 if frozen is None:
+                    if terminate_current_round:
+                        break
                     continue
                 formal = self._formal.run(frozen)
                 assessment = assess(
@@ -181,13 +190,16 @@ class PerformanceService:
                 )
                 self._recorder.record(frozen, formal, assessment)
                 results.append(assessment)
+                if assessment.verdict is not Verdict.PASS:
+                    terminate_current_round = True
+                    break
             rounds_completed += 1
             round_number += 1
         return result()
 
 
 __all__ = [
-    "CalibrationServicePort",
+    "CasePreparationPort",
     "FormalServicePort",
     "PerformanceRecordPort",
     "PerformanceService",

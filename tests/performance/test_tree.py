@@ -42,9 +42,7 @@ def test_shape_boundary_accepts_equivalent_scan_families_per_role() -> None:
         ),
     ],
 )
-def test_parser_rejects_empty_incomplete_or_ambiguous_plans(
-    tree: str, completed: bool
-) -> None:
+def test_parser_rejects_empty_incomplete_or_ambiguous_plans(tree: str, completed: bool) -> None:
     with pytest.raises(PlanParseError):
         parse_tree(tree, completed=completed)
 

@@ -21,8 +21,7 @@ from select_fuzz.performance.tree import Family, ShapeBoundary
 
 def _tree(seconds: float) -> str:
     return (
-        "-> Table scan on t (cost=1 rows=100) "
-        f"(actual time=0..{seconds * 1000} rows=100 loops=1)"
+        f"-> Table scan on t (cost=1 rows=100) (actual time=0..{seconds * 1000} rows=100 loops=1)"
     )
 
 
@@ -142,16 +141,12 @@ class _CoreRunner:
         byte_limit: int,
         barrier: object = None,
     ) -> NodeExecution:
-        self.calls.append(
-            (node.role, database, sql, timeout_s, row_limit, byte_limit, barrier)
-        )
+        self.calls.append((node.role, database, sql, timeout_s, row_limit, byte_limit, barrier))
         return _execution(node.role, 5.0)
 
 
 def test_reference_analyzer_is_a_thin_shared_node_query_runner_adapter() -> None:
-    nodes = tuple(
-        NodeConfig(role=role, host=f"{role.value}.example") for role in NodeRole
-    )
+    nodes = tuple(NodeConfig(role=role, host=f"{role.value}.example") for role in NodeRole)
     core = _CoreRunner()
     adapter = ReferenceAnalyzer(nodes, core)
 
@@ -175,9 +170,7 @@ def test_reference_analyzer_is_a_thin_shared_node_query_runner_adapter() -> None
         )
     ]
     with pytest.raises(ValueError, match="reference"):
-        adapter.analyze(
-            NodeRole.CUSTOM_ON, "perf_1", "SELECT 1", timeout_s=60.0
-        )
+        adapter.analyze(NodeRole.CUSTOM_ON, "perf_1", "SELECT 1", timeout_s=60.0)
 
 
 class _InfraCoreRunner(_CoreRunner):
@@ -197,9 +190,7 @@ class _InfraCoreRunner(_CoreRunner):
 
 
 def test_reference_explain_infrastructure_failure_requests_pause() -> None:
-    nodes = tuple(
-        NodeConfig(role=role, host=f"{role.value}.example") for role in NodeRole
-    )
+    nodes = tuple(NodeConfig(role=role, host=f"{role.value}.example") for role in NodeRole)
 
     with pytest.raises(CalibrationInfrastructurePause):
         ReferenceAnalyzer(nodes, _InfraCoreRunner()).explain_tree(
@@ -238,9 +229,7 @@ class _OutcomePort:
 
 
 def test_infrastructure_calibration_failure_pauses_instead_of_scaling() -> None:
-    port = _OutcomePort(
-        _failure(NodeRole.BASELINE, ExecutionStatus.INFRA_ERROR, 2013)
-    )
+    port = _OutcomePort(_failure(NodeRole.BASELINE, ExecutionStatus.INFRA_ERROR, 2013))
 
     with pytest.raises(CalibrationInfrastructurePause) as captured:
         CalibrationEngine(port, _Materializer(), PerformancePolicy()).calibrate(
@@ -276,8 +265,7 @@ def test_infrastructure_calibration_failure_pauses_instead_of_scaling() -> None:
                 started_ns=0,
                 ended_ns=1,
                 performance_payload={
-                    "tree": "-> Aggregate (cost=1 rows=1) "
-                    "(actual time=0..5000 rows=1 loops=1)"
+                    "tree": "-> Aggregate (cost=1 rows=1) (actual time=0..5000 rows=1 loops=1)"
                 },
             ),
             CalibrationFailureKind.SHAPE,
@@ -288,14 +276,14 @@ def test_non_timeout_calibration_failures_are_classified_and_terminate(
     execution: NodeExecution, kind: CalibrationFailureKind
 ) -> None:
     with pytest.raises(CalibrationTerminated) as captured:
-        CalibrationEngine(
-            _OutcomePort(execution), _Materializer(), PerformancePolicy()
-        ).calibrate(_Template(), ScaleKnobs(), database="perf_bad")
+        CalibrationEngine(_OutcomePort(execution), _Materializer(), PerformancePolicy()).calibrate(
+            _Template(), ScaleKnobs(), database="perf_bad"
+        )
 
     assert captured.value.kind is kind
 
 
-def test_timeout_is_the_only_failure_that_scales_down() -> None:
+def test_timeout_rejects_case_without_scaling_below_random_initial_volume() -> None:
     timeout = _failure(NodeRole.BASELINE, ExecutionStatus.TIMEOUT, 3024)
     with pytest.raises(CalibrationExhausted) as captured:
         CalibrationEngine(
@@ -304,10 +292,11 @@ def test_timeout_is_the_only_failure_that_scales_down() -> None:
             PerformancePolicy(max_calibration_rounds=2),
         ).calibrate(_Template(), ScaleKnobs(), database="perf_timeout")
 
-    assert captured.value.attempts[1].scale.table_rows < captured.value.attempts[0].scale.table_rows
+    assert len(captured.value.attempts) == 1
+    assert captured.value.attempts[0].scale.table_rows >= ScaleKnobs().table_rows
 
 
-def test_first_timeout_short_circuits_the_candidate_before_scaling_down() -> None:
+def test_first_timeout_short_circuits_and_rejects_the_candidate() -> None:
     timeout = _failure(NodeRole.BASELINE, ExecutionStatus.TIMEOUT, 3024)
     port = _OutcomePort(timeout)
     with pytest.raises(CalibrationExhausted):
@@ -316,14 +305,19 @@ def test_first_timeout_short_circuits_the_candidate_before_scaling_down() -> Non
         ).calibrate(_Template(), ScaleKnobs(), database="perf_timeout_fast")
 
     # One baseline timeout per candidate; custom_off and remaining samples are skipped.
-    assert getattr(port, "call_count", 0) == 2
+    assert getattr(port, "call_count", 0) == 1
 
 
 def test_materialization_mismatch_is_terminal_setup_mismatch_not_infra_pause() -> None:
     class MismatchMaterializer:
         def rebuild_all(self, database: str, manifest: object) -> object:
-            del database, manifest
-            raise MaterializationMismatch("different content")
+            del manifest
+            raise MaterializationMismatch(
+                "different content",
+                database=database,
+                sql="INSERT INTO cpu_data VALUES (1)",
+                details={"node_results": {"baseline": {"affected_rows": 1}}},
+            )
 
     with pytest.raises(CalibrationTerminated) as captured:
         CalibrationEngine(
@@ -334,6 +328,9 @@ def test_materialization_mismatch_is_terminal_setup_mismatch_not_infra_pause() -
 
     assert captured.value.kind is CalibrationFailureKind.SETUP_MISMATCH
     assert not isinstance(captured.value, CalibrationInfrastructurePause)
+    assert captured.value.database == "perf_setup_mismatch"
+    assert captured.value.failing_action_sql == "INSERT INTO cpu_data VALUES (1)"
+    assert captured.value.failure_details["node_results"] == {"baseline": {"affected_rows": 1}}
 
 
 class _WrongExplainShapePort(_AnalyzePort):

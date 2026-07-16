@@ -19,8 +19,7 @@ class CpuDenseSetupManifest:
 
 def _digit_source(alias: str) -> str:
     values = " UNION ALL ".join(
-        f"SELECT {value}" if value else "SELECT 0 AS n"
-        for value in range(10)
+        f"SELECT {value}" if value else "SELECT 0 AS n" for value in range(10)
     )
     return f"({values}) AS {alias}"
 
@@ -33,9 +32,7 @@ def _setup_manifest(
     rows = scale.table_rows
     digits = max(1, len(str(rows - 1)))
     sources = " CROSS JOIN ".join(_digit_source(f"d{index}") for index in range(digits))
-    terms = " + ".join(
-        f"{10 ** index} * d{index}.n" for index in range(digits)
-    )
+    terms = " + ".join(f"{10**index} * d{index}.n" for index in range(digits))
     insert = (
         "INSERT INTO cpu_data (id, v) "
         "SELECT n, MOD((n * 1103515245) + "
@@ -67,9 +64,7 @@ class CpuDenseScanTemplate:
     case_id: str
     initial_scale: ScaleKnobs = ScaleKnobs()
     template_id: str = "cpu_dense_scan_aggregate_v1"
-    boundary: ShapeBoundary = ShapeBoundary(
-        required=frozenset({Family.SCAN, Family.AGGREGATE})
-    )
+    boundary: ShapeBoundary = ShapeBoundary(required=frozenset({Family.SCAN, Family.AGGREGATE}))
     driver_family: Family = Family.SCAN
 
     def for_case(self, round_number: int, query_number: int) -> CpuDenseScanTemplate:
@@ -98,14 +93,10 @@ class CpuDenseRangeSortTemplate:
     case_id: str
     initial_scale: ScaleKnobs = ScaleKnobs()
     template_id: str = "cpu_dense_range_sort_v1"
-    boundary: ShapeBoundary = ShapeBoundary(
-        required=frozenset({Family.SCAN, Family.SORT})
-    )
+    boundary: ShapeBoundary = ShapeBoundary(required=frozenset({Family.SCAN, Family.SORT}))
     driver_family: Family = Family.SCAN
 
-    def for_case(
-        self, round_number: int, query_number: int
-    ) -> CpuDenseRangeSortTemplate:
+    def for_case(self, round_number: int, query_number: int) -> CpuDenseRangeSortTemplate:
         return replace(
             self,
             seed=self.seed ^ (round_number << 32) ^ query_number,
@@ -174,9 +165,7 @@ class CpuDenseGroupSortTemplate:
     )
     driver_family: Family = Family.AGGREGATE
 
-    def for_case(
-        self, round_number: int, query_number: int
-    ) -> CpuDenseGroupSortTemplate:
+    def for_case(self, round_number: int, query_number: int) -> CpuDenseGroupSortTemplate:
         return replace(
             self,
             seed=self.seed ^ (round_number << 32) ^ query_number,
@@ -208,9 +197,7 @@ class CpuDenseWindowTemplate:
     )
     driver_family: Family = Family.WINDOW
 
-    def for_case(
-        self, round_number: int, query_number: int
-    ) -> CpuDenseWindowTemplate:
+    def for_case(self, round_number: int, query_number: int) -> CpuDenseWindowTemplate:
         return replace(
             self,
             seed=self.seed ^ (round_number << 32) ^ query_number,

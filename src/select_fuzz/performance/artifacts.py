@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from enum import Enum
+from hashlib import sha256
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -16,6 +17,11 @@ from uuid import uuid4
 from typing import Protocol
 
 from select_fuzz.artifacts.jsonl import assert_no_sensitive_keys
+from select_fuzz.artifacts.sql_script import (
+    SourceableSqlWriter,
+    write_difference_summary,
+    write_minimal_failure_script,
+)
 from select_fuzz.config import NodeRole
 from select_fuzz.performance.calibration import CalibrationTerminated
 from select_fuzz.performance.models import Assessment, FormalRun, FrozenCase, Verdict
@@ -64,6 +70,18 @@ def _artifact_value(value: object) -> object:
     raise TypeError(f"unsupported performance artifact value: {type(value).__name__}")
 
 
+def _compact_manifest(value: object) -> object:
+    encoded = _artifact_value(value)
+    if not (is_dataclass(value) and not isinstance(value, type)) or not isinstance(encoded, dict):
+        return encoded
+    statements = encoded.pop("setup_statements", None)
+    if isinstance(statements, list):
+        payload = "\n".join(str(statement) for statement in statements).encode("utf-8")
+        encoded["setup_statement_count"] = len(statements)
+        encoded["setup_sql_sha256"] = sha256(payload).hexdigest()
+    return encoded
+
+
 def _calibration_record(frozen: FrozenCase) -> list[dict[str, object]]:
     return [
         {
@@ -71,16 +89,13 @@ def _calibration_record(frozen: FrozenCase) -> list[dict[str, object]]:
             "scale": attempt.scale.as_dict(),
             "sql": attempt.sql,
             "samples_seconds": {
-                role.value: list(values)
-                for role, values in attempt.samples_seconds.items()
+                role.value: list(values) for role, values in attempt.samples_seconds.items()
             },
             "failure_categories": {
-                role.value: list(values)
-                for role, values in attempt.failure_categories.items()
+                role.value: list(values) for role, values in attempt.failure_categories.items()
             },
             "medians_seconds": {
-                role.value: value
-                for role, value in attempt.medians_seconds.items()
+                role.value: value for role, value in attempt.medians_seconds.items()
             },
         }
         for attempt in frozen.attempts
@@ -98,9 +113,7 @@ def compact_record(
 ) -> dict[str, object]:
     return {
         "type": (
-            "performance_result"
-            if assessment.verdict is Verdict.PASS
-            else "performance_alert"
+            "performance_result" if assessment.verdict is Verdict.PASS else "performance_alert"
         ),
         "case_id": frozen.case_id,
         "run_id": run_id,
@@ -110,7 +123,7 @@ def compact_record(
         "database": frozen.database,
         "sql": frozen.sql,
         "scale": frozen.scale.as_dict(),
-        "data_manifest": _artifact_value(frozen.data_manifest),
+        "data_manifest": _compact_manifest(frozen.data_manifest),
         "node_config_fingerprints": {
             role.value: node_config_fingerprints[role] for role in NodeRole
         },
@@ -119,9 +132,7 @@ def compact_record(
         "start_skew_ms": run.start_skew_ms,
         "verdict": assessment.verdict.value,
         "reasons": list(assessment.reasons),
-        "measurements": {
-            role.value: _measurement_record(run, role) for role in NodeRole
-        },
+        "measurements": {role.value: _measurement_record(run, role) for role in NodeRole},
     }
 
 
@@ -133,6 +144,8 @@ class PerformanceRecorder:
         *,
         run_id: str,
         node_config_fingerprints: Mapping[NodeRole, str],
+        sql_root: str | Path | None = None,
+        replica_parameters_sha256: str | None = None,
         now: Callable[[], str] = lambda: datetime.now(UTC).isoformat(),
     ) -> None:
         if not run_id:
@@ -146,6 +159,45 @@ class PerformanceRecorder:
         self._node_config_fingerprints = dict(node_config_fingerprints)
         self._run_id = run_id
         self._now = now
+        self._sql_root = None if sql_root is None else Path(sql_root)
+        self._round_writers: dict[str, SourceableSqlWriter] = {}
+        self._round_writers_lock = Lock()
+        if (
+            replica_parameters_sha256 is not None
+            and re.fullmatch(r"[0-9a-f]{64}", replica_parameters_sha256) is None
+        ):
+            raise ValueError("replica_parameters_sha256 must be lowercase SHA-256")
+        self._replica_parameters_sha256 = replica_parameters_sha256
+
+    @staticmethod
+    def _setup_statements(manifest: object) -> tuple[str, ...]:
+        statements = getattr(manifest, "setup_statements", ())
+        return tuple(statements) if isinstance(statements, tuple) else ()
+
+    def _write_case_sql(self, frozen: FrozenCase) -> None:
+        if self._sql_root is None:
+            return
+        with self._round_writers_lock:
+            writer = self._round_writers.get(frozen.database)
+            if writer is None:
+                writer = SourceableSqlWriter(
+                    self._sql_root / "rounds" / f"{frozen.database}.sql",
+                    frozen.database,
+                    metadata={
+                        "run_id": self._run_id,
+                        "round_seed": getattr(frozen.data_manifest, "seed", frozen.seed),
+                        "replica_parameters_sha256": self._replica_parameters_sha256,
+                    },
+                )
+                for statement in self._setup_statements(frozen.data_manifest):
+                    if statement.lstrip().upper().startswith("CREATE PROCEDURE "):
+                        writer.append_routine(statement)
+                    else:
+                        writer.append_single_line_statement(statement)
+                self._round_writers[frozen.database] = writer
+            writer.append_single_line_statement(
+                f"EXPLAIN ANALYZE FORMAT=TREE {frozen.sql.rstrip().rstrip(';')}"
+            )
 
     def record(
         self, frozen: FrozenCase, run: FormalRun, assessment: Assessment
@@ -158,12 +210,33 @@ class PerformanceRecorder:
             run_id=self._run_id,
             occurred_at=self._now(),
         )
+        record["replica_parameters_sha256"] = self._replica_parameters_sha256
+        self._write_case_sql(frozen)
         self._records.append(record)
+        if assessment.verdict is not Verdict.PASS and self._sql_root is not None:
+            failure_root = self._sql_root / "performance_failures" / frozen.case_id
+            write_minimal_failure_script(
+                failure_root / "case.sql",
+                database=frozen.database,
+                setup_statements=self._setup_statements(frozen.data_manifest),
+                failing_query=(f"EXPLAIN ANALYZE FORMAT=TREE {frozen.sql.rstrip().rstrip(';')}"),
+                metadata={
+                    "case_id": frozen.case_id,
+                    "run_id": self._run_id,
+                    "verdict": assessment.verdict.value,
+                },
+            )
+            write_difference_summary(
+                failure_root / "case.diff",
+                {
+                    "case_id": frozen.case_id,
+                    "reasons": list(assessment.reasons),
+                    "verdict": assessment.verdict.value,
+                },
+            )
         if assessment.verdict is not Verdict.PASS and self._diagnostics is not None:
             files: dict[str, bytes] = {
-                f"plans/{role.value}.tree": (
-                    run.measurements[role].tree or ""
-                ).encode("utf-8")
+                f"plans/{role.value}.tree": (run.measurements[role].tree or "").encode("utf-8")
                 for role in NodeRole
             }
             files["calibration.json"] = json.dumps(
@@ -186,7 +259,11 @@ class PerformanceRecorder:
         *,
         attempt_number: int = 1,
     ) -> None:
-        if not isinstance(attempt_number, int) or isinstance(attempt_number, bool) or attempt_number <= 0:
+        if (
+            not isinstance(attempt_number, int)
+            or isinstance(attempt_number, bool)
+            or attempt_number <= 0
+        ):
             raise ValueError("attempt_number must be positive")
         case_id = getattr(template, "case_id", "unknown")
         attempt_items = attempts if isinstance(attempts, tuple) else ()
@@ -196,12 +273,10 @@ class PerformanceRecorder:
                 "scale": attempt.scale.as_dict(),
                 "sql": attempt.sql,
                 "samples_seconds": {
-                    role.value: list(values)
-                    for role, values in attempt.samples_seconds.items()
+                    role.value: list(values) for role, values in attempt.samples_seconds.items()
                 },
                 "failure_categories": {
-                    role.value: list(values)
-                    for role, values in attempt.failure_categories.items()
+                    role.value: list(values) for role, values in attempt.failure_categories.items()
                 },
             }
             for attempt in attempt_items
@@ -221,35 +296,64 @@ class PerformanceRecorder:
             "failure_role": None if failure is None else failure.role.value,
             "error_code": None if failure is None else failure.error_code,
             "error_type": None if failure is None else failure.error_type,
+            "database": None if failure is None else failure.database,
+            "failing_action_sql": (None if failure is None else failure.failing_action_sql),
+            "failure_details": (
+                {} if failure is None else _artifact_value(failure.failure_details)
+            ),
             "scale": (
-                None
-                if failure is None or failure.scale is None
-                else failure.scale.as_dict()
+                None if failure is None or failure.scale is None else failure.scale.as_dict()
             ),
             "sql": None if failure is None else failure.sql,
-            "data_manifest": (
-                None if data_manifest is None else _artifact_value(data_manifest)
-            ),
+            "data_manifest": (None if data_manifest is None else _compact_manifest(data_manifest)),
             "node_config_fingerprints": {
                 role.value: self._node_config_fingerprints[role] for role in NodeRole
             },
             "calibration": calibration,
             "cache_state": "unverified",
+            "replica_parameters_sha256": self._replica_parameters_sha256,
         }
         self._records.append(record)
+        if self._sql_root is not None and failure is not None:
+            statements = self._setup_statements(data_manifest)
+            if statements and failure.sql:
+                failure_root = self._sql_root / "performance_failures" / str(case_id)
+                write_minimal_failure_script(
+                    failure_root / "case.sql",
+                    database=failure.database or "sf_performance_failure",
+                    setup_statements=statements,
+                    failing_query=failure.sql,
+                    metadata={
+                        "case_id": str(case_id),
+                        "run_id": self._run_id,
+                        "verdict": failure.kind.value,
+                        "replica_parameters_sha256": self._replica_parameters_sha256,
+                    },
+                )
+                write_difference_summary(
+                    failure_root / "case.diff",
+                    {
+                        "case_id": str(case_id),
+                        "error_type": failure.error_type,
+                        "failure_category": failure.kind.value,
+                        "failure_role": failure.role.value,
+                        "database": failure.database,
+                        "failing_action_sql": failure.failing_action_sql,
+                        "failure_details": _artifact_value(failure.failure_details),
+                        "replica_parameters_sha256": self._replica_parameters_sha256,
+                    },
+                )
         if self._diagnostics is not None:
             files = {
-                "calibration.json": json.dumps(
-                    calibration, sort_keys=True, allow_nan=False
-                ).encode("utf-8")
+                "calibration.json": json.dumps(calibration, sort_keys=True, allow_nan=False).encode(
+                    "utf-8"
+                )
             }
             if data_manifest is not None:
                 files["setup/manifest.json"] = json.dumps(
                     record["data_manifest"], sort_keys=True, allow_nan=False
                 ).encode("utf-8")
-            self._diagnostics.write(
-                f"{case_id}_attempt_{attempt_number}", record, files
-            )
+            self._diagnostics.write(f"{case_id}_attempt_{attempt_number}", record, files)
 
 
 _CASE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,190}$")

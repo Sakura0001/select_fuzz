@@ -40,8 +40,7 @@ def assess(
         label
         for role, label in comparisons
         if measurements[role].root_end_ms is not None
-        and custom_on.root_end_ms
-        >= measurements[role].root_end_ms * (1 + threshold)  # type: ignore[operator]
+        and custom_on.root_end_ms >= measurements[role].root_end_ms * (1 + threshold)  # type: ignore[operator]
     )
     return Assessment(Verdict.PERF_ALERT if reasons else Verdict.PASS, reasons)
 

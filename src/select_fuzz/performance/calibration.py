@@ -70,6 +70,9 @@ class CalibrationTerminated(RuntimeError):
         scale: ScaleKnobs | None = None,
         sql: str | None = None,
         data_manifest: object | None = None,
+        database: str | None = None,
+        failing_action_sql: str | None = None,
+        failure_details: Mapping[str, object] | None = None,
     ) -> None:
         super().__init__(f"calibration {kind.value} on {role.value}")
         self.kind = kind
@@ -80,6 +83,9 @@ class CalibrationTerminated(RuntimeError):
         self.scale = scale
         self.sql = sql
         self.data_manifest = data_manifest
+        self.database = database
+        self.failing_action_sql = failing_action_sql
+        self.failure_details = {} if failure_details is None else dict(failure_details)
 
 
 class CalibrationInfrastructurePause(CalibrationTerminated):
@@ -240,9 +246,7 @@ class CostModel:
     ) -> ScaleKnobs:
         if set(plans) != set(REFERENCE_ROLES):
             raise ValueError("cost model requires both reference plans")
-        observed = max(
-            plan.estimated_work(template.driver_family) for plan in plans.values()
-        )
+        observed = max(plan.estimated_work(template.driver_family) for plan in plans.values())
         if observed <= 0:
             raise PlanParseError("estimated driver work must be positive")
         factor = min(8.0, max(0.25, template.target_rows(initial) / observed))
@@ -289,6 +293,9 @@ class CalibrationEngine:
                 scale=initial,
                 sql=initial_sql,
                 data_manifest=initial_manifest,
+                database=database,
+                failing_action_sql=error.sql,
+                failure_details=error.details,
             ) from error
         except MaterializationExecutionFailure as error:
             raise CalibrationTerminated(
@@ -298,6 +305,9 @@ class CalibrationEngine:
                 scale=initial,
                 sql=initial_sql,
                 data_manifest=initial_manifest,
+                database=database,
+                failing_action_sql=error.sql,
+                failure_details=error.details,
             ) from error
         except MaterializationInfrastructureFailure as error:
             raise CalibrationInfrastructurePause(
@@ -307,6 +317,9 @@ class CalibrationEngine:
                 scale=initial,
                 sql=initial_sql,
                 data_manifest=initial_manifest,
+                database=database,
+                failing_action_sql=error.sql,
+                failure_details=error.details,
             ) from error
         except MaterializationMismatch as error:
             raise CalibrationTerminated(
@@ -316,6 +329,9 @@ class CalibrationEngine:
                 scale=initial,
                 sql=initial_sql,
                 data_manifest=initial_manifest,
+                database=error.database or database,
+                failing_action_sql=error.sql,
+                failure_details=error.details,
             ) from error
         except Exception as error:
             raise CalibrationInfrastructurePause(
@@ -325,6 +341,7 @@ class CalibrationEngine:
                 scale=initial,
                 sql=initial_sql,
                 data_manifest=initial_manifest,
+                database=database,
             ) from error
         try:
             plans = {
@@ -348,12 +365,19 @@ class CalibrationEngine:
                 scale=initial,
                 sql=initial_sql,
                 data_manifest=initial_manifest,
+                database=database,
+                failing_action_sql=error.failing_action_sql,
+                failure_details=error.failure_details,
             ) from error
         except PlanParseError as error:
             raise CalibrationTerminated(
                 CalibrationFailureKind.PARSE,
                 NodeRole.BASELINE,
                 error_type=type(error).__name__,
+                scale=initial,
+                sql=initial_sql,
+                data_manifest=initial_manifest,
+                database=database,
             ) from error
         for role, plan in plans.items():
             try:
@@ -366,6 +390,7 @@ class CalibrationEngine:
                     scale=initial,
                     sql=initial_sql,
                     data_manifest=initial_manifest,
+                    database=database,
                 ) from error
         try:
             scale = self._cost_model.seed_scale(template, initial, plans)
@@ -377,7 +402,10 @@ class CalibrationEngine:
                 scale=initial,
                 sql=initial_sql,
                 data_manifest=initial_manifest,
+                database=database,
             ) from error
+        if scale.table_rows < initial.table_rows:
+            scale = initial
 
         attempts: list[CalibrationAttempt] = []
         lower, upper = self._policy.calibration_band_seconds
@@ -386,27 +414,19 @@ class CalibrationEngine:
             if number > 1 or scale != initial:
                 try:
                     self._materializer.rebuild_all(database, manifest)
-                except MaterializationTimeout:
-                    attempts.append(
-                        CalibrationAttempt(
-                            number=number,
-                            scale=scale,
-                            sql=template.render(scale),
-                            samples_seconds={
-                                role: (None,) for role in REFERENCE_ROLES
-                            },
-                            medians_seconds={},
-                            failure_categories={
-                                role: (CalibrationFailureKind.TIMEOUT.value,)
-                                for role in REFERENCE_ROLES
-                            },
-                        )
-                    )
-                    scale = scale.scaled(
-                        1 / self._policy.scale_multiplier,
-                        row_cap=self._policy.max_table_rows,
-                    )
-                    continue
+                except MaterializationTimeout as error:
+                    raise CalibrationTerminated(
+                        CalibrationFailureKind.TIMEOUT,
+                        error.role,
+                        error_type=error.error_type,
+                        attempts=tuple(attempts),
+                        scale=scale,
+                        sql=template.render(scale),
+                        data_manifest=manifest,
+                        database=database,
+                        failing_action_sql=error.sql,
+                        failure_details=error.details,
+                    ) from error
                 except MaterializationExecutionFailure as error:
                     raise CalibrationTerminated(
                         CalibrationFailureKind.EXECUTION,
@@ -416,6 +436,9 @@ class CalibrationEngine:
                         scale=scale,
                         sql=template.render(scale),
                         data_manifest=manifest,
+                        database=database,
+                        failing_action_sql=error.sql,
+                        failure_details=error.details,
                     ) from error
                 except MaterializationInfrastructureFailure as error:
                     raise CalibrationInfrastructurePause(
@@ -426,6 +449,9 @@ class CalibrationEngine:
                         scale=scale,
                         sql=template.render(scale),
                         data_manifest=manifest,
+                        database=database,
+                        failing_action_sql=error.sql,
+                        failure_details=error.details,
                     ) from error
                 except MaterializationMismatch as error:
                     raise CalibrationTerminated(
@@ -436,6 +462,9 @@ class CalibrationEngine:
                         scale=scale,
                         sql=template.render(scale),
                         data_manifest=manifest,
+                        database=error.database or database,
+                        failing_action_sql=error.sql,
+                        failure_details=error.details,
                     ) from error
                 except Exception as error:
                     raise CalibrationInfrastructurePause(
@@ -446,14 +475,11 @@ class CalibrationEngine:
                         scale=scale,
                         sql=template.render(scale),
                         data_manifest=manifest,
+                        database=database,
                     ) from error
             sql = template.render(scale)
-            samples: dict[NodeRole, list[float | None]] = {
-                role: [] for role in REFERENCE_ROLES
-            }
-            failures: dict[NodeRole, list[str | None]] = {
-                role: [] for role in REFERENCE_ROLES
-            }
+            samples: dict[NodeRole, list[float | None]] = {role: [] for role in REFERENCE_ROLES}
+            failures: dict[NodeRole, list[str | None]] = {role: [] for role in REFERENCE_ROLES}
             candidate_timed_out = False
             for _ in range(self._policy.calibration_runs_per_reference):
                 for role in REFERENCE_ROLES:
@@ -480,6 +506,9 @@ class CalibrationEngine:
                             scale=scale,
                             sql=sql,
                             data_manifest=manifest,
+                            database=database,
+                            failing_action_sql=error.failing_action_sql,
+                            failure_details=error.failure_details,
                         ) from error
                     samples[role].append(observation.seconds)
                     failures[role].append(
@@ -497,9 +526,7 @@ class CalibrationEngine:
                 sql=sql,
                 samples_seconds={role: tuple(values) for role, values in samples.items()},
                 medians_seconds=medians,
-                failure_categories={
-                    role: tuple(values) for role, values in failures.items()
-                },
+                failure_categories={role: tuple(values) for role, values in failures.items()},
             )
             attempts.append(attempt)
             if len(medians) == 2 and all(lower <= value <= upper for value in medians.values()):
@@ -515,27 +542,25 @@ class CalibrationEngine:
                     medians_seconds=medians,
                     attempts=tuple(attempts),
                 )
-            if len(medians) == 2 and min(medians.values()) < lower < upper < max(
-                medians.values()
-            ):
+            if len(medians) == 2 and min(medians.values()) < lower < upper < max(medians.values()):
                 raise CalibrationDivergence(tuple(attempts))
             timed_out = candidate_timed_out or any(
                 category == CalibrationFailureKind.TIMEOUT.value
                 for categories in failures.values()
                 for category in categories
             )
-            factor = (
-                1 / self._policy.scale_multiplier
-                if timed_out or (medians and max(medians.values()) > upper)
-                else self._policy.scale_multiplier
+            if timed_out or (medians and max(medians.values()) > upper):
+                # The random initial volume is a floor. Slow/timeout cases are
+                # unsuitable for this lane and are resampled by the service.
+                raise CalibrationExhausted(tuple(attempts))
+            scale = scale.scaled(
+                self._policy.scale_multiplier,
+                row_cap=self._policy.max_table_rows,
             )
-            scale = scale.scaled(factor, row_cap=self._policy.max_table_rows)
         raise CalibrationExhausted(tuple(attempts))
 
     @staticmethod
-    def _observe(
-        execution: NodeExecution, boundary: ShapeBoundary
-    ) -> _Observation:
+    def _observe(execution: NodeExecution, boundary: ShapeBoundary) -> _Observation:
         outcome = classify_execution(execution)
         if outcome is Outcome.TIMEOUT:
             return _Observation(None, CalibrationFailureKind.TIMEOUT)
@@ -544,8 +569,7 @@ class CalibrationEngine:
                 CalibrationFailureKind.INFRA,
                 execution.role,
                 error_code=None if execution.error is None else execution.error.errno,
-                error_type=execution.watchdog_error_type
-                or "MySQLInfrastructureError",
+                error_type=execution.watchdog_error_type or "MySQLInfrastructureError",
             )
         if outcome is not Outcome.COMPLETED:
             raise CalibrationTerminated(

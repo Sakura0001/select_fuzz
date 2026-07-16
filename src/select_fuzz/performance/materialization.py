@@ -29,13 +29,35 @@ class MaterializationEvidence:
 
 
 class MaterializationMismatch(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        database: str | None = None,
+        sql: str | None = None,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        self.database = database
+        self.sql = sql
+        self.details = {} if details is None else dict(details)
+        super().__init__(message)
 
 
 class MaterializationFailure(RuntimeError):
-    def __init__(self, role: NodeRole, error_type: str) -> None:
+    def __init__(
+        self,
+        role: NodeRole,
+        error_type: str,
+        *,
+        database: str | None = None,
+        sql: str | None = None,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
         self.role = role
         self.error_type = error_type
+        self.database = database
+        self.sql = sql
+        self.details = {} if details is None else dict(details)
         super().__init__(f"materialization failed on {role.value}: {error_type}")
 
 
@@ -66,12 +88,42 @@ class ScaleMaterializer:
     ) -> Mapping[NodeRole, MaterializationEvidence]:
         if not database:
             raise ValueError("database must not be empty")
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-perf-setup") as pool:
-            futures = {
-                role: pool.submit(self._port.materialize, role, database, manifest)
-                for role in NodeRole
-            }
-            evidence = {role: futures[role].result() for role in NodeRole}
+        prepare = getattr(self._port, "prepare", None)
+        prepare_all = getattr(self._port, "prepare_all", None)
+        synchronize = getattr(self._port, "synchronize", None)
+        collect_evidence = getattr(self._port, "evidence", None)
+        if (
+            callable(synchronize)
+            and callable(collect_evidence)
+            and (callable(prepare_all) or callable(prepare))
+        ):
+            if callable(prepare_all):
+                prepare_all(database, manifest)
+            else:
+                if not callable(prepare):  # pragma: no cover - guarded above
+                    raise AssertionError("phased materializer is missing prepare")
+                with ThreadPoolExecutor(
+                    max_workers=3, thread_name_prefix="sf-perf-prepare"
+                ) as pool:
+                    futures = {
+                        role: pool.submit(prepare, role, database, manifest) for role in NodeRole
+                    }
+                    for role in NodeRole:
+                        futures[role].result()
+            synchronize(database, manifest)
+            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-perf-evidence") as pool:
+                futures = {
+                    role: pool.submit(collect_evidence, role, database, manifest)
+                    for role in NodeRole
+                }
+                evidence = {role: futures[role].result() for role in NodeRole}
+        else:
+            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-perf-setup") as pool:
+                futures = {
+                    role: pool.submit(self._port.materialize, role, database, manifest)
+                    for role in NodeRole
+                }
+                evidence = {role: futures[role].result() for role in NodeRole}
         identities = {
             (
                 item.schema_digest,
@@ -82,7 +134,18 @@ class ScaleMaterializer:
         }
         if len(identities) != 1:
             raise MaterializationMismatch(
-                "three-node schema, row-count, or content evidence differs"
+                "three-node schema, row-count, or content evidence differs",
+                database=database,
+                details={
+                    "evidence_by_role": {
+                        role.value: {
+                            "content_digest": evidence[role].content_digest,
+                            "row_counts": dict(evidence[role].row_counts),
+                            "schema_digest": evidence[role].schema_digest,
+                        }
+                        for role in NodeRole
+                    }
+                },
             )
         return MappingProxyType(evidence)
 

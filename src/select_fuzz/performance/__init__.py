@@ -25,6 +25,7 @@ from select_fuzz.performance.models import (
 )
 from select_fuzz.performance.oracle import assess
 from select_fuzz.performance.service import PerformanceService
+from select_fuzz.performance.shared_round import SharedRoundCasePreparer
 from select_fuzz.performance.templates import (
     CpuDenseGroupSortTemplate,
     CpuDenseJoinTemplate,
@@ -69,6 +70,7 @@ __all__ = [
     "PlanParseError",
     "ReferenceAnalyzer",
     "ScaleKnobs",
+    "SharedRoundCasePreparer",
     "ShapeBoundary",
     "TreeNode",
     "TreePlan",

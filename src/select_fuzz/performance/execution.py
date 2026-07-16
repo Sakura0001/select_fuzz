@@ -149,14 +149,10 @@ class FormalRunner:
                     diagnostic_error = type(error).__name__
             if diagnostic_error is not None:
                 diagnostic_payload["diagnostics_error"] = diagnostic_error
-            return self.measure(
-                raw, frozen, self._policy, diagnostic_payload=diagnostic_payload
-            )
+            return self.measure(raw, frozen, self._policy, diagnostic_payload=diagnostic_payload)
 
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-perf-formal") as pool:
-            futures = {
-                node.role: pool.submit(one, node, barrier) for node in self._nodes
-            }
+            futures = {node.role: pool.submit(one, node, barrier) for node in self._nodes}
             measurements = {role: futures[role].result() for role in futures}
         starts = [measurements[role].started_ns for role in NodeRole]
         return FormalRun(

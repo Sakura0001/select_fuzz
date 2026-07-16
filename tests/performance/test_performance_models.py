@@ -6,7 +6,7 @@ from select_fuzz.config import PerformanceConfig
 from select_fuzz.performance.models import PerformancePolicy, ScaleKnobs
 
 
-def test_policy_defaults_are_the_frozen_cpu_dense_contract() -> None:
+def test_policy_defaults_are_the_seeded_fuzz_contract() -> None:
     policy = PerformancePolicy()
 
     assert policy.worker_count == 1
@@ -15,7 +15,7 @@ def test_policy_defaults_are_the_frozen_cpu_dense_contract() -> None:
     assert policy.formal_timeout_seconds == 15.0
     assert policy.regression_threshold == 0.20
     assert policy.max_start_skew_ms == 100.0
-    assert policy.workload_kind == "cpu_dense"
+    assert policy.workload_kind == "seeded_fuzz"
     assert policy.cache_state == "unverified"
 
 

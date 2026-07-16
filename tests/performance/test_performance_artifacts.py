@@ -22,6 +22,7 @@ from select_fuzz.performance.models import (
     ScaleKnobs,
     Verdict,
 )
+from select_fuzz.performance.templates import CpuDenseSetupManifest
 from select_fuzz.performance.tree import Family, ShapeBoundary
 
 
@@ -45,6 +46,68 @@ class _Diagnostics:
         self.case_id = case_id
         self.manifest = manifest
         self.files = dict(files)  # type: ignore[arg-type]
+
+
+def _completed_formal_run() -> FormalRun:
+    return FormalRun(
+        measurements={
+            role: Measurement(
+                role=role,
+                outcome=Outcome.COMPLETED,
+                started_ns=1,
+                ended_ns=2,
+                connection_id=10,
+                root_end_ms=1.0,
+                tree="-> Table scan on pf_t0 (actual time=0..1 rows=1 loops=1)",
+                cache_state="unverified",
+            )
+            for role in NodeRole
+        },
+        start_skew_ms=0.0,
+    )
+
+
+def test_round_sql_contains_one_setup_and_multiple_explain_analyze_queries(
+    tmp_path: Path,
+) -> None:
+    manifest = CpuDenseSetupManifest(
+        "shared",
+        7,
+        1,
+        (
+            "CREATE TABLE pf_t0 (id BIGINT PRIMARY KEY)",
+            "INSERT INTO pf_t0 VALUES (1)",
+        ),
+    )
+    recorder = PerformanceRecorder(
+        _Records(),
+        run_id="run-shared-round",
+        node_config_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        sql_root=tmp_path,
+    )
+    for number in (1, 2):
+        frozen = FrozenCase(
+            case_id=f"case_{number}",
+            template_id="shared_query_v1",
+            seed=number,
+            database="sf_performance_shared_1",
+            scale=ScaleKnobs(),
+            data_manifest=manifest,
+            sql=f"SELECT {number} FROM pf_t0",
+            boundary=ShapeBoundary(frozenset({Family.SCAN})),
+            medians_seconds={},
+            attempts=(),
+        )
+        recorder.record(frozen, _completed_formal_run(), Assessment(Verdict.PASS))
+
+    scripts = list((tmp_path / "rounds").glob("*.sql"))
+    assert [script.name for script in scripts] == ["sf_performance_shared_1.sql"]
+    sql = scripts[0].read_text(encoding="utf-8")
+    assert sql.count("CREATE TABLE pf_t0") == 1
+    assert sql.count("INSERT INTO pf_t0 VALUES (1)") == 1
+    assert sql.count("EXPLAIN ANALYZE FORMAT=TREE SELECT") == 2
+    assert "EXPLAIN ANALYZE FORMAT=TREE SELECT 1 FROM pf_t0;" in sql
+    assert "EXPLAIN ANALYZE FORMAT=TREE SELECT 2 FROM pf_t0;" in sql
 
 
 def test_alert_artifact_contains_every_input_needed_to_rebuild_and_diagnose() -> None:
@@ -102,9 +165,7 @@ def test_alert_artifact_contains_every_input_needed_to_rebuild_and_diagnose() ->
         now=lambda: "2026-07-13T00:00:00Z",
     )
 
-    record = recorder.record(
-        frozen, run, Assessment(Verdict.PERF_ALERT, ("VS_BASELINE",))
-    )
+    record = recorder.record(frozen, run, Assessment(Verdict.PERF_ALERT, ("VS_BASELINE",)))
 
     assert record["template_id"] == "cpu_scan_v1"
     assert record["run_id"] == "run-perf-1"
@@ -127,13 +188,17 @@ def test_alert_artifact_contains_every_input_needed_to_rebuild_and_diagnose() ->
     }
 
 
-def test_calibration_failure_record_keeps_classification_and_reproduction() -> None:
+def test_calibration_failure_record_keeps_classification_and_reproduction(
+    tmp_path: Path,
+) -> None:
     records, diagnostics = _Records(), _Diagnostics()
     recorder = PerformanceRecorder(
         records,
         diagnostics,
         run_id="run-perf-2",
         node_config_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        sql_root=tmp_path,
+        replica_parameters_sha256="b" * 64,
         now=lambda: "2026-07-13T00:00:01Z",
     )
     failure = CalibrationTerminated(
@@ -142,8 +207,22 @@ def test_calibration_failure_record_keeps_classification_and_reproduction() -> N
         error_type="PlanParseError",
         scale=ScaleKnobs(table_rows=123),
         sql="SELECT SUM(v) FROM cpu_data",
-        data_manifest={
-            "setup_statements": ["CREATE TABLE cpu_data(id BIGINT)", "INSERT INTO cpu_data VALUES(1)"]
+        data_manifest=CpuDenseSetupManifest(
+            "test",
+            1,
+            1,
+            (
+                "CREATE TABLE cpu_data(id BIGINT)",
+                "INSERT INTO cpu_data VALUES(1)",
+            ),
+        ),
+        database="sf_performance_real_failure_1",
+        failing_action_sql="INSERT INTO cpu_data VALUES(1)",
+        failure_details={
+            "node_results": {
+                "baseline": {"status": "success", "affected_rows": 1},
+                "custom_on": {"status": "error", "affected_rows": None},
+            }
         },
     )
 
@@ -163,6 +242,11 @@ def test_calibration_failure_record_keeps_classification_and_reproduction() -> N
     assert record["run_id"] == "run-perf-2"  # type: ignore[index]
     assert record["occurred_at"] == "2026-07-13T00:00:01Z"  # type: ignore[index]
     assert record["diagnostic_attempt"] == 2  # type: ignore[index]
+    assert record["database"] == "sf_performance_real_failure_1"  # type: ignore[index]
+    assert record["failing_action_sql"] == "INSERT INTO cpu_data VALUES(1)"  # type: ignore[index]
+    assert record["replica_parameters_sha256"] == "b" * 64  # type: ignore[index]
+    script = tmp_path / "performance_failures" / "bad_1" / "case.sql"
+    assert "sf_performance_real_failure_1" in script.read_text(encoding="utf-8")
     assert diagnostics.case_ids == ["bad_1_attempt_2"]
     assert diagnostics.files.keys() >= {"setup/manifest.json", "calibration.json"}
 

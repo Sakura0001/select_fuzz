@@ -26,9 +26,7 @@ STATUS_NAMES = (
 )
 
 
-def metric_delta(
-    before: Mapping[str, int], after: Mapping[str, int]
-) -> dict[str, int]:
+def metric_delta(before: Mapping[str, int], after: Mapping[str, int]) -> dict[str, int]:
     return {name: after.get(name, 0) - before.get(name, 0) for name in STATUS_NAMES}
 
 
@@ -114,14 +112,16 @@ class MySQLDiagnosticsCollector:
         if connection_id is not None:
             try:
                 with self._factory.control_session(node, database) as session:
-                    rows = _fetch_all(
-                        session, PFS_SQL.format(connection_id=int(connection_id))
-                    )
+                    rows = _fetch_all(session, PFS_SQL.format(connection_id=int(connection_id)))
                 if rows:
                     row = rows[0]
                     names = (
-                        "timer_wait_ms", "lock_time_ms", "rows_examined", "rows_sent",
-                        "created_tmp_disk_tables", "no_index_used",
+                        "timer_wait_ms",
+                        "lock_time_ms",
+                        "rows_examined",
+                        "rows_sent",
+                        "created_tmp_disk_tables",
+                        "no_index_used",
                     )
                     pfs = {name: row[index] for index, name in enumerate(names) if index < len(row)}
             except Exception as error:

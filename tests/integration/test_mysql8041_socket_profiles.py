@@ -80,8 +80,7 @@ def test_every_schema_profile_and_generated_query_on_three_exact_8041_sockets() 
                 (
                     spec
                     for spec in catalog
-                    if spec.evidence_lock_ready
-                    and profile.value in spec.compatible_profiles
+                    if spec.evidence_lock_ready and profile.value in spec.compatible_profiles
                 ),
                 key=lambda spec: spec.feature_id,
             )
@@ -91,9 +90,7 @@ def test_every_schema_profile_and_generated_query_on_three_exact_8041_sockets() 
                     target=query_targets[0],
                     seed=804300 + ordinal,
                     lane=QueryLane.VALID,
-                    estimated_rows_by_table={
-                        table.name: 8 for table in schema.tables
-                    },
+                    estimated_rows_by_table={table.name: 8 for table in schema.tables},
                 ).sql
                 if query_targets
                 else f"SELECT COUNT(*) FROM `{schema.tables[0].name}` ORDER BY 1"
@@ -154,9 +151,7 @@ def test_every_cpu_dense_template_parses_on_three_exact_8041_sockets() -> None:
                 cursor.execute(f"EXPLAIN ANALYZE FORMAT=TREE {template.render(scale)}")
                 row = cursor.fetchone()
                 assert row is not None and isinstance(row[0], str)
-                template.boundary.validate(
-                    parse_tree(row[0], completed=True), "socket_smoke"
-                )
+                template.boundary.validate(parse_tree(row[0], completed=True), "socket_smoke")
                 trees.append(row[0])
                 cursor.close()
             assert len(trees) == 3
@@ -171,9 +166,7 @@ def test_every_evidence_ready_query_variant_executes_on_three_exact_8041_sockets
     sockets = _sockets()
     query_generator = QueryGenerator()
     targets = tuple(
-        target
-        for target in query_generator.feature_catalog()
-        if target.evidence_lock_ready
+        target for target in query_generator.feature_catalog() if target.evidence_lock_ready
     )
     schema_generator = SchemaGenerator()
     setup_builder = SetupBundleBuilder()
@@ -197,9 +190,7 @@ def test_every_evidence_ready_query_variant_executes_on_three_exact_8041_sockets
                         target=target,
                         seed=seed + 2,
                         lane=QueryLane.VALID,
-                        estimated_rows_by_table={
-                            table.name: 8 for table in schema.tables
-                        },
+                        estimated_rows_by_table={table.name: 8 for table in schema.tables},
                     )
                 except TargetNotReachable:
                     continue
@@ -231,9 +222,7 @@ def test_every_evidence_ready_query_variant_executes_on_three_exact_8041_sockets
 def test_online_gap_directed_variants_execute_on_three_exact_8041_sockets() -> None:
     sockets = _sockets()
     query_generator = QueryGenerator()
-    targets = {
-        target.feature_id: target for target in query_generator.feature_catalog()
-    }
+    targets = {target.feature_id: target for target in query_generator.feature_catalog()}
     requested = (
         ("select_query_specification", "scalar_aggregate"),
         ("join_outer_natural", "left"),
@@ -243,7 +232,7 @@ def test_online_gap_directed_variants_execute_on_three_exact_8041_sockets() -> N
         ("subquery_result_kinds", "scalar_limit"),
         ("subquery_result_kinds", "table_limit"),
         ("grouping_with_rollup", "scalar_rollup"),
-        ("set_branch_local_top_n", "branch_local_top_n"),
+        ("set_branch_local_top_n", "table_branch_local_top_n"),
         ("set_branch_local_top_n", "scalar_branch_local_top_n"),
         ("select_nested_parenthesized_top_n", "nested_parenthesized_top_n"),
         ("table_explicit", "table_only"),
@@ -270,21 +259,28 @@ def test_online_gap_directed_variants_execute_on_three_exact_8041_sockets() -> N
             target = targets[feature_id]
             if not target.evidence_lock_ready:
                 continue
-            seed = 8_042_000 + ordinal
-            schema = schema_generator.generate(
-                target,
-                seed=seed,
-                limits=SchemaLimits(max_tables=3, max_columns=7),
-            )
+            for attempt in range(32):
+                seed = 8_042_000 + ordinal * 32 + attempt
+                schema = schema_generator.generate(
+                    target,
+                    seed=seed,
+                    limits=SchemaLimits(max_tables=3, max_columns=7),
+                )
+                try:
+                    generated = query_generator.generate(
+                        schema,
+                        target=target,
+                        seed=seed + 2,
+                        lane=QueryLane.VALID,
+                        directed_variant=directed_variant,
+                        estimated_rows_by_table={table.name: 8 for table in schema.tables},
+                    )
+                except TargetNotReachable:
+                    continue
+                break
+            else:
+                pytest.fail(f"no reachable schema for {feature_id}:{directed_variant}")
             bundle = setup_builder.build(schema, seed=seed + 1, rows_per_table=8)
-            generated = query_generator.generate(
-                schema,
-                target=target,
-                seed=seed + 2,
-                lane=QueryLane.VALID,
-                directed_variant=directed_variant,
-                estimated_rows_by_table={table.name: 8 for table in schema.tables},
-            )
             database = f"sf_gap_shapes_{ordinal}_{time.time_ns():x}"[-64:]
             outcomes: list[tuple[tuple[object, ...], ...]] = []
             for connection in connections:
@@ -299,7 +295,7 @@ def test_online_gap_directed_variants_execute_on_three_exact_8041_sockets() -> N
             assert outcomes[0] == outcomes[1] == outcomes[2], directed_variant
             executed.add(directed_variant)
         assert "scalar_aggregate" in executed
-        assert "branch_local_top_n" in executed
+        assert "table_branch_local_top_n" in executed
         assert "left_subquery" in executed
         assert "inner_subquery" in executed
         assert "table_only" in executed

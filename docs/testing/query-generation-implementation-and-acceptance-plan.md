@@ -20,23 +20,23 @@
 ## 2. 当前检查结论
 
 本轮按用户新增的“每次验证约 3 分钟，并且程序在该批次内实际触发并完成任务”约束，
-将原定长跑改为可重复的短批次。当前重点事项已完成实际闭环，尚需保留的扩大验证项
-仅限函数完整值域，以及将本轮提交合并回 `main`：
+将原定长跑改为可重复的短批次。当前重点事项均已完成实际闭环：
 
 1. NOT EXISTS/NOT IN 的空、单行、多行、outer nullable、inner nullable、双方 nullable 和嵌套矩阵已闭环。
 2. 当前 grammar 可达的全部合法 frame-bound 组合已逐项做成三节点见证；MySQL 8.0.41 不支持的语法继续 fail-closed。
 3. optimizer hint 已形成正向/负向生成矩阵，并完成正向三节点执行和负向生成拒绝。
-4. 函数注册表 335 个基础/NULL witness 与精确 error contract 已在当前工作树重跑通过；完整值域穷举仍属于扩大验证项。
+4. 函数注册表 335 个 witness 已在 normal、boundary、special 三个值域 profile 下通过，
+   共 1005 条当前 grammar SQL；warning contract 已登记并精确验证。
 5. 最新 grammar 已完成两轮、200 条查询、约 3 分钟上限内的三节点随机批次，0 个未归因 finding。
 6. 本轮新生成的定向 artifact 已保留，之前中断的长跑诊断产物移入明确归档目录。
-7. 当前 P0/P1 修改、测试和文档待按主题提交并合并回 `main`。
+7. 当前 P0/P1 修改、测试和文档已按主题提交并合并回 `main`；临时 codex 分支已删除。
 
 当前已有的本地验证结果：
 
-- 全量 pytest：`1778 passed, 20 skipped`。
+- 全量 pytest：`1779 passed, 20 skipped`。
 - Ruff：通过。
-- 三节点定向 acceptance：anti 12 条、frame 25 条、hint 11 条、函数 335 条，全部通过。
-- 最新 grammar 短批次：`elapsed_seconds=81.506301`、2 轮、200 条查询、0 finding、5 个资源上限事件、1 个生成拒绝。
+- 三节点定向 acceptance：anti 12 条、frame 25 条、hint 11 条、函数 1005 条，全部通过。
+- 最新 grammar 短批次：`elapsed_seconds=80.605776`、2 轮、200 条查询、0 finding、5 个资源上限事件、1 个生成拒绝。
 - 三节点版本均为 MySQL `8.0.41`；短批次完整运行，满足“每次约 3 分钟且实际完成任务”的验证约束。
 
 上述结果不能替代本计划要求的所有三节点实际运行；未在当前工作树重新执行的历史 evidence 只能作为参考，不能直接标记新功能完成。
@@ -612,49 +612,58 @@
 
 要求：实际执行数学函数的正常值、边界值和 NULL 值。
 
-验收：每个 signature 至少一条正常值和每个声明 NULL 位置一条 NULL SQL。
+验收：每个 signature 在 normal、boundary profile 各至少一条实际 SQL，并对每个声明 NULL
+位置执行 NULL SQL；三节点结果和 warning contract 一致。
 
 ### 10.3 字符串/二进制函数值域
 
 要求：覆盖空串、ASCII、多字节、NUL、引号、反斜线和 binary input。
 
-验收：实际 SQL 成功执行；结果不出现未登记字符集 warning。
+验收：normal、boundary、special profile 均实际生成并执行；覆盖空串、ASCII、多字节、
+NUL、引号、反斜线和 binary input；结果不出现未登记字符集 warning。
 
 ### 10.4 temporal 函数值域
 
 要求：覆盖 DATE、TIME、DATETIME、TIMESTAMP 的正常值、边界值和 NULL。
 
-验收：三节点结果和类型元数据一致。
+验收：normal、boundary、special profile 的三节点结果和类型元数据一致。
 
 ### 10.5 控制流函数
 
 要求：覆盖 COALESCE、IF、IFNULL、NULLIF、GREATEST、LEAST 等。
 
-验收：至少覆盖 NULL 在每个参数位置的情况；结果符合手工 oracle。
+验收：每个声明 NULL 参数位置均有实际 SQL；normal、boundary、special 结果符合手工
+oracle，三节点一致。
 
 ### 10.6 编码和 hash 函数
 
 要求：覆盖 MD5、SHA1、SHA2、STATEMENT_DIGEST 等。
 
-验收：正常值无 warning；已知 `Warning 1583` 只在 `encoding_sha2_2_null_1` 出现。
+验收：三种 profile 的正常值无 warning；已知 `Warning 1583` 只在
+`encoding_sha2_2_null_1` 出现，并由 registry contract 精确登记。
 
 ### 10.7 IP 函数
 
 要求：覆盖 IPv4、IPv6 文本、数字和二进制输入。
 
-验收：合法输入成功；NULL 输入结果符合注册表声明；三节点一致。
+验收：三种 profile 的合法 IPv4/IPv6 文本、数字和二进制输入均成功；NULL 输入结果符合
+注册表声明；三节点一致。
 
 ### 10.8 函数错误契约
 
-要求：登记每个 signature 可能产生的错误、warning 或禁止值域。
+要求：登记每个 signature 可能产生的错误、warning 或禁止值域；无登记项的 profile 必须
+是无 warning、无 error 的 valid lane。
 
-验收：非预期 errno/SQLSTATE 阻塞当前函数；预期错误必须精确匹配。
+验收：非预期 errno/SQLSTATE 阻塞当前函数；预期 warning/error 必须精确匹配；当前
+registry 唯一 valid warning 为 SHA2 NULL 的 1583。
 
 ### 10.9 三节点 335 witness 全量重跑
 
-要求：在当前工作树重新执行所有 335 个函数 witness。
+要求：在当前工作树使用 canonical grammar 重新执行 335 个 witness 的 normal、boundary、
+special 三个 profile。
 
-验收：335 个 SQL 均有执行记录；warning、结果和错误身份三节点一致。
+验收：1005 条 SQL 均有执行记录、canonical grammar hash、SQL 和 production trace；warning、
+结果、列元数据和错误身份三节点一致。
 
 ## 11. 阶段 7：optimizer hint 正向/负向矩阵
 
@@ -732,8 +741,8 @@ uv run python scripts/run_mysql8041_socket_soak.py \
   --sockets /tmp/sf8041-b.sock,/tmp/sf8041-o.sock,/tmp/sf8041-n.sock \
   --duration-seconds 150 --max-rounds 2 --queries-per-round 100 --workers 1 \
   --seed 20260716 \
-  --artifact-root artifacts/latest-grammar-random-3m-20260716 \
-  --run-id latest-grammar-random-3m-20260716 --full-thread-sql-log
+  --artifact-root artifacts/latest-grammar-random-3m-final-20260716 \
+  --run-id latest-grammar-random-3m-final-20260716 --full-thread-sql-log
 ```
 
 验收：实际耗时不超过 180 秒；完成 2 个 round；artifact 记录 grammar hash、seed、
@@ -801,7 +810,7 @@ uv run python scripts/run_mysql8041_socket_soak.py \
 必须记录 grammar hash、节点版本和运行配置。
 
 验收：仅凭目录名和 metadata 即可定位运行来源；本轮最终 evidence 至少包括 anti、frame、
-hint 三个定向矩阵和一个 3 分钟随机批次。
+hint 三个定向矩阵、三个函数 profile 矩阵和一个 3 分钟随机批次。
 
 ### 13.3 checklist 状态更新
 
@@ -856,7 +865,7 @@ artifact: 可 replay
 - NOT EXISTS/NOT IN 矩阵闭环；
 - frame-bound 合法组合闭环；
 - optimizer hint 正反矩阵闭环；
-- 函数 335 witness 在当前工作树重新通过；
+- 函数 335 witness 的 normal/boundary/special 三个 profile（1005 条 SQL）在当前工作树重新通过；
 - 最新 grammar 三节点 3 分钟短批次完成，实际耗时不超过 180 秒；
 - 所有 error fingerprint 已归因；
 - 可避免错误已回灌；
@@ -879,8 +888,8 @@ artifact: 可 replay
 
 ## 15. 当前执行状态与实际证据
 
-计划状态：核心待办已按“单功能生成 → SQL 特征检查 → EXPLAIN → 三节点执行 → 结果/警告比较
-→ artifact → 下一功能”顺序完成；函数完整值域仍标记为扩大验证项。
+计划状态：全部核心待办已按“单功能生成 → SQL 特征检查 → EXPLAIN → 三节点执行 →
+结果/警告比较 → artifact → 下一功能”顺序完成。
 
 本轮实际证据：
 
@@ -890,9 +899,9 @@ artifact: 可 replay
 | 全部合法 numeric/temporal frame bound | 25 | 通过 | `artifacts/latest-grammar-frame-matrix-20260716/` |
 | optimizer hint 正向矩阵 | 11 | 通过 | `artifacts/latest-grammar-hint-matrix-20260716/` |
 | optimizer hint 负向矩阵 | 4 类 | 生成阶段拒绝 | `tests/generation/test_query_grammar.py` |
-| 函数 registry 基础/NULL/error witness | 335 | 通过 | `tests/integration/test_mysql8041_function_registry.py`、`test_mysql8041_error_contracts.py` |
-| 最新 grammar 3 分钟随机短批次 | 200 | 0 未归因 finding | `artifacts/latest-grammar-random-3m-20260716/` |
+| 函数 registry normal/boundary/special profile | 1005 | 通过 | `artifacts/latest-grammar-function-normal-20260716/`、`latest-grammar-function-boundary-20260716/`、`latest-grammar-function-special-20260716/` |
+| 最新 grammar 3 分钟随机短批次 | 200 | 0 未归因 finding | `artifacts/latest-grammar-random-3m-final-20260716/` |
 
 最终回归已实际执行：`ruff check src tests scripts` 通过；`uv run pytest -q` 为
-`1778 passed, 20 skipped, 1 warning`。之前中断的长跑只作为诊断记录，不作为本轮 3 分钟
+`1779 passed, 20 skipped, 1 warning`。之前中断的长跑只作为诊断记录，不作为本轮 3 分钟
 验收依据；其产物必须位于明确 archive 目录。

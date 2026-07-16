@@ -451,6 +451,7 @@ predicate:
     | expression NOT IN ( expression_list )
     | expression IN ( _membership_subquery )
     | expression NOT IN ( _membership_subquery )
+    | anti_membership_predicate
     | _prepare_membership_signature _membership_lhs IN ( typed_membership_subquery ) _clear_membership_signature
     | _prepare_membership_signature _membership_lhs NOT IN ( typed_membership_subquery ) _clear_membership_signature
     | _prepare_membership_signature _membership_lhs NOT IN ( nullable_membership_subquery ) _clear_membership_signature
@@ -478,6 +479,47 @@ predicate:
     | JSON_OVERLAPS ( _strict_json_column , _strict_json_column )
     | expression MEMBER OF ( _strict_json_column )
     | ST_ISVALID ( _strict_spatial_column )
+
+# The anti-subquery matrix is deliberately explicit.  These alternatives keep
+# cardinality and NULL semantics reproducible while still binding every inner
+# relation through the normal scope/table machinery.
+anti_membership_predicate:
+    1 NOT IN ( anti_empty_subquery )
+    | 1 NOT IN ( anti_single_membership_subquery )
+    | 1 NOT IN ( anti_multi_subquery )
+    | NULL NOT IN ( anti_single_membership_subquery )
+    | 1 NOT IN ( anti_nullable_subquery )
+    | NULL NOT IN ( anti_nullable_subquery )
+    | NOT EXISTS ( anti_empty_subquery )
+    | NOT EXISTS ( anti_single_exists_subquery )
+    | NOT EXISTS ( anti_multi_subquery )
+    | NOT EXISTS ( anti_nested_not_in_subquery )
+    | 1 NOT IN ( anti_nested_not_exists_subquery )
+    | ( 1 <> ALL ( anti_multi_subquery ) AND NOT EXISTS ( anti_empty_subquery ) )
+
+anti_empty_subquery:
+    _scope_begin _prepare_relation SELECT 1 AS _projection_alias FROM _emit_relation WHERE ( 1 = 0 ) _scope_end
+
+anti_single_subquery:
+    _scope_begin _prepare_relation SELECT 1 AS _projection_alias FROM _emit_relation LIMIT 1 _scope_end
+
+anti_single_membership_subquery:
+    _scope_begin _prepare_relation SELECT 1 AS _projection_alias FROM _emit_relation GROUP BY 1 _scope_end
+
+anti_single_exists_subquery:
+    anti_single_subquery
+
+anti_multi_subquery:
+    _scope_begin _prepare_relation SELECT 1 AS _projection_alias FROM _emit_relation _scope_end
+
+anti_nullable_subquery:
+    _scope_begin _prepare_relation SELECT NULL AS _projection_alias FROM _emit_relation _scope_end
+
+anti_nested_not_in_subquery:
+    _scope_begin _prepare_relation SELECT 1 AS _projection_alias FROM _emit_relation WHERE 1 NOT IN ( anti_nullable_subquery ) _scope_end
+
+anti_nested_not_exists_subquery:
+    _scope_begin _prepare_relation SELECT 1 AS _projection_alias FROM _emit_relation WHERE NOT EXISTS ( anti_empty_subquery ) _scope_end
 
 comparison_predicate:
     expression comparison_operator expression

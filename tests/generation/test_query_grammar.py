@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import re
+from pathlib import Path
 
 import pytest
 
@@ -111,6 +112,94 @@ relation:
 
     assert "/*+ NO_ICP(`r1`) */" in candidate.sql
     assert "NO_ICP()" not in candidate.sql
+
+
+def test_optimizer_hint_matrix_uses_real_primary_and_secondary_indexes() -> None:
+    schema = GrammarSchema(
+        (
+            GrammarTable(
+                "indexed",
+                (GrammarColumn("id", "BIGINT"), GrammarColumn("value", "INT")),
+                indexes=("PRIMARY", "idx_value"),
+            ),
+        )
+    )
+    for symbol, expected in (
+        ("_optimizer_hint_index_primary", "/*+ INDEX(`r1` `PRIMARY`) */"),
+        ("_optimizer_hint_index_secondary", "/*+ INDEX(`r1` `idx_value`) */"),
+        (
+            "_optimizer_hint_no_range",
+            "/*+ NO_RANGE_OPTIMIZATION(`r1` `idx_value`) */",
+        ),
+    ):
+        grammar = SelectGrammar.from_text(
+            f"""
+query:
+    _scope_begin _prepare_base_relation SELECT {symbol} 1 AS _projection_alias FROM _emit_relation _scope_end
+"""
+        )
+        candidate = GrammarQueryGenerator(grammar).generate(schema, seed=7)
+        assert expected in candidate.sql
+
+
+def test_optimizer_hint_negative_matrix_fails_closed_without_real_targets() -> None:
+    schema = GrammarSchema(
+        (
+            GrammarTable(
+                "plain",
+                (GrammarColumn("id", "BIGINT"), GrammarColumn("value", "INT")),
+            ),
+        )
+    )
+    for symbol in (
+        "_optimizer_hint_index_primary",
+        "_optimizer_hint_index_secondary",
+        "_optimizer_hint_no_range",
+    ):
+        grammar = SelectGrammar.from_text(
+            f"""
+query:
+    _scope_begin _prepare_base_relation SELECT {symbol} 1 AS _projection_alias FROM _emit_relation _scope_end
+"""
+        )
+        with pytest.raises(CandidateRejected):
+            GrammarQueryGenerator(grammar).generate(schema, seed=7)
+
+    single_table_hint = SelectGrammar.from_text(
+        """
+query:
+    _scope_begin _prepare_base_relation SELECT _optimizer_hint_join_order 1 AS _projection_alias FROM _emit_relation _scope_end
+"""
+    )
+    with pytest.raises(CandidateRejected):
+        GrammarQueryGenerator(single_table_hint).generate(schema, seed=7)
+
+    derived_hint = SelectGrammar.from_text(
+        """
+query:
+    _scope_begin _prepare_base_relation SELECT _optimizer_hint_merge 1 AS _projection_alias FROM _emit_relation _scope_end
+"""
+    )
+    with pytest.raises(CandidateRejected):
+        GrammarQueryGenerator(derived_hint).generate(schema, seed=7)
+
+
+def test_canonical_anti_matrix_is_explicit_and_unsupported_frame_syntax_is_absent() -> None:
+    grammar = SelectGrammar.from_path(
+        Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.41-select.grammar.yy"
+    )
+    anti = grammar.productions["anti_membership_predicate"]
+    assert len(anti.alternatives) == 12
+    assert {"anti_empty_subquery", "anti_nullable_subquery"}.issubset(
+        grammar.productions
+    )
+    grammar_text = (
+        Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.41-select.grammar.yy"
+    ).read_text(encoding="utf-8")
+    assert "GROUPS" not in grammar_text
+    assert "IGNORE NULLS" not in grammar_text
+    assert "FROM LAST" not in grammar_text
+    assert "EXCLUDE" not in grammar_text
 
 
 def test_generated_identifiers_are_bound_to_real_schema_or_derived_outputs() -> None:

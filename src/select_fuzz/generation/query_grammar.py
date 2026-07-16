@@ -439,6 +439,7 @@ class _QueryScope:
     outer_columns: list[_ColumnBinding] = field(default_factory=list)
     local_columns: list[_ColumnBinding] = field(default_factory=list)
     table_aliases: list[str] = field(default_factory=list)
+    table_indexes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     derived_aliases: list[str] = field(default_factory=list)
     projection_columns: list[GrammarColumn] = field(default_factory=list)
     output_columns: list[GrammarColumn] = field(default_factory=list)
@@ -1237,18 +1238,23 @@ class GrammarQueryGenerator:
         if symbol == "_recursive_limit":
             return str(context.rng.choice((2, 3, 5, 10)))
         if symbol == "_optimizer_hint":
-            aliases = context.scope.table_aliases
-            derived_aliases = context.scope.derived_aliases
-            if derived_aliases and context.rng.randrange(2) == 0:
-                alias = _quote_identifier(context.rng.choice(derived_aliases))
-                hint = context.rng.choice(("MERGE", "NO_MERGE", "DERIVED_CONDITION_PUSHDOWN"))
-                return f"/*+ {hint}({alias}) */"
-            if len(aliases) >= 2:
-                rendered = ", ".join(_quote_identifier(alias) for alias in aliases)
-                return f"/*+ JOIN_ORDER({rendered}) */"
-            if aliases:
-                return f"/*+ NO_ICP({_quote_identifier(aliases[0])}) */"
-            raise CandidateRejected("table optimizer hint requires a relation alias")
+            return self._optimizer_hint(context, kind="random")
+        if symbol == "_optimizer_hint_merge":
+            return self._optimizer_hint(context, kind="MERGE")
+        if symbol == "_optimizer_hint_no_merge":
+            return self._optimizer_hint(context, kind="NO_MERGE")
+        if symbol == "_optimizer_hint_derived_condition_pushdown":
+            return self._optimizer_hint(context, kind="DERIVED_CONDITION_PUSHDOWN")
+        if symbol == "_optimizer_hint_join_order":
+            return self._optimizer_hint(context, kind="JOIN_ORDER")
+        if symbol == "_optimizer_hint_index_primary":
+            return self._optimizer_hint(context, kind="INDEX_PRIMARY")
+        if symbol == "_optimizer_hint_index_secondary":
+            return self._optimizer_hint(context, kind="INDEX_SECONDARY")
+        if symbol == "_optimizer_hint_no_range":
+            return self._optimizer_hint(context, kind="NO_RANGE_OPTIMIZATION")
+        if symbol == "_optimizer_hint_no_icp":
+            return self._optimizer_hint(context, kind="NO_ICP")
         if symbol == "_int":
             context.scope.last_value_family = TypeFamily.NUMERIC
             return str(context.rng.choice((-2, -1, 0, 1, 2, 7, 42, 127, 255)))
@@ -1694,6 +1700,7 @@ class GrammarQueryGenerator:
         context.scope.local_columns.extend(
             _ColumnBinding(alias, column) for column in table.columns
         )
+        context.scope.table_indexes[alias] = tuple(table.indexes)
         partition_clause = ""
         if partitioned:
             width = context.rng.randint(1, min(2, len(table.partitions)))
@@ -1717,6 +1724,67 @@ class GrammarQueryGenerator:
             f"{_quote_identifier(table.name)}{partition_clause}"
             f"{alias_clause}{_quote_identifier(alias)}{hint_clause}"
         )
+
+    def _optimizer_hint(self, context: _GenerationContext, *, kind: str) -> str:
+        aliases = context.scope.table_aliases
+        derived_aliases = context.scope.derived_aliases
+        if kind in {"MERGE", "NO_MERGE", "DERIVED_CONDITION_PUSHDOWN"}:
+            if not derived_aliases:
+                raise CandidateRejected(f"{kind} requires a derived relation")
+            alias = _quote_identifier(context.rng.choice(derived_aliases))
+            return f"/*+ {kind}({alias}) */"
+        if kind == "random" and derived_aliases and context.rng.randrange(2) == 0:
+            return self._optimizer_hint(
+                context,
+                kind=context.rng.choice(("MERGE", "NO_MERGE", "DERIVED_CONDITION_PUSHDOWN")),
+            )
+        if kind in {"INDEX_PRIMARY", "INDEX_SECONDARY", "NO_RANGE_OPTIMIZATION"}:
+            index_candidates = [
+                (alias, index)
+                for alias in aliases
+                for index in context.scope.table_indexes.get(alias, ())
+                if (
+                    kind == "NO_RANGE_OPTIMIZATION"
+                    or (kind == "INDEX_PRIMARY" and index == "PRIMARY")
+                    or (kind == "INDEX_SECONDARY" and index != "PRIMARY")
+                )
+            ]
+            if not index_candidates:
+                raise CandidateRejected(f"{kind} requires a matching visible index")
+            alias, index = context.rng.choice(index_candidates)
+            hint_name = {
+                "INDEX_PRIMARY": "INDEX",
+                "INDEX_SECONDARY": "INDEX",
+                "NO_RANGE_OPTIMIZATION": "NO_RANGE_OPTIMIZATION",
+            }[kind]
+            return (
+                f"/*+ {hint_name}({_quote_identifier(alias)} "
+                f"{_quote_identifier(index)}) */"
+            )
+        if kind == "random":
+            index_candidates = [
+                (alias, index)
+                for alias in aliases
+                for index in context.scope.table_indexes.get(alias, ())
+            ]
+            if index_candidates and context.rng.randrange(3) == 0:
+                return self._optimizer_hint(
+                    context,
+                    kind=context.rng.choice(("INDEX_PRIMARY", "INDEX_SECONDARY", "NO_RANGE_OPTIMIZATION")),
+                )
+            if len(aliases) >= 2:
+                return self._optimizer_hint(context, kind="JOIN_ORDER")
+            return self._optimizer_hint(context, kind="NO_ICP")
+        if kind == "JOIN_ORDER":
+            if len(aliases) < 2:
+                raise CandidateRejected("JOIN_ORDER requires at least two relation aliases")
+            rendered = ", ".join(_quote_identifier(alias) for alias in aliases)
+            return f"/*+ JOIN_ORDER({rendered}) */"
+        if kind == "NO_ICP":
+            if not aliases:
+                raise CandidateRejected("NO_ICP requires a relation alias")
+            return f"/*+ NO_ICP({_quote_identifier(aliases[0])}) */"
+        raise CandidateRejected(f"unsupported optimizer hint kind: {kind}")
 
     def _visible_column_pool(self, context: _GenerationContext) -> list[_ColumnBinding]:
         local = [

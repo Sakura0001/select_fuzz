@@ -47,13 +47,9 @@ class ReadIndex:
                 "performance_alert",
                 "performance_calibration_failure",
             }
-            payload = {
-                "id": fact.get("case_id"),
-                "run_id": fact.get("run_id", ""),
-                "mode": fact.get(
-                    "mode", "performance" if is_performance else "correctness"
-                ),
-                "severity": fact.get(
+            classification = fact.get(
+                "classification",
+                fact.get(
                     "original_verdict",
                     fact.get(
                         "failure_category",
@@ -61,11 +57,26 @@ class ReadIndex:
                     )
                     or "calibration_failure",
                 ),
+            )
+            payload = {
+                "classification": classification,
+                "id": fact.get("case_id"),
+                "run_id": fact.get("run_id", ""),
+                "mode": fact.get(
+                    "mode", "performance" if is_performance else "correctness"
+                ),
+                "severity": classification,
                 "occurred_at": fact.get("occurred_at", ""),
                 "record": fact,
             }
+            for key in ("errno", "reason", "sqlstate"):
+                if key in fact:
+                    payload[key] = fact[key]
         if not isinstance(payload, dict) or not isinstance(payload.get("id"), str):
             return 0, watermark
+        payload = dict(payload)
+        if "severity" not in payload and "classification" in payload:
+            payload["severity"] = payload["classification"]
         db.execute(
             "INSERT OR REPLACE INTO finding VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
@@ -167,6 +178,7 @@ class ReadIndex:
         *,
         mode: str | None = None,
         severity: str | None = None,
+        classification: str | None = None,
         node: str | None = None,
         feature: str | None = None,
         errno: int | None = None,
@@ -176,10 +188,19 @@ class ReadIndex:
     ) -> list[dict[str, object]]:
         if not 1 <= limit <= 201 or offset < 0:
             raise ValueError("invalid finding pagination")
+        if (
+            severity is not None
+            and classification is not None
+            and severity != classification
+        ):
+            raise ValueError("severity and classification filters disagree")
+        effective_severity = (
+            classification if classification is not None else severity
+        )
         clauses: list[str] = []
         values: list[object] = []
         for column, value in (
-            ("mode", mode), ("severity", severity), ("node", node),
+            ("mode", mode), ("severity", effective_severity), ("node", node),
             ("feature", feature), ("errno", errno),
         ):
             if value is not None:

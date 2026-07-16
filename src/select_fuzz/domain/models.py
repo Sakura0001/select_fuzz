@@ -110,6 +110,7 @@ class NodeExecution:
     started_ns: int
     ended_ns: int
     connection_id: int | None
+    affected_rows: int | None = None
     columns: tuple[ColumnMeta, ...] = ()
     rows: tuple[tuple[object, ...], ...] = ()
     error: ErrorInfo | None = None
@@ -138,6 +139,12 @@ class NodeExecution:
             raise ValueError("ended_ns must be greater than or equal to started_ns")
         if self.connection_id is not None and self.connection_id <= 0:
             raise ValueError("connection_id must be positive when present")
+        if self.affected_rows is not None and (
+            not isinstance(self.affected_rows, int)
+            or isinstance(self.affected_rows, bool)
+            or self.affected_rows < 0
+        ):
+            raise ValueError("affected_rows must be nonnegative when present")
         if self.status is ExecutionStatus.SUCCESS and self.error is not None:
             raise ValueError("successful execution cannot contain an error")
         if self.status is not ExecutionStatus.SUCCESS and self.error is None:
@@ -170,6 +177,7 @@ class NodeExecution:
         warnings: tuple[str, ...] = (),
         connection_reusable: bool = True,
         performance_payload: Mapping[str, object] | None = None,
+        affected_rows: int | None = None,
     ) -> NodeExecution:
         return cls(
             role=role,
@@ -177,6 +185,7 @@ class NodeExecution:
             started_ns=started_ns,
             ended_ns=ended_ns,
             connection_id=connection_id,
+            affected_rows=affected_rows,
             columns=columns,
             rows=rows,
             warnings=warnings,
@@ -200,6 +209,7 @@ class NodeExecution:
         watchdog_error_type: str | None = None,
         connection_reusable: bool = True,
         performance_payload: Mapping[str, object] | None = None,
+        affected_rows: int | None = None,
     ) -> NodeExecution:
         if status is ExecutionStatus.SUCCESS:
             raise ValueError("failure status cannot be success")
@@ -209,6 +219,7 @@ class NodeExecution:
             started_ns=started_ns,
             ended_ns=ended_ns,
             connection_id=connection_id,
+            affected_rows=affected_rows,
             rows=rows,
             error=error,
             warnings=warnings,

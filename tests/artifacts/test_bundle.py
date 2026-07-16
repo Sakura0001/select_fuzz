@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -112,6 +113,70 @@ def test_finding_atomically_publishes_manifest_and_all_three_full_results(
     records = read_jsonl(tmp_path / "events.jsonl")
     assert records[-1]["type"] == "finding"
     assert records[-1]["case_id"] == finding.case_id
+    assert records[-1]["classification"] == "result_mismatch"
+    assert "errno" not in records[-1]
+    assert "sqlstate" not in records[-1]
+    assert "reason" not in records[-1]
+
+
+def test_generator_contract_event_prefers_observed_error_identity(
+    tmp_path: Path,
+) -> None:
+    finding = replace(
+        _finding(),
+        original_verdict="expected_error_mismatch",
+        first_difference={
+            "category": "generator_contract",
+            "expected_error": {
+                "errno": 1054,
+                "kind": "unknown_column",
+                "sqlstate": "42S22",
+            },
+            "observed_identities": [
+                None,
+                {"errno": 1064, "sqlstate": "42000"},
+                {"errno": 1064, "sqlstate": "42000"},
+            ],
+            "reason": "expected identity did not match",
+        },
+    )
+
+    published = CaseBundleWriter(tmp_path).write_finding(finding)
+
+    event = read_jsonl(tmp_path / "events.jsonl")[-1]
+    assert event["classification"] == "expected_error_mismatch"
+    assert event["reason"] == "expected identity did not match"
+    assert event["errno"] == 1064
+    assert event["sqlstate"] == "42000"
+    manifest = json.loads((published / "manifest.json").read_text())
+    assert "classification" not in manifest
+    assert "errno" not in manifest
+    assert "sqlstate" not in manifest
+
+
+def test_generator_contract_event_falls_back_to_expected_error_identity(
+    tmp_path: Path,
+) -> None:
+    finding = replace(
+        _finding(),
+        original_verdict="expected_error_mismatch",
+        first_difference={
+            "category": "generator_contract",
+            "expected_error": {
+                "errno": 1054,
+                "kind": "unknown_column",
+                "sqlstate": "42S22",
+            },
+            "observed_identities": [None, None, None],
+            "reason": "expected an error but all nodes succeeded",
+        },
+    )
+
+    CaseBundleWriter(tmp_path).write_finding(finding)
+
+    event = read_jsonl(tmp_path / "events.jsonl")[-1]
+    assert event["errno"] == 1054
+    assert event["sqlstate"] == "42S22"
 
 
 def test_bundle_failure_before_replace_leaves_no_final_or_temp_directory(

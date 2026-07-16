@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from select_fuzz.artifacts.bundle import CaseBundleWriter, FindingRecord
 from select_fuzz.api.events import EventBroker, EventHistoryExpired, encode_sse
 from select_fuzz.api.read_index import ReadIndex
+from select_fuzz.config import NodeRole
 
 
 def test_sse_encoding_and_resume_from_last_event_id() -> None:
@@ -162,3 +164,57 @@ def test_read_index_projects_authoritative_correctness_and_performance_events(
     assert calibration is not None
     assert calibration["mode"] == "performance"
     assert calibration["severity"] == "setup_mismatch"
+
+
+def test_read_index_filters_writer_generator_findings_by_errno_and_classification(
+    tmp_path: Path,
+) -> None:
+    database = "sf_c_20260713t120000_w0_r1_sabc_n123_q0"
+    record = FindingRecord(
+        case_id="case_generator_error",
+        run_id="run_generator_error",
+        mode="correctness",
+        databases={role: database for role in NodeRole},
+        seeds={"query": 1},
+        setup_sql=("CREATE TABLE `t` (`id` INT);",),
+        query_sql="SELECT missing FROM `t` ORDER BY 1",
+        query_limits={"timeout_seconds": 1, "row_limit": 10, "byte_limit": 1024},
+        payload_sha256="a" * 64,
+        original_verdict="unexpected_valid_error",
+        first_difference={
+            "category": "generator_contract",
+            "expected_error": None,
+            "observed_identities": [
+                {"errno": 1054, "sqlstate": "42S22"} for _ in NodeRole
+            ],
+            "reason": "a valid-lane query returned an error on every node",
+        },
+        statistics={},
+        configuration_fingerprints={role: "fingerprint" for role in NodeRole},
+        results={
+            role: {
+                "role": role.value,
+                "status": "error",
+                "error": {"errno": 1054, "sqlstate": "42S22"},
+            }
+            for role in NodeRole
+        },
+    )
+    CaseBundleWriter(tmp_path).write_finding(record)
+    index = ReadIndex(tmp_path / "read.sqlite3")
+
+    assert index.rebuild(tmp_path / "events.jsonl") == 1
+    page = index.list_findings(
+        classification="unexpected_valid_error",
+        errno=1054,
+    )
+
+    assert len(page) == 1
+    assert page[0]["id"] == "case_generator_error"
+    assert page[0]["classification"] == "unexpected_valid_error"
+    assert page[0]["errno"] == 1054
+    assert page[0]["sqlstate"] == "42S22"
+    assert page[0]["reason"] == (
+        "a valid-lane query returned an error on every node"
+    )
+    assert index.list_findings(classification="result_mismatch", errno=1054) == []

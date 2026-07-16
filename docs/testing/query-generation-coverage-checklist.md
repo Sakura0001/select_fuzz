@@ -71,7 +71,7 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
 - [~] 本轮中断长跑和旧诊断产物已移入明确 archive；历史仓库中与本轮无关的旧 artifact
   不做破坏性删除，最终交付只索引当前工作树证据。
 - [x] P0/P1 修改已按 grammar/生成矩阵、oracle 归因、测试与文档主题拆分提交，并已快进
-  合并回 `main`（当前 HEAD `4b2e42f`）。
+  合并回 `main`。
 
 ## 2026-07-16 文法生成迁移快照
 

@@ -367,9 +367,7 @@ class _MutationCoordinator:
             )
             for role in NodeRole
         }
-        transaction_end = (
-            "COMMIT" if self.verdict is MutationVerdict.COMMITTED else "ROLLBACK"
-        )
+        transaction_end = "COMMIT" if self.verdict is MutationVerdict.COMMITTED else "ROLLBACK"
         return MutationBatchResult(
             self.verdict,
             batch,
@@ -409,7 +407,17 @@ def _queries(count: int) -> tuple[CorrectnessQuery, ...]:
 def test_dynamic_grammar_round_explains_first_and_counts_only_successful_triads(
     tmp_path: Path,
 ) -> None:
-    candidates = _queries(4)
+    raw_candidates = _queries(5)
+    candidates = (
+        raw_candidates[0],
+        raw_candidates[1],
+        replace(
+            raw_candidates[2],
+            sql="SELECT /*+ NO_ICP(`r1`) */ 2 AS `id` ORDER BY 1",
+        ),
+        raw_candidates[3],
+        raw_candidates[4],
+    )
     materialized = RoundMaterialization(
         database="sf_c_20260713t120000_w0_r0_sgrammar_n123_q0",
         bundle=_Bundle(),
@@ -428,14 +436,18 @@ def test_dynamic_grammar_round_explains_first_and_counts_only_successful_triads(
     coordinator = _ExplainCoordinator(
         {
             candidates[1].sql: _errors(1366, "HY000", "uniform runtime error"),
-            candidates[2].sql: _match(),
             candidates[3].sql: _match(),
+            candidates[4].sql: _match(),
         },
         {
             candidates[0].sql: explain_error,
             candidates[1].sql: explain_success,
-            candidates[2].sql: explain_success,
+            candidates[2].sql: replace(
+                explain_success,
+                warnings=("Warning 1064 Optimizer hint syntax error",),
+            ),
             candidates[3].sql: explain_success,
+            candidates[4].sql: explain_success,
         },
     )
     source = _DynamicSource(materialized, candidates)
@@ -447,29 +459,46 @@ def test_dynamic_grammar_round_explains_first_and_counts_only_successful_triads(
         QueryLimits(15, 10_000, 32 << 20),
         configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
     )
+    sink = _CollectSink()
 
-    summary = engine.run_round(_context(2), EventPublisher("run_engine_1", _Sink()), Event())
+    summary = engine.run_round(_context(2), EventPublisher("run_engine_1", sink), Event())
 
     assert summary.queries_completed == 2
     assert summary.findings == 0
-    assert summary.rejected == 2
-    assert source.generated_ordinals == [0, 1, 2, 3]
+    assert summary.rejected == 3
+    assert source.generated_ordinals == [0, 1, 2, 3, 4]
     assert coordinator.executed == [
         candidates[1].sql,
-        candidates[2].sql,
         candidates[3].sql,
+        candidates[4].sql,
     ]
     assert [sql for sql, _limits in coordinator.explained] == [
         candidate.sql for candidate in candidates
     ]
     assert {limits.timeout_seconds for _, limits in coordinator.explained} == {10.0}
-    round_payload = (
-        tmp_path / "rounds" / f"{materialized.database}.sql"
-    ).read_text(encoding="utf-8")
+    round_payload = (tmp_path / "rounds" / f"{materialized.database}.sql").read_text(
+        encoding="utf-8"
+    )
     assert candidates[0].sql not in round_payload
     assert candidates[1].sql in round_payload
-    assert candidates[2].sql in round_payload
+    assert candidates[2].sql not in round_payload
     assert candidates[3].sql in round_payload
+    assert candidates[4].sql in round_payload
+    rejected_event = next(event for event in sink.events if event.kind == "query_rejected")
+    assert rejected_event.payload["query_sql"] == candidates[1].sql
+    assert rejected_event.payload["observed_error_identities"] == (
+        {"errno": 1366, "sqlstate": "HY000"},
+    ) * 3
+    records = read_jsonl(tmp_path / "sql" / "worker-000.jsonl")
+    uniform_record = next(
+        record
+        for record in records
+        if record.get("verdict") == "uniform_runtime_error_rejected"
+    )
+    assert uniform_record["query_sql"] == candidates[1].sql
+    assert uniform_record["observed_error_identities"] == [
+        {"errno": 1366, "sqlstate": "HY000"},
+    ] * 3
 
 
 def test_generated_round_source_exposes_an_immutable_schema_to_grammar_generation(
@@ -498,6 +527,8 @@ def test_generated_round_source_exposes_an_immutable_schema_to_grammar_generatio
     assert materialized.schema is not None
     assert first.target_feature_id == "grammar_random"
     assert first.coverage_eligible
+    assert any(tag.startswith("grammar:") for tag in first.coverage_tags)
+    assert any(tag.startswith("grammar_alt:") for tag in first.coverage_tags)
     assert first.seed != second.seed
     assert first.sql
     assert second.sql
@@ -616,9 +647,7 @@ def test_round_engine_persists_finding_and_stops_current_database(
         "query_attempt_finished",
     ]
     assert [
-        record["verdict"]
-        for record in query_records
-        if record["type"] == "query_attempt_finished"
+        record["verdict"] for record in query_records if record["type"] == "query_attempt_finished"
     ] == ["result_mismatch"]
     assert all(record["worker_id"] == 0 for record in query_records)
     assert all(record["query_sql"] in coordinator.executed for record in query_records)
@@ -840,9 +869,9 @@ def test_advisory_metadata_differences_remain_visible_in_worker_log(
     assert nodes["baseline"]["column_metadata"][0]["flags"] == 4129
     assert nodes["custom_off"]["column_metadata"][0]["flags"] == 4129
     assert nodes["custom_on"]["column_metadata"][0]["flags"] == 20515
-    assert nodes["baseline"]["column_metadata_digest"] != nodes["custom_on"][
-        "column_metadata_digest"
-    ]
+    assert (
+        nodes["baseline"]["column_metadata_digest"] != nodes["custom_on"]["column_metadata_digest"]
+    )
 
 
 def test_round_engine_logs_executor_exception_after_started_record(tmp_path: Path) -> None:
@@ -1020,7 +1049,8 @@ def test_exact_expected_negative_error_is_not_a_generic_pass_or_coverage(
         "sqlstate": "42S22",
     }
     assert all(
-        node["error"] == {
+        node["error"]
+        == {
             "errno": 1054,
             "message": "unknown column",
             "sqlstate": "42S22",
@@ -1365,9 +1395,7 @@ def test_round_coverage_tags_require_the_query_to_observe_the_setup_value(
         CoverageLedger(tmp_path / "coverage.json"),
         rows_per_table=8,
         schema_limits=limits,
-    ).materialize(
-        replace(_context(1), round_number=1, round_seed=_boundary_seed(limits, 0))
-    )
+    ).materialize(replace(_context(1), round_number=1, round_seed=_boundary_seed(limits, 0)))
     schema = materialized.bundle.schema  # type: ignore[attr-defined]
     data = materialized.bundle.data  # type: ignore[attr-defined]
     table_name = schema.tables[0].name
@@ -1460,21 +1488,15 @@ def test_insufficient_fixed_rows_emit_fallback_without_claiming_scenario_coverag
         CoverageLedger(tmp_path / "coverage.json"),
         rows_per_table=1,
         schema_limits=limits,
-    ).materialize(
-        replace(_context(5), round_number=1, round_seed=_boundary_seed(limits, 0))
-    )
+    ).materialize(replace(_context(5), round_number=1, round_seed=_boundary_seed(limits, 0)))
 
     for query in materialized.queries:
         assert any(
-            tag.startswith(
-                "data_scenario_fallback:boundary:insufficient_rows_1_required_8"
-            )
+            tag.startswith("data_scenario_fallback:boundary:insufficient_rows_1_required_8")
             for tag in query.coverage_tags
         )
         assert "data_scenario:boundary" not in query.coverage_tags
-        assert not any(
-            tag.startswith("schema_boundary:") for tag in query.coverage_tags
-        )
+        assert not any(tag.startswith("schema_boundary:") for tag in query.coverage_tags)
 
 
 def test_setup_mismatch_persists_complete_finding_bundle(tmp_path: Path) -> None:

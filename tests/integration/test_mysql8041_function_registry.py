@@ -106,11 +106,14 @@ def test_every_deterministic_function_and_null_witness_on_exact_8041_triad() -> 
                 estimated_rows_by_table={"items": 0},
             )
             outcomes: list[tuple[tuple[object, ...], ...]] = []
+            warnings_by_node: list[tuple[tuple[object, ...], ...]] = []
             for connection in connections:
                 cursor = connection.cursor()
                 try:
                     cursor.execute(generated.sql)
                     outcomes.append(tuple(tuple(row) for row in cursor.fetchall()))
+                    cursor.execute("SHOW WARNINGS")
+                    warnings_by_node.append(tuple(tuple(row) for row in cursor.fetchall()))
                 except mysql.connector.Error as error:
                     pytest.fail(
                         f"{variant} failed with errno={error.errno} "
@@ -119,6 +122,12 @@ def test_every_deterministic_function_and_null_witness_on_exact_8041_triad() -> 
                 finally:
                     cursor.close()
             assert outcomes[0] == outcomes[1] == outcomes[2], variant
+            assert warnings_by_node[0] == warnings_by_node[1] == warnings_by_node[2]
+            warning_codes = tuple(int(row[1]) for row in warnings_by_node[0])
+            if variant == "encoding_sha2_2_null_1":
+                assert warning_codes == (1583,)
+            else:
+                assert warning_codes == (), (variant, warnings_by_node[0])
     finally:
         for connection in connections:
             connection.close()

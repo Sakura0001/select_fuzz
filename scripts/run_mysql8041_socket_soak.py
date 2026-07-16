@@ -36,6 +36,7 @@ from select_fuzz.execution import (
     TriadCoordinator,
 )
 from select_fuzz.generation.coverage import CoverageLedger
+from select_fuzz.generation.query_grammar import GrammarQueryGenerator, SelectGrammar
 from select_fuzz.generation.query_scope import DEFAULT_QUERY_SCOPE
 from select_fuzz.service import CorrectnessRunService, RunSummary
 
@@ -216,9 +217,7 @@ def probe_mysql8041_versions(
             raise RuntimeError(f"{node.role.value} returned an invalid MySQL version row")
         version = rows[0][0]
         if version.split("-", 1)[0] != "8.0.41":
-            raise RuntimeError(
-                f"{node.role.value} must run exact MySQL 8.0.41, observed {version}"
-            )
+            raise RuntimeError(f"{node.role.value} must run exact MySQL 8.0.41, observed {version}")
         versions[node.role] = version
     if set(versions) != set(NodeRole):
         raise RuntimeError("version probe did not cover all three roles")
@@ -250,6 +249,7 @@ def build_runtime(
         coverage,
         min_rows_per_table=config.min_rows_per_table,
         max_rows_per_table=config.max_rows_per_table,
+        grammar_query_generator=GrammarQueryGenerator(SelectGrammar.default()),
         query_scope=DEFAULT_QUERY_SCOPE,
     )
     triad = TriadCoordinator(
@@ -291,8 +291,7 @@ def _finding_bundle_count(root: Path) -> int:
     if not findings_root.is_dir():
         return 0
     return sum(
-        child.is_dir() and not child.name.startswith(".")
-        for child in findings_root.iterdir()
+        child.is_dir() and not child.name.startswith(".") for child in findings_root.iterdir()
     )
 
 
@@ -357,14 +356,11 @@ def run_socket_soak(
         "seed": config.seed,
         "sql_log_directory": str(config.artifact_root / "sql"),
         "sql_log_paths": [
-            str(path)
-            for path in sorted((config.artifact_root / "sql").glob("worker-*.sql"))
+            str(path) for path in sorted((config.artifact_root / "sql").glob("worker-*.sql"))
         ],
         "status": status,
         "stopped": summary.stopped,
-        "versions": {
-            role.value: runtime.versions[role] for role in NodeRole
-        },
+        "versions": {role.value: runtime.versions[role] for role in NodeRole},
         "workers": config.workers,
     }
 
@@ -428,9 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _socket_paths(values: Sequence[str]) -> tuple[Path, Path, Path]:
     flattened = (
-        tuple(part for part in values[0].split(",") if part)
-        if len(values) == 1
-        else tuple(values)
+        tuple(part for part in values[0].split(",") if part) if len(values) == 1 else tuple(values)
     )
     if len(flattened) != 3:
         raise ValueError("--sockets requires exactly three paths")

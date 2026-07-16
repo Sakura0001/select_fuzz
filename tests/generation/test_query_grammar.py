@@ -97,6 +97,22 @@ relation:
     assert ".`s`" in cross_type.sql
 
 
+def test_single_table_optimizer_hint_always_names_a_real_alias() -> None:
+    grammar = SelectGrammar.from_text(
+        """
+query:
+    _scope_begin _prepare_relation SELECT _optimizer_hint _any_column AS _projection_alias FROM _emit_relation _scope_end
+relation:
+    _table
+"""
+    )
+
+    candidate = GrammarQueryGenerator(grammar).generate(_schema(), seed=7)
+
+    assert "/*+ NO_ICP(`r1`) */" in candidate.sql
+    assert "NO_ICP()" not in candidate.sql
+
+
 def test_generated_identifiers_are_bound_to_real_schema_or_derived_outputs() -> None:
     generator = GrammarQueryGenerator()
     schema = _schema()
@@ -105,34 +121,39 @@ def test_generated_identifiers_are_bound_to_real_schema_or_derived_outputs() -> 
         "t2": {"id", "x", "b", "g"},
     }
     definition = re.compile(r"`(t1|t2)`(?: AS)? `(r\d+)`")
-    any_alias_definition = re.compile(
-        r"(?:\bAS|`(?:t1|t2)`|\))\s+`(r\d+)`"
-    )
+    any_alias_definition = re.compile(r"(?:\bAS|`(?:t1|t2)`|\))\s+`(r\d+)`")
     qualified_reference = re.compile(r"`(r\d+)`\.`([^`]+)`")
 
     for seed in range(250):
         candidate = generator.generate(schema, seed=seed)
         defined_aliases = set(any_alias_definition.findall(candidate.sql))
         base_bindings = {
-            alias: base_columns[table]
-            for table, alias in definition.findall(candidate.sql)
+            alias: base_columns[table] for table, alias in definition.findall(candidate.sql)
         }
         for alias, column in qualified_reference.findall(candidate.sql):
             assert alias in defined_aliases, candidate.sql
             if alias in base_bindings:
                 assert column in base_bindings[alias], candidate.sql
             else:
-                assert re.fullmatch(
-                    r"(?:q|d)\d+|jt_(?:ord|value|exists)", column
-                ), candidate.sql
+                assert re.fullmatch(r"(?:q|d|c)\d+|jt_(?:ord|value|exists)", column), candidate.sql
 
 
 def test_mysql_8041_grammar_reaches_ported_and_enhanced_families() -> None:
     grammar = SelectGrammar.default()
-    # Semantic hooks such as `_prepare_relation` deliberately expand helper
-    # productions from Python, so include every productive production in this
-    # feature-retention contract rather than following grammar edges alone.
-    pending = list(grammar.productions)
+    # Semantic hooks deliberately expand these productions from Python rather
+    # than through a grammar symbol. They form explicit, audited reachability
+    # roots in addition to the grammar's public root.
+    semantic_targets = {
+        "cte_outer_select",
+        "derived_query_expression",
+        "derived_select",
+        "lateral_derived_select",
+        "membership_subquery",
+        "natural_join_type",
+        "relation",
+        "scalar_subquery",
+    }
+    pending = [grammar.root, *sorted(semantic_targets)]
     reachable: set[str] = set()
     terminals: set[str] = set()
     while pending:
@@ -146,6 +167,8 @@ def test_mysql_8041_grammar_reaches_ported_and_enhanced_families() -> None:
                     pending.append(symbol.value)
                 else:
                     terminals.add(symbol.value)
+
+    assert reachable == set(grammar.productions)
 
     for syntax in (
         {"RECURSIVE"},
@@ -169,6 +192,9 @@ def test_mysql_8041_grammar_reaches_ported_and_enhanced_families() -> None:
         "ranking_window_function",
         "value_window_function",
         "aggregate_window_function",
+        "peer_safe_ranking_window_function",
+        "numeric_range_frame_clause",
+        "temporal_range_frame_clause",
     ):
         assert production in grammar.productions
 
@@ -184,6 +210,8 @@ def test_mysql_8041_grammar_reaches_ported_and_enhanced_families() -> None:
         "LAG",
         "LEAD",
         "GROUPING",
+        "YEAR_MONTH",
+        "DAY_MICROSECOND",
     ):
         assert token in terminals
 
@@ -194,8 +222,41 @@ def test_mysql_8041_grammar_reaches_ported_and_enhanced_families() -> None:
         "_prepare_row_signature",
         "_prepare_membership_signature",
         "_result_window_value",
+        "_table_partition_index_hint",
+        "_right_lateral_join_relation",
+        "_window_total_order",
+        "_json_object_aggregate",
+        "_deterministic_group_concat",
     ):
         assert semantic_hook in terminals
+
+
+def test_alternative_coverage_identity_is_stable_across_line_number_changes() -> None:
+    original = SelectGrammar.from_text(
+        """
+query:
+    SELECT 1
+    | SELECT 2
+"""
+    )
+    shifted = SelectGrammar.from_text(
+        """
+# unrelated leading comment
+
+query:
+    SELECT 1
+    | SELECT 2
+    | SELECT 3
+"""
+    )
+
+    original_trace = f"query@{original.productions['query'].alternatives[0].source_line}"
+    shifted_trace = f"query@{shifted.productions['query'].alternatives[0].source_line}"
+
+    assert original.stable_alternative_id(original_trace) == shifted.stable_alternative_id(
+        shifted_trace
+    )
+    assert original.stable_alternative_id(original_trace).startswith("v1:query:")
 
 
 def test_mysql_8041_grammar_exposes_every_registered_function_and_null_lane() -> None:

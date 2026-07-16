@@ -2,12 +2,74 @@
 
 本清单定义 `select-fuzz` 的查询生成范围。它以 MySQL 8.0.41、只读单语句
 query expression 为边界；correctness 生产路径默认由版本化 `.grammar.yy` 文法驱动，
-语义绑定器只接收表名、列名和列类型。覆盖必须同时具备可达文法、真实作用域绑定、
-安全校验、自动化测试，并在可用时取得精确 MySQL 8.0.41 见证。仅存在 catalog 行或
-固定模板不算覆盖。
+语义绑定器接收表名、列名、列类型，以及经过安全过滤的可见索引名和分区名。覆盖必须
+同时具备可达文法、真实作用域绑定、安全校验、自动化测试，并在可用时取得精确
+MySQL 8.0.41 见证。仅存在 catalog 行或固定模板不算覆盖。
 
-状态：`[x]` 已实现并有本地测试，`[~]` 本轮正在补齐/等待精确 MySQL 见证，
+状态：`[x]` 已实现并有本地测试，`[~]` 已部分实现或仍需扩大精确 MySQL 见证，
 `[ ]` 尚未闭环，`[-]` 明确排除。
+
+## 2026-07-16 当前任务总览
+
+### 已完成并取得本地证据
+
+- [x] P0：一分钟 socket soak 已改为显式注入最新 `GrammarQueryGenerator`，不再回退到
+  旧 `QueryGenerator`。
+- [x] P0：`excluded_families` 已贯穿文法选择、列/表/集合签名、`*`、`TABLE`、USING 和
+  NATURAL JOIN；默认 correctness scope 不会隐式带入 JSON、SPATIAL、FULLTEXT。
+- [x] P0：optimizer hint fallback 改为带真实别名的 `NO_ICP(alias)`；带 hint 的候选若
+  `EXPLAIN` 返回 hint warning 会在三节点执行前拒绝。
+- [x] P0：96/96 个 production 从真实 root 加 semantic edge 静态可达；alternative ID
+  改为与源码行号无关的 `grammar_alt:v1:<production>:<hash>`，并记录相邻 set operator
+  的有序 pair tag。
+- [x] P1：安全可见 index、partition 元数据进入绑定器；显式 `PARTITION` 与
+  `USE/FORCE/IGNORE INDEX`（default/JOIN/ORDER BY/GROUP BY）按 MySQL 表因子顺序生成。
+- [x] P1：多 SELECT modifier、多列表达式/位置 GROUP BY、更长 ORDER BY、多列 USING、
+  四表 join、相关 LEFT/RIGHT LATERAL 均已接入；RIGHT LATERAL 不会走 STRAIGHT_JOIN。
+- [x] P1：derived table/CTE 可使用完整 query expression 并显式固定输出列；pair recursive
+  CTE、四操作数 set chain，以及 7×7=49 个 set operator 有序 pair 均有定向测试。
+- [x] P1：`OVER()`、多列表达式窗口、命名窗口继承/修改、numeric/temporal bounded
+  RANGE、安全 ROWS/RANGE frame 已接入；位置敏感函数强制确定性总序。
+- [x] P1：CAST/CONVERT 安全类型配对、全部简单/复合 INTERVAL 单位、确定性
+  GROUP_CONCAT/JSON_ARRAYAGG/JSON_OBJECTAGG 已接入；NCHAR 与受 sql_mode 影响的 REAL
+  不进入 correctness 无 warning lane。
+- [x] 函数注册表的 335 个 signature/NULL lane 已逐个在三套 MySQL 8.0.41 上执行；334 个
+  无 warning，`encoding_sha2_2_null_1` 精确断言 Warning 1583。
+- [x] 三套 socket 均确认是 MySQL 8.0.41；60 个 P1 grammar 见证（11 个结构族 + 49 个
+  set pair）全部通过 EXPLAIN、执行和三节点结果/警告一致性检查。
+- [x] 聚焦单元/服务测试为 120 passed；最新一分钟运行完成 20 轮、1965 条成功比较、
+  0 finding，命中 698 个稳定 alternative ID 和随机 47/49 个 set pair。
+- [x] 一分钟运行仅未命中默认 scope 明确排除的 `fulltext_query`、`json_scalar_function`、
+  `spatial_scalar_function`；partition 在本次随机 schema 中未命中，但定向三节点见证已通过。
+- [x] 三节点一致运行时错误的事件和 worker 记录现在直接保存 `query_sql` 与
+  `observed_error_identities`，后续归因不再依赖 SQL 顺序反推。
+
+最新一分钟证据目录：
+`artifacts/latest-p0-p1-one-minute-20260716/`。该轮共有 47 个准入/运行时拒绝和 2 个
+resource-limit；已复放的运行时错误类别为 1038（sort memory）、1690（unsigned
+overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 conversion），
+三节点错误身份一致，因此未形成差分 finding。
+
+### 已实现但仍需扩大验证
+
+- [~] frame grammar 已覆盖当前安全矩阵，但尚未把全部合法 frame-bound 组合逐项做成
+  三节点定向见证；MySQL 8.0.41 不支持的 GROUPS/IGNORE NULLS/FROM LAST/EXCLUDE 继续
+  fail-closed 排除。
+- [~] optimizer hint 已验证当前生成集合及 hint-warning 准入门，但尚未形成完整的
+  hint 正向/负向矩阵。
+- [~] 函数注册表已有全部 335 个基础/NULL 见证和精确 warning 契约，但尚未穷举每个
+  signature 的完整值域与所有 error 契约。
+- [~] 一分钟随机运行只自然命中 47/49 个 set pair；49/49 已由三节点定向测试闭环，
+  仍可通过更长随机运行检验概率分布。
+
+### 待完成
+
+- [ ] 运行 30 分钟最新文法三节点随机差分，并逐个归因所有错误 fingerprint；把可避免的
+  1690/3513/3854 候选收窄后回灌生成器。
+- [ ] 补齐 NOT EXISTS/NOT IN 的空/单/多行、outer/inner/both nullable 和嵌套矩阵。
+- [ ] 清理历史 artifact 中遗留的旧 SQL 产物，只保留重新生成的可复现实验产物。
+- [ ] 当前 P0/P1 修改仍在开发工作树中，尚未按主题拆分 commit，也尚未合并回 `main`；
+  当前 `main` 与 `codex/mysql-parallel-query-fuzzer` 仍共同指向 `973fd64`。
 
 ## 2026-07-16 文法生成迁移快照
 
@@ -16,8 +78,8 @@ query expression 为边界；correctness 生产路径默认由版本化 `.gramma
 - 关系先绑定、表达式后展开；每层 query block 维护独立 symbol table，普通 derived
   table 隔离外层，LATERAL/相关子查询显式继承外层可见列，CTE/derived 输出列注册后
   才能被父层引用。
-- 列类型是软约束：默认 80% 选同类型族、20% 优先跨类型族，可通过配置调整；索引、
-  主键、唯一键不进入查询生成器输入。
+- 列类型是软约束：默认 80% 选同类型族、20% 优先跨类型族，可通过配置调整；查询生成器
+  可见经过过滤的普通索引名和分区名，但仍不依赖 index part、主键/唯一性证明或物理 plan。
 - 每条候选先在 baseline 执行普通 `EXPLAIN`，10 秒内成功且返回非空计划才发往三节点；
   EXPLAIN 失败不记录 SQL/plan。`queries_per_round` 只统计三节点执行成功且比较通过的 SQL。
 - 旧类型化 AST、coverage-debt 和 negative lane 暂留给 performance、验证工具及迁移回归，
@@ -38,11 +100,12 @@ query expression 为边界；correctness 生产路径默认由版本化 `.gramma
 
 ## 明确排除
 
-- [x] JSON 函数、`JSON_TABLE` 和 JSON 表达式已进入文法；JSON 多值索引名不作为生成器输入。
-- [x] `MATCH ... AGAINST` 与确定性空间函数已进入文法；候选是否匹配实际全文/空间索引由
-  baseline EXPLAIN 准入，不读取索引元数据。
-- [~] 显式 partition 名、index-level/table-level index hint 需要分区或索引名，仍仅由迁移期
-  旧生成器精确覆盖；最小 schema snapshot 的新文法生成器不伪造这些名字。
+- [x] JSON 函数、`JSON_TABLE` 和 JSON 表达式已进入文法；默认 correctness scope 排除 JSON，
+  JSON 多值索引名也不作为生成器输入。
+- [x] `MATCH ... AGAINST` 与确定性空间函数已进入文法；默认 correctness scope 排除
+  FULLTEXT/SPATIAL，启用时仍由 baseline EXPLAIN 做最终准入。
+- [x] 新文法绑定真实 partition 名及经过过滤的可见普通 index 名，不伪造名字；显式
+  partition 与 table-level index hint 已有定向 MySQL 8.0.41 见证。
 - [-] DDL/DML、锁定读、外部文件、存储函数/UDF、用户变量及多语句。
 - [-] 随机、当前时间、连接/会话状态、等待/锁等非确定性函数。
 
@@ -66,7 +129,9 @@ query expression 为边界；correctness 生产路径默认由版本化 `.gramma
 ## SELECT 与 query expression
 
 - [x] 无 FROM 标量、普通表投影、表达式投影、别名、`DISTINCT`。
-- [x] WHERE、GROUP BY、HAVING、WINDOW、最终 ORDER BY、ASC/DESC。
+- [x] WHERE、多列表达式/位置 GROUP BY、HAVING、WINDOW、更长最终 ORDER BY、ASC/DESC。
+- [x] 合法 SELECT modifier 有序栈；ALL/DISTINCT 和 SQL_NO_CACHE/SQL_CALC_FOUND_ROWS
+  分别走互斥安全 lane。
 - [x] LIMIT、OFFSET、LIMIT 0、无符号 BIGINT 边界与确定性总序证明。
 - [x] 单层/多层 parenthesized query expression、分支局部 ORDER BY + LIMIT。
 - [x] `SELECT`、`TABLE`、`VALUES` query primary。
@@ -75,7 +140,9 @@ query expression 为边界；correctness 生产路径默认由版本化 `.gramma
 ## 表引用与 JOIN
 
 - [x] INNER/CROSS/STRAIGHT/LEFT/RIGHT/NATURAL LEFT/NATURAL RIGHT 的 ON/无条件形态。
-- [x] 逗号连接、USING、NATURAL INNER、三表嵌套 join tree。
+- [x] 逗号连接、多列 USING、NATURAL INNER、四表嵌套 join tree。
+- [x] 相关 LEFT/RIGHT LATERAL；RIGHT LATERAL 先绑定右表再反向渲染，相关引用可见且
+  lateral join type 不含 STRAIGHT_JOIN。
 - [x] `USE/FORCE/IGNORE INDEX` × default/JOIN/ORDER BY/GROUP BY 的 12 个表级 hint 叶。
 - [x] 显式 partition、临时表、外键图和普通 InnoDB 场景。
 
@@ -93,9 +160,11 @@ query expression 为边界；correctness 生产路径默认由版本化 `.gramma
 
 - [x] scalar/row/table 子查询、EXISTS、IN、ANY、ALL、相关与非相关形态。
 - [~] NOT EXISTS/NOT IN、空/单/多行、nullable outer/inner/both、嵌套子查询。
-- [x] 普通/显式列 derived table、相关 LATERAL derived table。
+- [x] 普通/显式列 derived table、相关 LATERAL derived table；完整 set query expression
+  作为 body 时强制显式稳定输出列。
 - [x] 单个非递归 CTE、带终止条件的 recursive UNION ALL CTE。
-- [x] 多个独立/依赖 CTE、CTE 复用、显式列与 recursive UNION ALL/DISTINCT。
+- [x] 多个独立/依赖 CTE、CTE 复用、显式列与 recursive UNION ALL/DISTINCT，以及
+  `(n,total)` pair recursive CTE。
 - [-] recursive query-expression LIMIT 仅在不带 ORDER BY 时可用；MySQL 8.0.41 对递归
   UNION 上的 ORDER BY 返回 `1235/42000`，因此无法满足本项目的确定性 LIMIT 总序契约。
 
@@ -104,16 +173,19 @@ query expression 为边界；correctness 生产路径默认由版本化 `.gramma
 - [x] UNION DISTINCT/ALL、INTERSECT、EXCEPT、等操作链、分支局部 Top-N。
 - [x] SELECT/TABLE/VALUES 分支和括号改变结合顺序。
 - [x] INTERSECT ALL、EXCEPT ALL，以及 numeric/text/binary/temporal 四类跨类型集合叶。
-- [~] 混合集合优先级已覆盖 UNION→INTERSECT、EXCEPT→INTERSECT、UNION→EXCEPT 及
-  括号反转，但尚未枚举全部有序运算符对。
+- [x] 混合集合优先级、括号反转和 7×7=49 个 UNION/UNION ALL/UNION DISTINCT/
+  INTERSECT/INTERSECT ALL/EXCEPT/EXCEPT ALL 有序运算符对均有定向三节点见证。
 - [x] 负向列数不一致使用精确 `1222/21000` 契约。
 
 ## 聚合与窗口
 
 - [x] COUNT/MIN/MAX、global/grouped aggregate、HAVING、WITH ROLLUP。
 - [x] SUM/AVG、DISTINCT aggregate、bit/statistical aggregate、GROUPING 和全 NULL 聚合。
-- [x] inline/named window、ROW_NUMBER、SUM window、确定性唯一排序、ROWS frame。
-- [x] ranking/navigation/value window、ROWS/RANGE frame、UNBOUNDED/CURRENT 边界。
+- [x] inline/named window、`OVER()`、ROW_NUMBER、SUM window、确定性唯一排序、ROWS frame。
+- [x] ranking/navigation/value window、多表达式 PARTITION/ORDER、命名窗口继承/修改、
+  numeric/temporal bounded RANGE、UNBOUNDED/CURRENT/有界边界。
+- [x] GROUP_CONCAT 使用同表达式 DISTINCT + ORDER BY 并限制输出；JSON_ARRAYAGG 使用
+  顺序无关常量，JSON_OBJECTAGG 使用同 key/value binding，避免重复 key last-wins 漂移。
 - [~] 尚未枚举全部合法 frame-bound 组合；`GROUPS`、`IGNORE NULLS`、
   `NTH_VALUE ... FROM LAST` 和 window `EXCLUDE` 在 MySQL 8.0.41 均为 `1235/42000`，
   因而 fail-closed 排除而非放入 valid lane。
@@ -124,16 +196,17 @@ query expression 为边界；correctness 生产路径默认由版本化 `.gramma
 - [x] ABS/COALESCE/CONCAT/LOWER/OCTET_LENGTH/COUNT/MIN/MAX。
 - [x] 数学、字符串/二进制、显式输入时间、控制流、编码/哈希/IP 等 133-signature
   确定性安全注册表；这不是 MySQL 全部 built-in 的清单。
-- [~] 每个 signature 均有参数 recipe 和全部声明 NULL 位置的三节点见证；完整值域及每个
-  signature 的 warning/error 契约尚未穷举。
+- [x] 每个 signature 及全部声明 NULL 位置共有 335 个三节点见证；334 个无 warning，
+  `encoding_sha2_2_null_1` 精确断言 Warning 1583。
+- [~] 完整值域及每个 signature 的全部 error 契约尚未穷举。
 
 ## 索引、提示与回归种子
 
 - [x] BTREE prefix/descending/functional index 查询形态。
 - [x] join-order、index-level、derived pushdown optimizer hints。
 - [x] 表级 index hint 的 12 个 action/scope 叶。
-- [~] optimizer hint 已覆盖 JOIN_ORDER、INDEX、DERIVED_CONDITION_PUSHDOWN 和 NO_RANGE
-  回归种子，但不是完整正反矩阵。
+- [~] optimizer hint 已覆盖 JOIN_ORDER、INDEX、DERIVED_CONDITION_PUSHDOWN、NO_RANGE
+  及合法 NO_ICP fallback；EXPLAIN hint warning 会拒绝，但还不是完整正反矩阵。
 - [x] 已登记的 MySQL 8.0.41 parser/optimizer 回归种子；物理 plan 命中与语法命中分开计数。
 
 ## 报错、归因与覆盖记账
@@ -146,6 +219,9 @@ query expression 为边界；correctness 生产路径默认由版本化 `.gramma
 - [x] timeout/内部结果上限记 resource limit；infra error 不进入语义 oracle。
 - [x] 只有 valid + 三节点成功 + oracle match 才增加 target 和 leaf tag 覆盖。
 - [x] generator finding 可 replay，expected-negative 事件保存 expected/observed error identity。
+- [x] 动态文法的三节点一致运行时错误也保存 query SQL 和三份 observed error identity。
 - [x] NULL、函数注册表、数据场景、错误契约及 91 个扩展语义变体均取得三套精确
   MySQL 8.0.41 本地见证。
+- [x] 一分钟最新文法随机差分完成：20 轮、1965 条成功比较、0 finding；随机命中
+  698 个 stable alternative 和 47/49 个 set pair。
 - [ ] 30 分钟随机差分运行后，逐个归因全部错误 fingerprint，并将可修项回灌生成器。

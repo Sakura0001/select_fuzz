@@ -14,6 +14,12 @@ from select_fuzz.generation.query_scope import (
     QueryCoverageScope,
     QueryExclusionReason,
 )
+from select_fuzz.generation.query_grammar import (
+    GrammarColumn,
+    GrammarQueryGenerator,
+    GrammarSchema,
+    GrammarTable,
+)
 from select_fuzz.generation.schema import (
     IndexKind,
     SchemaGenerator,
@@ -121,3 +127,38 @@ def test_every_default_scoped_query_and_schema_omits_excluded_families() -> None
             for table in manifest.tables
             for index in table.indexes
         )
+
+
+def test_default_scope_also_constrains_grammar_random_candidates() -> None:
+    generator = GrammarQueryGenerator()
+    schema = GrammarSchema(
+        (
+            GrammarTable(
+                "t0",
+                (
+                    GrammarColumn("id", "BIGINT"),
+                    GrammarColumn("txt", "VARCHAR(64)"),
+                    GrammarColumn("doc", "JSON"),
+                    GrammarColumn("shape", "POINT"),
+                ),
+            ),
+        )
+    )
+
+    candidates = tuple(
+        generator.generate(
+            schema,
+            seed=80_410_000 + seed,
+            excluded_families=DEFAULT_QUERY_SCOPE.excluded_families,
+        ).sql
+        for seed in range(500)
+    )
+
+    assert candidates
+    assert all(
+        re.search(r"\b(?:JSON_[A-Z0-9_]*|ST_[A-Z0-9_]*)\s*\(", sql) is None
+        and re.search(r"\bAS\s+JSON\b", sql, re.IGNORECASE) is None
+        and "JSON_TABLE" not in sql.upper()
+        and "MATCH" not in sql.upper()
+        for sql in candidates
+    )

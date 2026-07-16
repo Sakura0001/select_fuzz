@@ -727,15 +727,41 @@ class GeneratedRoundSource:
         candidate = self._grammar_queries.generate(
             materialized.schema,
             seed=candidate_seed,
+            excluded_families=self._query_scope.excluded_families,
         )
-        grammar_tags = frozenset(
+        grammar_production_tags = frozenset(
             f"grammar:{entry.partition('@')[0]}" for entry in candidate.production_trace
+        )
+        grammar_alternative_ids = tuple(
+            self._grammar_queries.grammar.stable_alternative_id(entry)
+            for entry in candidate.production_trace
+        )
+        grammar_alternative_tags = frozenset(
+            f"grammar_alt:{identity}" for identity in grammar_alternative_ids
+        )
+        set_operator_ids = tuple(
+            identity
+            for identity in grammar_alternative_ids
+            if identity.startswith("v1:set_operator:")
+        )
+        grammar_pair_tags = frozenset(
+            f"grammar_pair:v1:set_operator:{left.rpartition(':')[2]}>{right.rpartition(':')[2]}"
+            for left, right in zip(
+                set_operator_ids,
+                set_operator_ids[1:],
+                strict=False,
+            )
         )
         start_ordinal = context.round_number * context.request.queries_per_round
         return CorrectnessQuery(
             sql=candidate.sql,
             target_feature_id="grammar_random",
-            coverage_tags=grammar_tags | {"grammar_random"},
+            coverage_tags=(
+                grammar_production_tags
+                | grammar_alternative_tags
+                | grammar_pair_tags
+                | {"grammar_random"}
+            ),
             coverage_eligible=True,
             seed=candidate.seed,
             case_ordinal=start_ordinal + candidate_ordinal,
@@ -1021,16 +1047,13 @@ class CorrectnessRoundEngine:
                             databases={role: prepared.database for role in NodeRole},
                             seeds={
                                 "data": materialized.data_seed,
-                                "query": (
-                                    context.round_seed if query is None else query.seed
-                                ),
+                                "query": (context.round_seed if query is None else query.seed),
                                 "round": context.round_seed,
                                 "schema": materialized.schema_seed,
                             },
                             setup_sql=materialized.bundle.statements,
                             query_sql=(
-                                failing_sql
-                                or (query.sql if query is not None else "SELECT 1")
+                                failing_sql or (query.sql if query is not None else "SELECT 1")
                             ),
                             query_limits={
                                 "byte_limit": self._limits.byte_limit,
@@ -1092,9 +1115,9 @@ class CorrectnessRoundEngine:
         committed_mutation_sql: list[str] = []
         current_prepared = prepared
         dynamic_queries = materialized.dynamic_queries
-        dynamic_generate: Callable[
-            [RoundMaterialization, RoundContext, int], CorrectnessQuery
-        ] | None = None
+        dynamic_generate: (
+            Callable[[RoundMaterialization, RoundContext, int], CorrectnessQuery] | None
+        ) = None
         if dynamic_queries:
             raw_generate = getattr(self._source, "generate_query", None)
             if not callable(raw_generate):
@@ -1158,9 +1181,13 @@ class CorrectnessRoundEngine:
                         explain_delay = min(30.0, explain_delay * 2)
                     if explain_execution.status is ExecutionStatus.INFRA_ERROR:
                         break
+                    has_optimizer_hint_warning = "/*+" in query.sql and any(
+                        "hint" in warning.casefold() for warning in explain_execution.warnings
+                    )
                     if (
                         explain_execution.status is not ExecutionStatus.SUCCESS
                         or not explain_execution.rows
+                        or has_optimizer_hint_warning
                     ):
                         rejected += 1
                         continue
@@ -1311,11 +1338,20 @@ class CorrectnessRoundEngine:
                     break
                 if dynamic_queries and _has_uniform_runtime_error(executions):
                     rejected += 1
+                    observed_error_identities = tuple(
+                        {
+                            "errno": execution.error.errno,
+                            "sqlstate": execution.error.sqlstate,
+                        }
+                        for execution in executions
+                        if execution.error is not None
+                    )
                     self._artifacts.write_query_record(
                         context.worker_id,
                         {
                             **attempt_context,
                             "nodes": nodes,
+                            "observed_error_identities": observed_error_identities,
                             "result_database": current_prepared.database,
                             "type": "query_attempt_finished",
                             "verdict": "uniform_runtime_error_rejected",
@@ -1327,7 +1363,9 @@ class CorrectnessRoundEngine:
                             "case_id": case_id,
                             "case_ordinal": query.case_ordinal,
                             "database": current_prepared.database,
+                            "observed_error_identities": observed_error_identities,
                             "query_seed": query.seed,
+                            "query_sql": query.sql,
                             "reason": "uniform_runtime_error",
                             "round_number": context.round_number,
                             "worker_id": context.worker_id,
@@ -1760,9 +1798,7 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
     grammar_generator = GrammarQueryGenerator(
         grammar,
         config=GrammarQueryConfig(
-            compatible_type_percent=(
-                config.correctness.grammar_compatible_type_percent
-            ),
+            compatible_type_percent=(config.correctness.grammar_compatible_type_percent),
             max_tables_per_query_block=config.correctness.max_query_tables,
         ),
     )

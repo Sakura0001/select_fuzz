@@ -105,19 +105,15 @@ parenthesized_query_primary:
     | ( query_expression_body outer_order_clause limit_clause )
     | ( ( query_expression_body ) )
 
-parenthesized_query:
-    parenthesized_query_primary
-
-select_query:
-    query_expression
-
 select_query_core:
-    _scope_begin _prepare_relation SELECT select_modifier? projection_list FROM _emit_relation where_clause? _scope_end
-    | _scope_begin _prepare_relation SELECT distinct_modifier projection_list FROM _emit_relation where_clause? _scope_end
-    | _scope_begin _prepare_relation SELECT select_modifier? aggregate_projection_list FROM _emit_relation where_clause? aggregate_having_clause? _scope_end
-    | _scope_begin _prepare_relation _prepare_group_column SELECT select_modifier? grouped_projection_list FROM _emit_relation where_clause? GROUP BY _group_column rollup_suffix? grouped_having_clause? _scope_end
+    _scope_begin _prepare_relation SELECT select_modifier_list? projection_list FROM _emit_relation where_clause? _scope_end
+    | _scope_begin _prepare_relation SELECT select_modifier_list? aggregate_projection_list FROM _emit_relation where_clause? aggregate_having_clause? _scope_end
+    | _scope_begin _prepare_relation _prepare_group_column SELECT select_modifier_list? grouped_projection_list FROM _emit_relation where_clause? GROUP BY _group_column rollup_suffix? grouped_having_clause? _scope_end
+    | _scope_begin _prepare_relation _prepare_group_columns SELECT select_modifier_list? grouped_projection_list FROM _emit_relation where_clause? GROUP BY _group_columns rollup_suffix? grouped_having_clause? _scope_end
+    | _scope_begin _prepare_relation _prepare_group_columns SELECT select_modifier_list? grouped_projection_list FROM _emit_relation where_clause? GROUP BY _group_column , _group_expression grouped_having_clause? _scope_end
+    | _scope_begin _prepare_relation _prepare_group_column SELECT select_modifier_list? position_grouped_projection_list FROM _emit_relation where_clause? GROUP BY 1 grouped_having_clause? _scope_end
     | grouping_query
-    | _scope_begin _prepare_relation _scope_enable_named_window SELECT select_modifier? projection_list FROM _emit_relation where_clause? named_window_clause _scope_end
+    | _scope_begin _prepare_relation _scope_enable_named_window SELECT select_modifier_list? projection_list FROM _emit_relation where_clause? named_window_clause _scope_end
     | _scope_begin SELECT scalar_projection _scope_end
     | _scope_begin SELECT _int AS _projection_alias WHERE _int comparison_operator _int _scope_end
     | _scope_begin SELECT _text AS _projection_alias GROUP BY 1 HAVING `q1` IS NOT NULL _scope_end
@@ -130,6 +126,11 @@ boundary_query:
 
 derived_select:
     _scope_begin_isolated _prepare_relation SELECT named_projection_list FROM _emit_relation where_clause? _scope_end
+
+derived_query_expression:
+    derived_select
+    | derived_select
+    | query_expression
 
 lateral_derived_select:
     _scope_begin _prepare_relation SELECT named_projection_list FROM _emit_relation where_clause? _scope_end
@@ -167,22 +168,19 @@ cte_query:
     | _cte_frame_begin WITH _define_base_cte , _define_dependent_cte _scope_begin_isolated _prepare_latest_cte_relation SELECT projection_list FROM _emit_relation where_clause? _scope_end outer_order_clause? limit_clause? _cte_frame_end
     | _cte_frame_begin WITH _define_base_cte _scope_begin_isolated _prepare_cte_reuse_relation SELECT projection_list FROM _emit_relation where_clause? _scope_end outer_order_clause? limit_clause? _cte_frame_end
     | _prepare_cte WITH _emit_cte_name AS ( _emit_cte_body ) _emit_cte_outer _clear_cte
+    | _prepare_cte WITH _emit_cte_name _emit_cte_column_list AS ( _emit_cte_body ) _emit_cte_outer _clear_cte
+    | _prepare_query_expression_cte WITH _emit_cte_name _emit_cte_column_list AS ( _emit_cte_body ) _emit_cte_outer _clear_cte
 
 recursive_cte_query:
     _prepare_recursive_cte WITH RECURSIVE _emit_cte_name ( `n` ) AS ( SELECT 1 recursive_union_operator SELECT `n` + 1 FROM _emit_cte_name WHERE `n` < _recursive_limit ) SELECT `n` AS `q1` FROM _emit_cte_name ORDER BY `q1` _clear_cte
+    | _prepare_recursive_pair_cte WITH RECURSIVE _emit_cte_name ( `n` , `total` ) AS ( SELECT 1 , 1 recursive_union_operator SELECT `n` + 1 , `total` + `n` FROM _emit_cte_name WHERE `n` < _recursive_limit ) SELECT `n` AS `q1` , `total` AS `q2` FROM _emit_cte_name ORDER BY `q1` _clear_cte
 
 recursive_union_operator:
     UNION ALL
     | UNION DISTINCT
 
-table_query:
-    table_query_core
-
 table_query_core:
     TABLE _query_table
-
-values_query:
-    values_query_core
 
 values_query_core:
     _prepare_numeric_1_set_signature VALUES values_rows _clear_set_signature
@@ -212,6 +210,8 @@ table_set_chain:
     | _set_select_operand set_operator _set_table_operand
     | _set_table_operand set_operator _set_values_operand set_operator _set_select_operand
     | ( _set_table_operand set_operator _set_values_operand ) set_operator _set_select_operand
+    | _set_table_operand set_operator _set_values_operand set_operator _set_select_operand set_operator _set_scalar_operand
+    | ( _set_table_operand set_operator _set_values_operand ) set_operator ( _set_select_operand set_operator _set_scalar_operand )
 
 typed_set_chain:
     _set_select_operand set_operator _set_values_operand
@@ -220,11 +220,8 @@ typed_set_chain:
     | _set_select_topn_operand set_operator _set_values_operand
     | _set_select_operand set_operator _set_values_operand set_operator _set_scalar_operand
     | ( _set_select_operand set_operator _set_values_operand ) set_operator _set_scalar_operand
-
-set_operand:
-    _set_select_operand
-    | _set_scalar_operand
-    | _set_values_operand
+    | _set_select_operand set_operator _set_values_operand set_operator _set_scalar_operand set_operator _set_select_operand
+    | ( _set_select_operand set_operator _set_values_operand ) set_operator ( _set_scalar_operand set_operator _set_select_operand )
 
 set_operator:
     UNION
@@ -235,20 +232,25 @@ set_operator:
     | EXCEPT
     | EXCEPT ALL
 
-select_modifier:
-    ALL
-    | HIGH_PRIORITY
-    | STRAIGHT_JOIN
-    | SQL_SMALL_RESULT
-    | SQL_BIG_RESULT
-    | SQL_BUFFER_RESULT
-    | SQL_CALC_FOUND_ROWS
-    | SQL_NO_CACHE
+select_modifier_list:
+    row_qualifier
     | _optimizer_hint
+    | SQL_NO_CACHE
+    | SQL_CALC_FOUND_ROWS
+    | SQL_NO_CACHE SQL_CALC_FOUND_ROWS
+    | _optimizer_hint? row_qualifier? HIGH_PRIORITY STRAIGHT_JOIN? result_size_modifier? SQL_BUFFER_RESULT? SQL_NO_CACHE? SQL_CALC_FOUND_ROWS?
+    | _optimizer_hint? row_qualifier? STRAIGHT_JOIN result_size_modifier? SQL_BUFFER_RESULT? SQL_NO_CACHE? SQL_CALC_FOUND_ROWS?
+    | _optimizer_hint? row_qualifier? result_size_modifier SQL_BUFFER_RESULT? SQL_NO_CACHE? SQL_CALC_FOUND_ROWS?
+    | _optimizer_hint? row_qualifier? SQL_BUFFER_RESULT SQL_NO_CACHE? SQL_CALC_FOUND_ROWS?
 
-distinct_modifier:
-    DISTINCT
+row_qualifier:
+    ALL
+    | DISTINCT
     | DISTINCTROW
+
+result_size_modifier:
+    SQL_SMALL_RESULT
+    | SQL_BIG_RESULT
 
 projection_list:
     projection_no_bare_star
@@ -281,6 +283,11 @@ grouped_projection_list:
     | aggregate_expression AS _projection_alias , _group_column AS _projection_alias
     | _group_column AS _projection_alias , aggregate_expression AS _projection_alias , aggregate_expression AS _projection_alias
 
+position_grouped_projection_list:
+    _group_column AS _projection_alias
+    | _group_column AS _projection_alias , aggregate_expression AS _projection_alias
+    | _group_column AS _projection_alias , aggregate_expression AS _projection_alias , aggregate_expression AS _projection_alias
+
 named_projection:
     _any_column AS _projection_alias
     | _any_column _projection_alias
@@ -302,33 +309,37 @@ relation:
     | _table
     | _table
     | _table_implicit_alias
+    | _table_partition
+    | _table_index_hint
+    | _table_partition_index_hint
     | _table conditional_join_type _table ON predicate
     | _table conditional_join_type _table ON predicate
     | _table conditionless_join_type _table
     | _table , _table
     | _table using_join_type _table USING ( _common_column )
+    | _table using_join_type _table USING ( _common_columns )
     | _table LEFT JOIN _table ON predicate
     | _table LEFT OUTER JOIN _table ON predicate
     | _table RIGHT JOIN _table ON predicate
     | _table RIGHT OUTER JOIN _table ON predicate
-    | _table natural_join_type _table
+    | _natural_join_relation
     | _table STRAIGHT_JOIN _table ON predicate
     | ( _table conditional_join_type _table ON predicate ) conditional_join_type _table ON predicate
+    | ( ( _table conditional_join_type _table ON predicate ) LEFT JOIN _table ON predicate ) RIGHT JOIN _table ON predicate
     | _derived_relation
     | _derived_relation_implicit_alias
     | _derived_relation_columns
+    | _derived_query_expression_relation
     | _table conditional_join_type _derived_relation ON predicate
-    | _table conditional_join_type _lateral_derived_relation ON predicate
+    | _table lateral_join_type _lateral_derived_relation ON predicate
+    | _table LEFT JOIN _lateral_derived_relation ON predicate
+    | _table LEFT OUTER JOIN _lateral_derived_relation ON predicate
+    | _right_lateral_join_relation
     | _json_table_relation
     | _json_table_literal_relation
     | _json_table_exists_relation
     | _json_table_nested_relation
     | _table conditional_join_type _json_table_relation ON predicate
-
-join_type:
-    JOIN
-    | INNER JOIN
-    | CROSS JOIN
 
 conditional_join_type:
     JOIN
@@ -341,6 +352,11 @@ conditionless_join_type:
     | INNER JOIN
     | CROSS JOIN
     | STRAIGHT_JOIN
+
+lateral_join_type:
+    JOIN
+    | INNER JOIN
+    | CROSS JOIN
 
 using_join_type:
     JOIN
@@ -378,15 +394,15 @@ grouped_having_clause:
 outer_order_clause:
     ORDER BY _query_output_item direction?
     | ORDER BY _query_output_item direction? , _query_output_item direction?
+    | ORDER BY _query_output_item direction? , _query_output_item direction? , _query_output_item direction?
+    | ORDER BY _query_output_item direction? , _query_output_item direction? , _query_output_item direction? , _query_output_item direction?
 
 order_clause:
     ORDER BY order_item
     | ORDER BY order_item , order_item
     | ORDER BY order_item , order_item , order_item
-
-projection_order_clause:
-    ORDER BY _projection_order_item direction?
-    | ORDER BY _projection_order_item direction? , _projection_order_item direction?
+    | ORDER BY order_item , order_item , order_item , order_item
+    | ORDER BY order_item , order_item , order_item , order_item , order_item
 
 order_item:
     _order_item direction?
@@ -599,6 +615,29 @@ interval_expression:
     | DATE_SUB ( _strict_temporal_column , INTERVAL _positive_uint HOUR ) _result_temporal
     | TIMESTAMPADD ( MINUTE , _positive_uint , _strict_temporal_column ) _result_temporal
     | TIMESTAMPDIFF ( DAY , _strict_temporal_column , _strict_temporal_column ) _result_numeric
+    | ( _strict_temporal_column + INTERVAL _positive_uint MICROSECOND ) _result_temporal
+    | ( _strict_temporal_column + INTERVAL _positive_uint SECOND ) _result_temporal
+    | ( _strict_temporal_column + INTERVAL _positive_uint WEEK ) _result_temporal
+    | ( _strict_temporal_column + INTERVAL _positive_uint MONTH ) _result_temporal
+    | ( _strict_temporal_column + INTERVAL _positive_uint QUARTER ) _result_temporal
+    | ( _strict_temporal_column + INTERVAL _positive_uint YEAR ) _result_temporal
+    | DATE_ADD ( _strict_temporal_column , INTERVAL '1-2' YEAR_MONTH ) _result_temporal
+    | DATE_ADD ( _strict_temporal_column , INTERVAL '1 02' DAY_HOUR ) _result_temporal
+    | DATE_ADD ( _strict_temporal_column , INTERVAL '1 02:03' DAY_MINUTE ) _result_temporal
+    | DATE_ADD ( _strict_temporal_column , INTERVAL '1 02:03:04' DAY_SECOND ) _result_temporal
+    | DATE_ADD ( _strict_temporal_column , INTERVAL '1 02:03:04.000005' DAY_MICROSECOND ) _result_temporal
+    | DATE_SUB ( _strict_temporal_column , INTERVAL '02:03' HOUR_MINUTE ) _result_temporal
+    | DATE_SUB ( _strict_temporal_column , INTERVAL '02:03:04' HOUR_SECOND ) _result_temporal
+    | DATE_SUB ( _strict_temporal_column , INTERVAL '02:03:04.000005' HOUR_MICROSECOND ) _result_temporal
+    | DATE_ADD ( _strict_temporal_column , INTERVAL '03:04' MINUTE_SECOND ) _result_temporal
+    | DATE_ADD ( _strict_temporal_column , INTERVAL '03:04.000005' MINUTE_MICROSECOND ) _result_temporal
+    | DATE_ADD ( _strict_temporal_column , INTERVAL '04.000005' SECOND_MICROSECOND ) _result_temporal
+    | TIMESTAMPADD ( SECOND , _positive_uint , _strict_temporal_column ) _result_temporal
+    | TIMESTAMPADD ( HOUR , _positive_uint , _strict_temporal_column ) _result_temporal
+    | TIMESTAMPADD ( MONTH , _positive_uint , _strict_temporal_column ) _result_temporal
+    | TIMESTAMPDIFF ( MICROSECOND , _strict_temporal_column , _strict_temporal_column ) _result_numeric
+    | TIMESTAMPDIFF ( MONTH , _strict_temporal_column , _strict_temporal_column ) _result_numeric
+    | TIMESTAMPDIFF ( YEAR , _strict_temporal_column , _strict_temporal_column ) _result_numeric
 
 arithmetic_operator:
     +
@@ -626,8 +665,22 @@ case_expression:
     | CASE WHEN predicate THEN expression WHEN predicate THEN expression ELSE expression END
 
 cast_expression:
-    CAST ( expression AS _cast_type )
-    | CONVERT ( expression , _cast_type )
+    CAST ( _int AS SIGNED ) _result_numeric
+    | CAST ( _uint AS UNSIGNED ) _result_numeric
+    | CAST ( _int AS DECIMAL ( 20 , 6 ) ) _result_numeric
+    | CAST ( _int AS FLOAT ) _result_numeric
+    | CAST ( _int AS DOUBLE ) _result_numeric
+    | CAST ( _text AS CHAR ( 64 ) CHARACTER SET utf8mb4 ) _result_text
+    | CAST ( _binary_literal AS BINARY ( 64 ) ) _result_binary
+    | CAST ( '2024-02-29' AS DATE ) _result_temporal
+    | CAST ( '12:34:56.123456' AS TIME ( 6 ) ) _result_temporal
+    | CAST ( '2024-02-29 12:34:56.123456' AS DATETIME ( 6 ) ) _result_temporal
+    | CAST ( 2024 AS YEAR ) _result_temporal
+    | CAST ( '{"k":1}' AS JSON ) _result_json
+    | CAST ( ST_GEOMFROMTEXT ( 'POINT(0 0)' ) AS POINT ) _result_spatial
+    | CONVERT ( _int , SIGNED ) _result_numeric
+    | CONVERT ( _text , CHAR ( 64 ) ) _result_text
+    | CONVERT ( _text USING utf8mb4 ) _result_text
     | BINARY atom
 
 scalar_function:
@@ -1052,17 +1105,23 @@ aggregate_expression:
     | STDDEV_SAMP ( _numeric_column ) _result_numeric
     | VAR_POP ( _numeric_column ) _result_numeric
     | VAR_SAMP ( _numeric_column ) _result_numeric
-    | GROUP_CONCAT ( _any_column ) _result_text
-    | GROUP_CONCAT ( DISTINCT _text_column ORDER BY _text_column direction? SEPARATOR ',' ) _result_text
-    | JSON_ARRAYAGG ( _any_column ) _result_json
+    | _deterministic_group_concat
+    | JSON_ARRAYAGG ( 1 ) _result_json
+    | _json_object_aggregate
 
 window_expression:
     ranking_window_function OVER ( window_spec ) _result_numeric
     | value_window_function OVER ( window_spec ) _result_window_value
     | aggregate_window_function OVER ( window_spec )
-    | ranking_window_function OVER _window_name _result_numeric
-    | value_window_function OVER _window_name _result_window_value
+    | peer_safe_ranking_window_function OVER ( ) _result_numeric
+    | aggregate_window_function OVER ( )
+    | peer_safe_ranking_window_function OVER ( PARTITION BY window_partition_list ) _result_numeric
+    | aggregate_window_function OVER ( PARTITION BY window_partition_list )
+    | peer_safe_ranking_window_function OVER _window_name _result_numeric
+    | ranking_window_function OVER _window_name2 _result_numeric
+    | value_window_function OVER _window_name2 _result_window_value
     | aggregate_window_function OVER _window_name
+    | aggregate_window_function OVER _window_name2
 
 ranking_window_function:
     ROW_NUMBER ( )
@@ -1071,6 +1130,12 @@ ranking_window_function:
     | CUME_DIST ( )
     | PERCENT_RANK ( )
     | NTILE ( _positive_uint )
+
+peer_safe_ranking_window_function:
+    RANK ( )
+    | DENSE_RANK ( )
+    | CUME_DIST ( )
+    | PERCENT_RANK ( )
 
 value_window_function:
     LAG ( _window_value_column )
@@ -1096,11 +1161,15 @@ aggregate_window_function:
     | BIT_XOR ( _numeric_column ) _result_numeric
 
 window_spec:
-    PARTITION BY _any_column
-    | ORDER BY _any_column direction?
-    | PARTITION BY _any_column ORDER BY _any_column direction?
-    | ORDER BY _any_column direction? frame_clause
-    | PARTITION BY _any_column ORDER BY _any_column direction? frame_clause
+    ORDER BY _window_total_order
+    | PARTITION BY window_partition_list ORDER BY _window_total_order
+    | ORDER BY _window_total_order frame_clause
+    | PARTITION BY window_partition_list ORDER BY _window_total_order frame_clause
+    | ORDER BY _window_numeric_order numeric_range_frame_clause
+    | ORDER BY _window_temporal_order temporal_range_frame_clause
+
+window_partition_list:
+    _window_partition_list
 
 frame_clause:
     ROWS UNBOUNDED PRECEDING
@@ -1111,14 +1180,29 @@ frame_clause:
     | ROWS BETWEEN _uint PRECEDING AND CURRENT ROW
     | ROWS BETWEEN _uint PRECEDING AND _uint FOLLOWING
     | ROWS BETWEEN CURRENT ROW AND _uint FOLLOWING
+    | ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    | ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING
+    | ROWS BETWEEN _uint PRECEDING AND UNBOUNDED FOLLOWING
+    | ROWS BETWEEN CURRENT ROW AND CURRENT ROW
+    | ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING
+    | ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING
     | RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     | RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING
     | RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
 
+numeric_range_frame_clause:
+    RANGE BETWEEN 2 PRECEDING AND 1 PRECEDING
+    | RANGE BETWEEN 1 PRECEDING AND CURRENT ROW
+    | RANGE BETWEEN CURRENT ROW AND 1 FOLLOWING
+    | RANGE BETWEEN 1 FOLLOWING AND 2 FOLLOWING
+
+temporal_range_frame_clause:
+    RANGE BETWEEN INTERVAL 2 DAY PRECEDING AND INTERVAL 1 DAY PRECEDING
+    | RANGE BETWEEN INTERVAL 1 DAY PRECEDING AND CURRENT ROW
+    | RANGE BETWEEN CURRENT ROW AND INTERVAL 1 DAY FOLLOWING
+    | RANGE BETWEEN INTERVAL 1 DAY FOLLOWING AND INTERVAL 2 DAY FOLLOWING
+
 named_window_clause:
-    WINDOW _window_name AS ( )
-    | WINDOW _window_name AS ( PARTITION BY _any_column )
-    | WINDOW _window_name AS ( ORDER BY _any_column direction? )
-    | WINDOW _window_name AS ( PARTITION BY _any_column ORDER BY _any_column direction? )
-    | WINDOW _window_name AS ( ORDER BY _any_column direction? frame_clause )
-    | WINDOW _window_name AS ( PARTITION BY _any_column ORDER BY _any_column direction? frame_clause )
+    WINDOW _window_name AS ( PARTITION BY window_partition_list ) , _window_name2 AS ( _window_name ORDER BY _window_total_order )
+    | WINDOW _window_name AS ( ORDER BY _window_total_order ) , _window_name2 AS ( _window_name frame_clause )
+    | WINDOW _window_name AS ( ORDER BY _window_total_order ) , _window_name2 AS ( _window_name )

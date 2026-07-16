@@ -33,9 +33,7 @@ class _RawVersionCursor:
 
     def __init__(self, version: str) -> None:
         self.version = version
-        self.description = (
-            ("VERSION()", 253, None, None, None, None, False, 0, 45),
-        )
+        self.description = (("VERSION()", 253, None, None, None, None, False, 0, 45),)
         self.executed: list[str] = []
         self.closed = False
         self._sent = False
@@ -135,9 +133,7 @@ def test_jsonl_event_sink_thaws_nested_negative_error_payloads(tmp_path: Path) -
                 "errno": 1054,
                 "sqlstate": "42S22",
             },
-            "observed_error_identities": (
-                {"errno": 1054, "sqlstate": "42S22"},
-            ),
+            "observed_error_identities": ({"errno": 1054, "sqlstate": "42S22"},),
         },
     )
 
@@ -179,9 +175,7 @@ def test_mysql_connector_factory_injection_maps_ports_to_sockets_without_passwor
     )
 
     assert versions == {role: "8.0.41" for role in NodeRole}
-    assert [call["unix_socket"] for call in fake_connect.calls] == [
-        str(path) for path in paths
-    ]
+    assert [call["unix_socket"] for call in fake_connect.calls] == [str(path) for path in paths]
     assert all(call["user"] == "root" for call in fake_connect.calls)
     assert all("host" not in call and "port" not in call for call in fake_connect.calls)
     assert all("password" not in call for call in fake_connect.calls)
@@ -201,16 +195,14 @@ def test_runtime_assembles_real_production_service_after_fake_socket_preflight(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    fake_connect = _FakeConnect(
-        {str(path): "8.0.41-community" for path in config.sockets}
-    )
+    fake_connect = _FakeConnect({str(path): "8.0.41-community" for path in config.sockets})
 
     runtime = soak_script.build_runtime(config, fake_connect)
 
-    assert runtime.versions == {
-        role: "8.0.41-community" for role in NodeRole
-    }
+    assert runtime.versions == {role: "8.0.41-community" for role in NodeRole}
     assert runtime.service.__class__.__name__ == "CorrectnessRunService"
+    rounds = runtime.service._rounds
+    assert rounds._source._grammar_queries is not None
     assert len(fake_connect.calls) == 3
 
 

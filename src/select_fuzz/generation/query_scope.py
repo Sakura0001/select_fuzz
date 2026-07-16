@@ -50,6 +50,18 @@ class QueryCoverageScope:
     def excluded_feature_ids(self) -> frozenset[str]:
         return frozenset(self.exclusion_reasons)
 
+    @property
+    def excluded_families(self) -> frozenset[str]:
+        """Feature-family names the grammar generator must not emit."""
+
+        return frozenset(
+            reason.value
+            for reason in (
+                *self.exclusion_reasons.values(),
+                *self.excluded_profile_reasons.values(),
+            )
+        )
+
     def validate_catalog(self, catalog: FeatureCatalog) -> None:
         catalog_ids = {spec.feature_id for spec in catalog}
         unknown = self.excluded_feature_ids - catalog_ids

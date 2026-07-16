@@ -11,9 +11,12 @@ import mysql.connector
 import pytest
 
 from select_fuzz.generation.data import DataScenario
+from select_fuzz.generation.function_registry import DETERMINISTIC_FUNCTION_SIGNATURES
 from select_fuzz.generation.query_grammar import (
     CandidateQuery,
+    FunctionValueProfile,
     GrammarAlternative,
+    GrammarQueryConfig,
     GrammarProduction,
     GrammarQueryGenerator,
     GrammarSymbol,
@@ -25,9 +28,9 @@ from test_mysql8041_grammar_p1 import _manifest
 
 
 _ROOT = Path(__file__).resolve().parents[2]
-_CANONICAL_GRAMMAR = SelectGrammar.from_path(
-    _ROOT / "catalog" / "mysql-8.0.41-select.grammar.yy"
-)
+_CANONICAL_GRAMMAR_PATH = _ROOT / "catalog" / "mysql-8.0.41-select.grammar.yy"
+_CANONICAL_SOURCE_TEXT = _CANONICAL_GRAMMAR_PATH.read_text(encoding="utf-8")
+_CANONICAL_GRAMMAR = SelectGrammar.from_text(_CANONICAL_SOURCE_TEXT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +38,7 @@ class _Case:
     name: str
     candidate: CandidateQuery
     expected_fragments: tuple[str, ...]
+    expected_warning_codes: tuple[int, ...] | None = None
 
 
 def _sockets() -> tuple[str, ...]:
@@ -87,7 +91,10 @@ def _grammar_for(
     productions["acceptance_query"] = _production("acceptance_query", (root_symbols,))
     return SelectGrammar(
         productions,
-        source_text=f"{_CANONICAL_GRAMMAR.sha256}:acceptance:{root_symbols}",
+        # Keep the evidence hash equal to the checked-in canonical grammar.
+        # The temporary acceptance root only selects one exact production
+        # alternative; it must not look like a different grammar version.
+        source_text=_CANONICAL_SOURCE_TEXT,
         root="acceptance_query",
     )
 
@@ -100,6 +107,7 @@ def _generate(
     root_symbols: tuple[str, ...],
     relation_symbols: tuple[str, ...] = ("_table",),
     overrides: dict[str, GrammarProduction] | None = None,
+    grammar_config: GrammarQueryConfig | None = None,
 ) -> CandidateQuery:
     grammar = _grammar_for(
         case_production=case_production,
@@ -108,7 +116,11 @@ def _generate(
         relation_symbols=relation_symbols,
         overrides=overrides,
     )
-    return GrammarQueryGenerator(grammar).generate(_manifest(), seed=seed)
+    return GrammarQueryGenerator(grammar).generate(
+        _manifest(),
+        seed=seed,
+        grammar_config=grammar_config,
+    )
 
 
 def _anti_cases() -> tuple[_Case, ...]:
@@ -308,6 +320,24 @@ def _hint_cases() -> tuple[_Case, ...]:
                 fragments,
             )
         )
+    cases.append(
+        _Case(
+            "index_secondary_join_relation",
+            _generate(
+                seed=73_004,
+                root_symbols=tuple(
+                    "_optimizer_hint_index_secondary"
+                    if symbol == "__HINT__"
+                    else "_prepare_relation"
+                    if symbol == "_prepare_base_relation"
+                    else symbol
+                    for symbol in normal_root
+                ),
+                relation_symbols=("_table", "JOIN", "_table"),
+            ),
+            ("INDEX", "idx_tenant"),
+        )
+    )
     for width in (2, 3, 4):
         relation = tuple(
             symbol
@@ -385,11 +415,11 @@ def _normalized_rows(rows: list[tuple[object, ...]]) -> tuple[str, ...]:
     return tuple(sorted(repr(tuple(row)) for row in rows))
 
 
-def _artifact_path() -> Path:
+def _artifact_path(default_name: str = "latest-grammar-matrix-20260716") -> Path:
     configured = os.environ.get("SELECT_FUZZ_MATRIX_ARTIFACT_DIR")
     if configured:
         return Path(configured)
-    return _ROOT / "artifacts" / "latest-grammar-matrix-20260716"
+    return _ROOT / "artifacts" / default_name
 
 
 def _write_artifact(path: Path, records: list[dict[str, object]], cases: tuple[_Case, ...]) -> None:
@@ -414,7 +444,11 @@ def _write_artifact(path: Path, records: list[dict[str, object]], cases: tuple[_
     )
 
 
-def _run_cases(cases: tuple[_Case, ...]) -> None:
+def _run_cases(
+    cases: tuple[_Case, ...],
+    *,
+    artifact_name: str = "latest-grammar-matrix-20260716",
+) -> None:
     manifest = _manifest()
     setup = SetupBundleBuilder().build(
         manifest,
@@ -424,7 +458,7 @@ def _run_cases(cases: tuple[_Case, ...]) -> None:
     )
     sockets = _sockets()
     database = f"sf_grammar_matrix_{time.time_ns():x}"[-64:]
-    artifact = _artifact_path()
+    artifact = _artifact_path(artifact_name)
     records: list[dict[str, object]] = []
     connections = [
         mysql.connector.connect(unix_socket=socket, user="root", autocommit=True)
@@ -492,6 +526,11 @@ def _run_cases(cases: tuple[_Case, ...]) -> None:
             assert outcomes[0] == outcomes[1] == outcomes[2], case.name
             assert warning_codes[0] == warning_codes[1] == warning_codes[2], case.name
             assert metadata[0] == metadata[1] == metadata[2], case.name
+            if case.expected_warning_codes is not None:
+                assert warning_codes == [case.expected_warning_codes] * 3, (
+                    case.name,
+                    warning_codes,
+                )
             records.append(
                 {
                     "case": case.name,
@@ -517,16 +556,58 @@ def _run_cases(cases: tuple[_Case, ...]) -> None:
 @pytest.mark.mysql
 @pytest.mark.timeout(600)
 def test_anti_subquery_cardinality_null_and_nested_matrix_on_three_exact_8041_sockets() -> None:
-    _run_cases(_anti_cases())
+    _run_cases(_anti_cases(), artifact_name="latest-grammar-matrix-20260716")
 
 
 @pytest.mark.mysql
 @pytest.mark.timeout(600)
 def test_all_legal_frame_bounds_on_three_exact_8041_sockets() -> None:
-    _run_cases(_frame_cases())
+    _run_cases(_frame_cases(), artifact_name="latest-grammar-frame-matrix-20260716")
 
 
 @pytest.mark.mysql
 @pytest.mark.timeout(600)
 def test_optimizer_hint_positive_matrix_on_three_exact_8041_sockets() -> None:
-    _run_cases(_hint_cases())
+    _run_cases(_hint_cases(), artifact_name="latest-grammar-hint-matrix-20260716")
+
+
+def _function_cases(
+    profile: FunctionValueProfile = FunctionValueProfile.NORMAL,
+) -> tuple[_Case, ...]:
+    cases: list[_Case] = []
+    ordinal = 0
+    for signature in DETERMINISTIC_FUNCTION_SIGNATURES:
+        variants = (
+            signature.signature_id,
+            *(f"{signature.signature_id}_null_{position}" for position in sorted(signature.null_argument_positions)),
+        )
+        for variant in variants:
+            null_position = (
+                None
+                if variant == signature.signature_id
+                else int(variant.rsplit("_", maxsplit=1)[-1])
+            )
+            cases.append(
+                _Case(
+                    f"function_{variant}",
+                    _generate(
+                        seed=74_000 + ordinal,
+                        root_symbols=(
+                            "_scope_begin",
+                            "SELECT",
+                            "function_case",
+                            "AS",
+                            "_projection_alias",
+                            "_scope_end",
+                        ),
+                        overrides={
+                            "function_case": _production("function_case", ((f"_fn_{variant}",),))
+                        },
+                        grammar_config=GrammarQueryConfig(function_value_profile=profile),
+                    ),
+                    (signature.sql_name,),
+                    signature.expected_warning_codes(null_position),
+                )
+            )
+            ordinal += 1
+    return tuple(cases)

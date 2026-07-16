@@ -102,6 +102,57 @@ def test_complete_column_metadata_is_compared(changed: ColumnMeta) -> None:
     assert any(pair.category == "metadata" for pair in result.pairwise if not pair.matched)
 
 
+def test_plan_dependent_field_origin_flags_are_advisory() -> None:
+    without_origin = ColumnMeta(
+        "id",
+        8,
+        False,
+        True,
+        False,
+        character_set_id=63,
+        column_length=20,
+        decimals=0,
+        flags=4129,
+    )
+    with_origin = ColumnMeta(
+        "id",
+        8,
+        False,
+        True,
+        False,
+        character_set_id=63,
+        column_length=20,
+        decimals=0,
+        flags=20515,
+    )
+
+    result = compare_three_nodes(
+        (
+            _success(NodeRole.BASELINE, (without_origin,), ((1,),)),
+            _success(NodeRole.CUSTOM_OFF, (without_origin,), ((1,),)),
+            _success(NodeRole.CUSTOM_ON, (with_origin,), ((1,),)),
+        )
+    )
+
+    assert result.verdict is OracleVerdict.MATCH
+
+
+def test_value_semantic_field_flags_remain_strict() -> None:
+    plain = ColumnMeta("v", 254, True, False, False, flags=0)
+    mysql_set = ColumnMeta("v", 254, True, False, False, flags=2048)
+
+    result = compare_three_nodes(
+        (
+            _success(NodeRole.BASELINE, (plain,), (("a",),)),
+            _success(NodeRole.CUSTOM_OFF, (plain,), (("a",),)),
+            _success(NodeRole.CUSTOM_ON, (mysql_set,), (("a",),)),
+        )
+    )
+
+    assert result.verdict is OracleVerdict.RESULT_MISMATCH
+    assert any(pair.category == "metadata" for pair in result.pairwise if not pair.matched)
+
+
 @pytest.mark.parametrize(
     ("column", "left", "right"),
     [

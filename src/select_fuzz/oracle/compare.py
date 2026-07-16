@@ -32,6 +32,22 @@ from select_fuzz.oracle.errors import (
 MAX_FUZZY_SCALAR_COMPARISONS = 4_000_000
 ORDERED_FAST_PATH_MIN_ROWS = 256
 
+# MySQL may attach these protocol flags according to the chosen execution plan
+# and result-field origin.  In particular, an internal temporary table can
+# remove PRI_KEY/NUM from an otherwise identical JOIN result.  Preserve the raw
+# flags in artifacts, but exclude non-value semantics from correctness.
+_ADVISORY_FIELD_FLAG_MASK = (
+    0x0002  # PRI_KEY
+    | 0x0004  # UNIQUE_KEY
+    | 0x0008  # MULTIPLE_KEY
+    | 0x0200  # AUTO_INCREMENT
+    | 0x1000  # NO_DEFAULT_VALUE
+    | 0x2000  # ON_UPDATE_NOW
+    | 0x4000  # NUM / GROUP
+    | 0x8000  # PART_KEY
+    | 0x10000  # UNIQUE
+)
+
 
 class OracleVerdict(StrEnum):
     MATCH = "match"
@@ -225,8 +241,10 @@ def _result_sets_equal(
     right: NodeExecution,
     budget: _FuzzyComparisonBudget,
 ) -> tuple[bool, str, str]:
-    if left.columns != right.columns:
-        return False, "metadata", "complete column metadata differs"
+    if tuple(_semantic_column_metadata(column) for column in left.columns) != tuple(
+        _semantic_column_metadata(column) for column in right.columns
+    ):
+        return False, "metadata", "semantic column metadata differs"
     columns = left.columns
     tolerances = tuple(tolerance_for(column) for column in columns if is_float_column(column))
     try:
@@ -288,6 +306,25 @@ def _result_sets_equal(
         ):
             return False, "rows", "typed multiset has no tolerance-valid perfect matching"
     return True, "rows", "typed unordered multisets match"
+
+
+def _semantic_column_metadata(column: ColumnMeta) -> tuple[object, ...]:
+    flags = (
+        None
+        if column.flags is None
+        else column.flags & ~_ADVISORY_FIELD_FLAG_MASK
+    )
+    return (
+        column.name,
+        column.type_code,
+        column.nullable,
+        column.unsigned,
+        column.binary,
+        column.character_set_id,
+        column.column_length,
+        column.decimals,
+        flags,
+    )
 
 
 def _compare_pair(

@@ -1,81 +1,237 @@
-# Copy this file to config/local.yaml and keep real endpoints in that ignored file.
+# select-fuzz 默认参数配置。
+# 建议复制为 config/local.yaml 后修改；local.yaml 已被 Git 忽略，不要在配置中直接写用户名或密码。
+
+# 运行模式：correctness=三节点结果差分；performance=三节点性能对比；fuzz=单集群并发读写压力。默认 correctness。
 mode: correctness
-full_thread_sql_log: false  # true: append every executed statement to sql/worker-NNN.sql
-replica_parameters_file: replica-parameters.example.yaml
+
+# 是否把每条已执行 SQL 追加到 artifacts/sql/worker-NNN.sql。默认关闭，长时间运行时可减少磁盘占用。
+full_thread_sql_log: false
+
+# 副本 SESSION 参数文件。相对路径以本文件所在目录为基准；null 表示使用三个角色的空参数默认值。
+replica_parameters_file: null
+
+# setup 完成后等待副本追平的最长秒数；范围 (0, 300]，默认 10 秒。
 replica_sync_timeout_seconds: 10
 
+# 固定三角色拓扑；correctness/performance 必须使用 6 个互不重复的 endpoint。
+# fuzz 模式只使用 fuzz.target_role，主库和备库可以配置为同一个负载均衡代理入口；
+# 可直接参考 config/intranet-fuzz.example.yaml。
 nodes:
+  # baseline：基线 MySQL，用于 EXPLAIN 准入和结果基准。
   - role: baseline
+    # baseline 主库：执行建库、建表和数据准备。
     primary:
+      # MySQL 主机名或 IP；必填。
       host: 127.0.0.1
+      # MySQL TCP 端口；范围 1-65535，endpoint 默认值为 3306。
       port: 3306
+      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
       username_env: SELECT_FUZZ_MYSQL_USER
+      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
       password_env: SELECT_FUZZ_MYSQL_PASSWORD
+      # 可选角色探针 SQL；null 表示不探测。与 role_probe_expected 必须同时设置或同时为 null。
+      role_probe_sql: null
+      # 角色探针期望返回的标量字符串；默认 null。
+      role_probe_expected: null
+    # baseline 副本：执行 SELECT 并作为差分结果基准，不能与对应主库使用同一 host/port。
     replica:
+      # MySQL 主机名或 IP；必填。
       host: 127.0.0.1
+      # MySQL TCP 端口；范围 1-65535。
       port: 3316
+      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
       username_env: SELECT_FUZZ_MYSQL_USER
+      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
       password_env: SELECT_FUZZ_MYSQL_PASSWORD
-  - role: custom_off
-    primary:
-      host: 127.0.0.1
-      port: 3307
-      username_env: SELECT_FUZZ_MYSQL_USER
-      password_env: SELECT_FUZZ_MYSQL_PASSWORD
-    replica:
-      host: 127.0.0.1
-      port: 3317
-      username_env: SELECT_FUZZ_MYSQL_USER
-      password_env: SELECT_FUZZ_MYSQL_PASSWORD
-  - role: custom_on
-    primary:
-      host: 127.0.0.1
-      port: 3308
-      username_env: SELECT_FUZZ_MYSQL_USER
-      password_env: SELECT_FUZZ_MYSQL_PASSWORD
-    replica:
-      host: 127.0.0.1
-      port: 3318
-      username_env: SELECT_FUZZ_MYSQL_USER
-      password_env: SELECT_FUZZ_MYSQL_PASSWORD
+      # 可选角色探针 SQL；与 role_probe_expected 成对设置。
+      role_probe_sql: null
+      # 角色探针期望返回值；默认 null。
+      role_probe_expected: null
 
+  # custom_off：待测 MySQL 的关闭目标优化/特性配置角色。
+  - role: custom_off
+    # custom_off 主库：执行建库、建表和数据准备。
+    primary:
+      # MySQL 主机名或 IP；必填。
+      host: 127.0.0.1
+      # MySQL TCP 端口；范围 1-65535。
+      port: 3307
+      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
+      username_env: SELECT_FUZZ_MYSQL_USER
+      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
+      # 可选角色探针 SQL；与 role_probe_expected 成对设置。
+      role_probe_sql: null
+      # 角色探针期望返回值；默认 null。
+      role_probe_expected: null
+    # custom_off 副本：使用 replica 参数文件中的 custom_off SESSION 参数执行查询。
+    replica:
+      # MySQL 主机名或 IP；必填。
+      host: 127.0.0.1
+      # MySQL TCP 端口；范围 1-65535。
+      port: 3317
+      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
+      username_env: SELECT_FUZZ_MYSQL_USER
+      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
+      # 可选角色探针 SQL；与 role_probe_expected 成对设置。
+      role_probe_sql: null
+      # 角色探针期望返回值；默认 null。
+      role_probe_expected: null
+
+  # custom_on：待测 MySQL 的开启目标优化/特性配置角色。
+  - role: custom_on
+    # custom_on 主库：执行建库、建表和数据准备。
+    primary:
+      # MySQL 主机名或 IP；必填。
+      host: 127.0.0.1
+      # MySQL TCP 端口；范围 1-65535。
+      port: 3308
+      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
+      username_env: SELECT_FUZZ_MYSQL_USER
+      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
+      # 可选角色探针 SQL；与 role_probe_expected 成对设置。
+      role_probe_sql: null
+      # 角色探针期望返回值；默认 null。
+      role_probe_expected: null
+    # custom_on 副本：使用 replica 参数文件中的 custom_on SESSION 参数执行查询。
+    # correctness/performance 中必须与主库不同；fuzz 模式可与主库共享代理入口。
+    replica:
+      # MySQL 主机名或 IP；必填。
+      host: 127.0.0.1
+      # MySQL TCP 端口；范围 1-65535。
+      port: 3318
+      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
+      username_env: SELECT_FUZZ_MYSQL_USER
+      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
+      # 可选角色探针 SQL；与 role_probe_expected 成对设置。
+      role_probe_sql: null
+      # 角色探针期望返回值；默认 null。
+      role_probe_expected: null
+
+# correctness：GrammarQueryGenerator 驱动的 SELECT 结果差分模式。
 correctness:
+  # 并发 worker 数；范围 1-64，默认 10。
   workers: 10
+  # 每轮需要成功执行并比较的查询数；最小 1，默认 1000。生成拒绝不计入完成数。
   queries_per_round: 1000
+  # 单条查询执行超时秒数；范围 (0, 300]，默认 15 秒。
   timeout_seconds: 15
+  # 单节点允许返回的最大结果行数；最小 1，默认 10000。
   row_limit: 10000
+  # 单节点允许返回的最大结果字节数；最小 1，默认 33554432（32 MiB）。
   byte_limit: 33554432
+  # 每张表的最小生成行数；最小 1，默认 10。
   min_rows_per_table: 10
+  # 每张表的最大生成行数；不得小于 min_rows_per_table，默认 500。
   max_rows_per_table: 500
-  free_random_rate: 0.20
-  negative_mutation_rate: 0.0
+  # 每轮 schema 的最少表数；范围 1-64，默认 1。
   min_tables: 1
+  # 每轮 schema 的最多表数；范围 1-64，默认 8。
   max_tables: 8
+  # 每张表的最少列数；范围 2-1017，默认 2。
   min_columns: 2
+  # 每张表的最多列数；范围 2-1017，默认 16。
   max_columns: 16
+  # 每张表最多索引数；范围 1-65，默认 8。
   max_indexes_per_table: 8
+  # 单个 query block 最多绑定表数；范围 1-64，且不得超过 max_tables，默认 4。
   max_query_tables: 4
-  max_query_depth: 3
+  # 自定义 .grammar.yy 路径；null 使用打包的 MySQL 8.0.41 默认文法。
   query_grammar_path: null
+  # 选择严格类型兼容表达式的概率百分比；范围 0-100，默认 80。
   grammar_compatible_type_percent: 80
+  # baseline EXPLAIN 准入超时秒数；范围 (0, 300]，默认 10 秒。
   explain_timeout_seconds: 10
 
+# performance：独立的性能 fuzz template、校准和三节点性能判定模式。
 performance:
+  # 性能模式固定单 worker；只能为 1。
   workers: 1
+  # 每轮性能查询数；最小 1，默认 100。
   queries_per_round: 100
+  # 首次物化时每张表的目标行数；最小 1，默认 100000。
   initial_table_rows: 100000
+  # 首次物化允许的每表行数上限；不得小于 initial_table_rows，默认 1000000。
   initial_table_rows_max: 1000000
+  # 单张表允许扩展到的最大行数；默认 50000000。
   max_table_rows: 50000000
+  # 一个性能 round 全部表的最大总行数；默认 100000000。
   max_total_rows: 100000000
+  # 批量插入的每批行数；范围 1-1000000，默认 10000。
   insert_batch_rows: 10000
+  # 性能 schema 最少表数；范围 1-16，默认 1。
   min_tables: 1
+  # 性能 schema 最多表数；范围 1-16，默认 4。
   max_tables: 4
+  # 每张性能表最少列数；范围 2-1017，默认 3。
   min_columns: 3
+  # 每张性能表最多列数；范围 2-1017，默认 10。
   max_columns: 10
+  # 每张性能表最多索引数；范围 1-65，默认 6。
   max_indexes_per_table: 6
+  # 单条性能查询最多涉及的表数；范围 1-16，且不得超过 max_tables，默认 4。
   max_query_tables: 4
+  # 性能查询树最大深度；范围 1-16，默认 3。
   max_query_depth: 3
+  # 旧配置兼容字段：历史最大校准轮数；最小 1，默认 8。当前 shared-round 生产流程不使用。
+  max_calibration_rounds: 8
+  # 旧配置兼容字段：每个参考点的校准次数；只能为 3。当前 shared-round 生产流程不使用。
+  calibration_runs_per_reference: 3
+  # 旧配置兼容字段：校准最短秒数；必须大于 0，默认 5。当前 shared-round 生产流程不使用。
+  calibration_min_seconds: 5
+  # 旧配置兼容字段：校准最长秒数；不得小于 calibration_min_seconds，默认 12。当前 shared-round 生产流程不使用。
+  calibration_max_seconds: 12
+  # 正式性能查询超时秒数；范围 (0, 300]，默认 15 秒。
   formal_timeout_seconds: 15
+  # schema/data 物化超时秒数；范围 (0, 300]，默认 300 秒。
   materialization_timeout_seconds: 300
+  # 性能退化判定阈值；0.20 表示慢 20% 及以上，最小 0，默认 0.20。
   regression_threshold: 0.20
+  # 三节点并发启动允许的最大偏差毫秒数；最小 0，默认 100 ms。
   max_start_skew_ms: 100
+
+# fuzz：在一个指定角色的主备集群上，为多个独立数据库并发执行读写压力。
+# 该模式不做结果正确性判定，也不使用 EXPLAIN ANALYZE；读结果会流式消费后丢弃。
+fuzz:
+  # 使用哪一组主备连接；PQ 由服务端预先开启，程序不会修改 PQ 会话开关。
+  target_role: custom_on
+  # 同一组集群上并行创建的数据库数量；每个数据库初始化完成后立即开始自己的 worker。
+  databases: 1
+  # 每个数据库连接主库的写线程数。
+  writer_threads_per_database: 2
+  # 每个数据库读线程数，固定按 1/3 主库、2/3 备库拆分，因此必须是 3 的倍数。
+  reader_threads_per_database: 6
+  # 所有数据库的连接总上限，防止配置意外打满本机。
+  max_total_connections: 1024
+  # 每个数据库初始化的表数和每表行数；行数应按真实业务压测量级调整。
+  initial_tables: 4
+  initial_rows_per_table: 10000
+  # 一个数据库允许的最大初始化/累计行数预算。
+  max_rows_per_database: 10000000
+  # 每张表的列数随机取值，按业务压测默认生成 200～500 列。
+  min_columns_per_table: 200
+  max_columns_per_table: 500
+  # 每张表随机生成的索引数量；会覆盖主键、降序、唯一和表达式索引。
+  min_indexes_per_table: 4
+  max_indexes_per_table: 12
+  # 读查询的服务端会话超时；结果不保留，只统计行数和耗时。
+  query_timeout_seconds: 120
+  # INSERT/UPDATE/UPSERT 的批量范围；DELETE 独立使用下面更小的范围，且始终保留 id=1。
+  batch_rows_min: 100
+  batch_rows_max: 100000
+  delete_batch_rows_min: 10
+  delete_batch_rows_max: 100
+  # DML 选择权重，四项之和必须为 100。
+  insert_weight: 35
+  update_weight: 45
+  delete_weight: 10
+  upsert_weight: 10
+  # SELECT 生成器权重：50% 负载型查询，50% 完全随机文法查询。
+  grammar_query_weight: 50
+  load_shaped_query_weight: 50
+  # 连接失效后的指数退避重连范围；普通 SQL 错误会复用当前长连接。
+  reconnect_initial_delay_seconds: 0.25
+  reconnect_max_delay_seconds: 10

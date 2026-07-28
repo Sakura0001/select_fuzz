@@ -1,8 +1,17 @@
+# 副本会话参数文件版本；当前只能为 1。
 version: 1
+
+# 三个副本角色必须各出现一次；参数只应用到新建的副本查询 SESSION，不会应用到主库 setup 连接。
 replicas:
+  # baseline 副本的 SESSION 参数。
   baseline:
+    # MySQL SESSION 变量映射；默认空。变量名必须是安全标识符，值只能是 bool/int/float/string。
     session_variables: {}
+  # custom_off 副本的 SESSION 参数，通常用于关闭待比较的 optimizer_switch 子项。
   custom_off:
+    # MySQL SESSION 变量映射；默认空。例如：optimizer_switch: "hash_join=off"。
     session_variables: {}
+  # custom_on 副本的 SESSION 参数，通常用于开启待比较的 optimizer_switch 子项。
   custom_on:
+    # MySQL SESSION 变量映射；默认空。例如：optimizer_switch: "hash_join=on"。
     session_variables: {}

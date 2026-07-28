@@ -13,13 +13,13 @@ MySQL 8.0.41 见证。仅存在 catalog 行或固定模板不算覆盖。
 
 ### 已完成并取得本地证据
 
-- [x] P0：一分钟 socket soak 已改为显式注入最新 `GrammarQueryGenerator`，不再回退到
-  旧 `QueryGenerator`。
+- [x] P0：correctness 与一分钟 socket soak 均只接入 `GrammarQueryGenerator`；旧 typed-AST
+  renderer、batch planner 及其运行时 fallback 已物理删除。
 - [x] P0：`excluded_families` 已贯穿文法选择、列/表/集合签名、`*`、`TABLE`、USING 和
   NATURAL JOIN；默认 correctness scope 不会隐式带入 JSON、SPATIAL、FULLTEXT。
 - [x] P0：optimizer hint fallback 改为带真实别名的 `NO_ICP(alias)`；带 hint 的候选若
   `EXPLAIN` 返回 hint warning 会在三节点执行前拒绝。
-- [x] P0：96/96 个 production 从真实 root 加 semantic edge 静态可达；alternative ID
+- [x] P0：105/105 个 production 从真实 root 加 semantic edge 静态可达；alternative ID
   改为与源码行号无关的 `grammar_alt:v1:<production>:<hash>`，并记录相邻 set operator
   的有序 pair tag。
 - [x] P1：安全可见 index、partition 元数据进入绑定器；显式 `PARTITION` 与

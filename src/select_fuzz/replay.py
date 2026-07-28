@@ -32,7 +32,7 @@ from select_fuzz.execution import (
     ReplicationBarrier,
     replication_sequence_from_sql,
 )
-from select_fuzz.generation.query_ast import ExpectedError, ExpectedErrorKind
+from select_fuzz.generation.query_contract import ExpectedError, ExpectedErrorKind
 from select_fuzz.oracle import (
     OracleVerdict,
     QueryErrorDisposition,

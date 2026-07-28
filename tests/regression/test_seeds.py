@@ -3,29 +3,30 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from select_fuzz.generation.query import SUPPORTED_VARIANT_IDS
+from select_fuzz.generation.query_grammar import SelectGrammar
 from select_fuzz.generation.schema import SchemaProfile
 from select_fuzz.regression import build_seed_corpus, write_seed_corpus
 
 
-def test_seed_corpus_covers_every_schema_query_lane_and_error_family() -> None:
+def test_seed_corpus_covers_every_schema_and_grammar_entry() -> None:
     corpus = build_seed_corpus(20260712)
+    grammar = SelectGrammar.default()
 
     assert {item["profile"] for item in corpus["schema_profiles"]} == {
         profile.value for profile in SchemaProfile
     }
-    assert {item["feature_id"] for item in corpus["query_variants"]} == set(
-        SUPPORTED_VARIANT_IDS
+    assert {item["production"] for item in corpus["grammar_productions"]} == set(
+        grammar.productions
     )
-    assert {item["lane"] for item in corpus["query_lanes"]} == {
-        "valid",
-        "free_random",
-        "negative",
-    }
-    assert {item["family"] for item in corpus["negative_error_families"]} == {
-        "unknown_column",
-        "set_arity",
-        "function_arity",
+    assert len(corpus["grammar_alternatives"]) == sum(
+        len(production.alternatives) for production in grammar.productions.values()
+    )
+    assert corpus["grammar_sha256"] == grammar.sha256
+    assert {
+        item["expected_tag"].split(":", 1)[0]
+        for item in corpus["grammar_alternatives"]
+    } == {
+        "grammar_alt"
     }
 
 

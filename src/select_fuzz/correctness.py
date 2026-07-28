@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -44,42 +44,20 @@ from select_fuzz.execution import (
     TriadMutationCoordinator,
     with_replication_marker,
 )
-from select_fuzz.generation.coverage import CoverageLedger, WeightedCoverageScheduler
+from select_fuzz.generation.catalog import FeatureCatalog
+from select_fuzz.generation.catalog_schema import REVIEWED_VARIANT_IDS
+from select_fuzz.generation.coverage import CoverageLedger
 from select_fuzz.generation.mutation import MutationBatch, MutationBatchGenerator
-from select_fuzz.generation.data import (
-    DataBundle,
-    DataScenario,
-    DistributionKind,
-)
-from select_fuzz.generation.query import (
-    GeneratedQuery,
-    QueryBatchPlanner,
-    QueryBudget,
-    QueryGenerator,
-    QueryLane,
-    QueryMix,
-    TargetNotReachable,
-)
+from select_fuzz.generation.data import DataScenario
+from select_fuzz.generation.query_contract import ExpectedError, QueryLane
 from select_fuzz.generation.query_grammar import (
     CandidateRejected,
     GrammarQueryConfig,
     GrammarQueryGenerator,
     SelectGrammar,
 )
-from select_fuzz.generation.query_ast import (
-    ColumnRef,
-    ExpectedError,
-    JoinRelation,
-    QueryAst,
-    Relation,
-    SelectQuery,
-    Star,
-    TableQuery,
-    TableRelation,
-)
 from select_fuzz.generation.query_scope import DEFAULT_QUERY_SCOPE, QueryCoverageScope
 from select_fuzz.generation.schema import (
-    BoundaryDeclaration,
     SchemaGenerator,
     SchemaLimits,
     SchemaManifest,
@@ -357,15 +335,6 @@ _PRODUCTION_DATA_SCENARIOS = (
     DataScenario.HOTSPOT,
 )
 
-_SCENARIO_DISTRIBUTIONS = {
-    DataScenario.SEEDED_RANDOM: DistributionKind.UNIFORM,
-    DataScenario.BOUNDARY: DistributionKind.BOUNDARY,
-    DataScenario.ALL_NULL: DistributionKind.ALL_NULL,
-    DataScenario.MIXED_NULL: DistributionKind.MIXED_NULL,
-    DataScenario.DUPLICATE: DistributionKind.DUPLICATE,
-    DataScenario.HOTSPOT: DistributionKind.HOTSPOT,
-}
-
 _SCENARIO_WITNESS_MINIMUM = {
     DataScenario.SEEDED_RANDOM: 0,
     DataScenario.BOUNDARY: 8,
@@ -377,148 +346,19 @@ _SCENARIO_WITNESS_MINIMUM = {
 }
 
 
-def _iter_ast_nodes(value: object) -> Iterator[object]:
-    """Walk the closed query AST without relying on rendered-SQL substring matches."""
-
-    yield value
-    if is_dataclass(value) and not isinstance(value, type):
-        for field in fields(value):
-            yield from _iter_ast_nodes(getattr(value, field.name))
-    elif isinstance(value, Mapping):
-        for child in value.values():
-            yield from _iter_ast_nodes(child)
-    elif isinstance(value, (tuple, list, set, frozenset)):
-        for child in value:
-            yield from _iter_ast_nodes(child)
-
-
-def _physical_column_references(
-    ast: QueryAst,
-    schema: SchemaManifest,
-) -> frozenset[tuple[str, str]]:
-    tables_by_name = {table.name: table for table in schema.tables}
-    table_names = set(tables_by_name)
-    nodes = tuple(_iter_ast_nodes(ast))
-    aliases: dict[str, set[str]] = {}
-    for node in nodes:
-        if isinstance(node, TableRelation) and node.table in table_names:
-            aliases.setdefault(node.alias, set()).add(node.table)
-    references: set[tuple[str, str]] = set()
-    for node in nodes:
-        if isinstance(node, ColumnRef):
-            for table_name in aliases.get(node.table_alias, ()):
-                references.add((table_name, node.name))
-        elif isinstance(node, TableQuery) and node.table in table_names:
-            references.update(
-                (node.table, column.name) for column in tables_by_name[node.table].columns
-            )
-        elif isinstance(node, SelectQuery):
-            stars = tuple(
-                projection.expression
-                for projection in node.projection
-                if isinstance(projection.expression, Star)
-            )
-            for star in stars:
-                for table_name in _relation_table_names(
-                    node.source,
-                    table_names=table_names,
-                    alias=star.table_alias,
-                ):
-                    references.update(
-                        (table_name, column.name) for column in tables_by_name[table_name].columns
-                    )
-    return frozenset(references)
-
-
-def _relation_table_names(
-    relation: Relation | None,
-    *,
-    table_names: set[str],
-    alias: str | None,
-) -> frozenset[str]:
-    """Resolve direct physical tables visible to one SELECT star projection."""
-
-    if isinstance(relation, TableRelation):
-        if relation.table in table_names and (alias is None or relation.alias == alias):
-            return frozenset({relation.table})
-        return frozenset()
-    if isinstance(relation, JoinRelation):
-        return _relation_table_names(
-            relation.left,
-            table_names=table_names,
-            alias=alias,
-        ) | _relation_table_names(
-            relation.right,
-            table_names=table_names,
-            alias=alias,
-        )
-    return frozenset()
-
-
-def _reads_physical_table(ast: QueryAst, schema: SchemaManifest) -> bool:
-    table_names = {table.name for table in schema.tables}
-    return any(
-        (isinstance(node, TableRelation) and node.table in table_names)
-        or (isinstance(node, TableQuery) and node.table in table_names)
-        for node in _iter_ast_nodes(ast)
-    )
-
-
-def _gated_round_coverage_tags(
-    ast: QueryAst,
-    *,
-    schema: SchemaManifest,
-    data: DataBundle,
-    scenario: DataScenario,
-    row_cardinality: str,
-    boundary: BoundaryDeclaration | None,
-    scenario_witness_met: bool,
-    fallback_tags: frozenset[str] = frozenset(),
-) -> frozenset[str]:
-    """Return only round tags whose setup value is observed by this query AST."""
-
-    tags = set(fallback_tags)
-    if _reads_physical_table(ast, schema):
-        tags.add(f"row_cardinality:{row_cardinality}")
-
-    references = _physical_column_references(ast, schema)
-    if not scenario_witness_met:
-        return frozenset(tags)
-
-    expected_distribution = _SCENARIO_DISTRIBUTIONS.get(scenario)
-    if expected_distribution is not None:
-        effective_columns = {
-            (table_name, plan.column_name)
-            for table_name, plans in data.distributions.items()
-            for plan in plans
-            if plan.kind is expected_distribution and plan.fallback_reason is None
-        }
-        if references & effective_columns:
-            tags.add(f"data_scenario:{scenario.value}")
-
-    boundary_reference = (schema.tables[0].name, "boundary_col")
-    if boundary is not None and boundary_reference in references:
-        tags.add(f"schema_boundary:{boundary.boundary_id.value}")
-        tags.update(f"schema_boundary_status:{tag}" for tag in boundary.tags)
-    return frozenset(tags)
-
-
 class GeneratedRoundSource:
     """Build one immutable schema/data/query round from a deterministic context."""
 
     def __init__(
         self,
-        ledger: CoverageLedger,
         *,
         rows_per_table: int | None = None,
         min_rows_per_table: int = 10,
         max_rows_per_table: int = 500,
         names: DatabaseNameFactory | None = None,
         schema_limits: SchemaLimits | None = None,
-        query_generator: QueryGenerator | None = None,
         grammar_query_generator: GrammarQueryGenerator | None = None,
         query_scope: QueryCoverageScope | None = None,
-        query_budget: QueryBudget | None = None,
         replica_mode: bool = False,
     ) -> None:
         if rows_per_table is not None:
@@ -537,18 +377,17 @@ class GeneratedRoundSource:
                 raise ValueError(f"{name} must be nonnegative")
         if min_rows_per_table > max_rows_per_table:
             raise ValueError("min_rows_per_table must not exceed max_rows_per_table")
-        self._ledger = ledger
         self._fixed_rows_per_table = rows_per_table
         self._min_rows_per_table = min_rows_per_table
         self._max_rows_per_table = max_rows_per_table
         self._names = names or DatabaseNameFactory()
         self._schema_limits = schema_limits or SchemaLimits()
-        self._queries = query_generator or QueryGenerator()
-        self._grammar_queries = grammar_query_generator
+        self._grammar_queries = grammar_query_generator or GrammarQueryGenerator()
         self._query_scope = query_scope or DEFAULT_QUERY_SCOPE
-        self._query_budget = query_budget or QueryBudget()
         self._replica_mode = replica_mode
-        self._catalog = self._query_scope.filter_catalog(self._queries.feature_catalog())
+        self._catalog = self._query_scope.filter_catalog(
+            FeatureCatalog.default(generator_supported_ids=REVIEWED_VARIANT_IDS)
+        )
         self._schema = SchemaGenerator()
         self._typed_boundaries = (
             self._schema.executable_boundary_declarations(self._schema_limits)
@@ -587,13 +426,6 @@ class GeneratedRoundSource:
                 raise RuntimeError("typed boundary coverage requires a regular target")
             schema_target = regular_targets[context.round_seed % len(regular_targets)]
         rows_per_table = self._rows_for_round(context.round_number, tree, scenario)
-        witness_minimum = _SCENARIO_WITNESS_MINIMUM[scenario]
-        scenario_witness_met = rows_per_table >= witness_minimum
-        row_cardinality = (
-            "zero" if rows_per_table == 0 else "one" if rows_per_table == 1 else "many"
-        )
-        start_ordinal = context.round_number * context.request.queries_per_round
-        last_unreachable: TargetNotReachable | None = None
         for schema_attempt in range(32):
             schema_seed = (
                 tree.derive("schema")
@@ -608,42 +440,9 @@ class GeneratedRoundSource:
             )
             if self._replica_mode and schema.requires_same_session:
                 continue
-            generated: tuple[GeneratedQuery, ...] = ()
-            if self._grammar_queries is None:
-                scheduler = WeightedCoverageScheduler(
-                    catalog=self._catalog,
-                    ledger=self._ledger,
-                    min_hits=10,
-                    version=(8, 0, 41),
-                    profiles=frozenset({schema.profile.value}),
-                    schedule_seed=context.request.seed,
-                    plan_start_ordinal=start_ordinal,
-                )
-                try:
-                    generated = QueryBatchPlanner(self._queries).plan(
-                        schema,
-                        scheduler=scheduler,
-                        run_seed=context.request.seed,
-                        start_case_ordinal=start_ordinal,
-                        queries_per_round=context.request.queries_per_round,
-                        estimated_rows_by_table={
-                            # Estimates are safety inputs, not setup data. A one-row
-                            # upper estimate keeps zero-row rounds query-plannable.
-                            table.name: max(1, rows_per_table)
-                            for table in schema.tables
-                        },
-                        budget=self._query_budget,
-                        allow_compatible_fallback=schema_attempt == 31,
-                        require_table_reference=True,
-                    )
-                except TargetNotReachable as error:
-                    last_unreachable = error
-                    continue
             break
         else:
-            raise TargetNotReachable(
-                "no scheduled query target is reachable after 32 schema attempts"
-            ) from last_unreachable
+            raise RuntimeError("no replica-safe schema is reachable after 32 attempts")
         bundle = self._setup.build(
             schema,
             seed=data_seed,
@@ -652,39 +451,6 @@ class GeneratedRoundSource:
         )
         if self._replica_mode:
             bundle = with_replication_marker(bundle)  # type: ignore[assignment]
-        fallback_tags = (
-            frozenset(
-                {
-                    f"data_scenario_fallback:{scenario.value}:"
-                    f"insufficient_rows_{rows_per_table}_required_{witness_minimum}"
-                }
-            )
-            if not scenario_witness_met
-            else frozenset()
-        )
-        queries = tuple(
-            CorrectnessQuery(
-                sql=query.sql,
-                target_feature_id=query.target_feature_id,
-                coverage_tags=query.feature_tags
-                | _gated_round_coverage_tags(
-                    query.ast,
-                    schema=schema,
-                    data=bundle.data,
-                    scenario=scenario,
-                    row_cardinality=row_cardinality,
-                    boundary=boundary,
-                    scenario_witness_met=scenario_witness_met,
-                    fallback_tags=fallback_tags,
-                ),
-                coverage_eligible=query.coverage_eligible,
-                seed=query.seed,
-                case_ordinal=query.case_ordinal,
-                lane=query.lane,
-                expected_error=query.expected_error,
-            )
-            for query in generated
-        )
         database = self._names.new(
             mode="correctness",
             worker=context.worker_id,
@@ -694,12 +460,12 @@ class GeneratedRoundSource:
         return RoundMaterialization(
             database,
             bundle,
-            queries,
+            (),
             schema_seed,
             data_seed,
             rows_per_table,
             schema,
-            self._grammar_queries is not None,
+            True,
         )
 
     def generate_query(
@@ -710,7 +476,7 @@ class GeneratedRoundSource:
     ) -> CorrectnessQuery:
         """Generate one stateless grammar candidate from the round schema snapshot."""
 
-        if self._grammar_queries is None or not materialized.dynamic_queries:
+        if not materialized.dynamic_queries:
             raise RuntimeError("round source is not configured for dynamic grammar queries")
         if materialized.schema is None:  # pragma: no cover - dataclass invariant
             raise RuntimeError("dynamic round has no schema snapshot")
@@ -1753,31 +1519,6 @@ def _fingerprints(config: AppConfig) -> dict[NodeRole, str]:
     }
 
 
-def query_mix_from_rates(
-    free_random_rate: float,
-    negative_mutation_rate: float,
-) -> QueryMix:
-    """Convert configured rates to an exact 100-ticket deterministic mix."""
-
-    for name, value in (
-        ("free_random_rate", free_random_rate),
-        ("negative_mutation_rate", negative_mutation_rate),
-    ):
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            raise TypeError(f"{name} must be a number")
-        if not 0 <= value <= 1:
-            raise ValueError(f"{name} must be between zero and one")
-    if free_random_rate + negative_mutation_rate > 1:
-        raise ValueError("query lane rates must sum to at most one")
-    free_percent = round(free_random_rate * 100)
-    negative_percent = round(negative_mutation_rate * 100)
-    valid_percent = 100 - free_percent - negative_percent
-    if valid_percent < 0:
-        negative_percent += valid_percent
-        valid_percent = 0
-    return QueryMix(valid_percent, free_percent, negative_percent)
-
-
 def build_correctness_runner(config: AppConfig, artifact_root: Path) -> CorrectnessRunService:
     if config.mode.value != "correctness":
         raise ValueError("correctness runner requires correctness config mode")
@@ -1803,7 +1544,6 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
         ),
     )
     source = GeneratedRoundSource(
-        ledger,
         min_rows_per_table=config.correctness.min_rows_per_table,
         max_rows_per_table=config.correctness.max_rows_per_table,
         schema_limits=SchemaLimits(
@@ -1812,11 +1552,6 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
             min_columns=config.correctness.min_columns,
             max_columns=config.correctness.max_columns,
             max_indexes_per_table=config.correctness.max_indexes_per_table,
-        ),
-        query_budget=QueryBudget(
-            max_tables=config.correctness.max_query_tables,
-            max_depth=config.correctness.max_query_depth,
-            max_output_rows=config.correctness.row_limit,
         ),
         grammar_query_generator=grammar_generator,
         replica_mode=True,
@@ -1882,5 +1617,4 @@ __all__ = [
     "ProductionCoordinatorAdapter",
     "RoundMaterialization",
     "build_correctness_runner",
-    "query_mix_from_rates",
 ]

@@ -5,7 +5,7 @@ import pytest
 from select_fuzz.config import NodeRole
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.execution import INTERNAL_RESULT_LIMIT_ERRNO
-from select_fuzz.generation.query_ast import ExpectedError, ExpectedErrorKind
+from select_fuzz.generation.query_contract import ExpectedError, ExpectedErrorKind
 from select_fuzz.oracle.query_errors import (
     QueryErrorDisposition,
     analyze_query_errors,

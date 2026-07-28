@@ -1,0 +1,50 @@
+# 内网负载均衡代理的 fuzz 示例配置。
+# 使用前复制为 config/intranet-fuzz.yaml；密码只通过环境变量提供。
+mode: fuzz
+full_thread_sql_log: false
+replica_parameters_file: null
+replica_sync_timeout_seconds: 10
+
+# fuzz 只使用 fuzz.target_role 指定的节点。固定三角色字段是兼容现有配置模型；
+# 在 fuzz 模式下可以让它们都指向同一个代理入口，主库和备库也允许相同地址。
+nodes:
+  - role: baseline
+    primary: &intranet_proxy
+      host: 192.168.243.82
+      port: 3306
+      username_env: SELECT_FUZZ_MYSQL_USER
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    replica: *intranet_proxy
+  - role: custom_off
+    primary: *intranet_proxy
+    replica: *intranet_proxy
+  - role: custom_on
+    primary: *intranet_proxy
+    replica: *intranet_proxy
+
+fuzz:
+  target_role: custom_on
+  databases: 12
+  writer_threads_per_database: 4
+  reader_threads_per_database: 12
+  max_total_connections: 1024
+  initial_tables: 8
+  initial_rows_per_table: 1000
+  max_rows_per_database: 100000
+  min_columns_per_table: 200
+  max_columns_per_table: 500
+  min_indexes_per_table: 4
+  max_indexes_per_table: 12
+  query_timeout_seconds: 30
+  batch_rows_min: 100
+  batch_rows_max: 1000
+  delete_batch_rows_min: 10
+  delete_batch_rows_max: 50
+  insert_weight: 35
+  update_weight: 45
+  delete_weight: 10
+  upsert_weight: 10
+  grammar_query_weight: 50
+  load_shaped_query_weight: 50
+  reconnect_initial_delay_seconds: 0.25
+  reconnect_max_delay_seconds: 10

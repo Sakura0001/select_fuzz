@@ -11,6 +11,7 @@ from select_fuzz.config import (
     AppConfig,
     ConfigLoadError,
     CorrectnessConfig,
+    FuzzConfig,
     NodeConfig,
     NodePreflight,
     NodeRole,
@@ -91,7 +92,6 @@ def test_mode_defaults_cli_override_and_secret_never_enters_config(
     assert config.performance.calibration_max_seconds == 12.0
     assert config.performance.formal_timeout_seconds == 15.0
     assert config.full_thread_sql_log is False
-    assert config.correctness.negative_mutation_rate == 0
     assert config.performance.initial_table_rows_max == 1_000_000
     assert config.performance.insert_batch_rows == 10_000
     assert "runtime-secret" not in config.model_dump_json()
@@ -109,6 +109,48 @@ def test_cli_overrides_follow_the_selected_mode(tmp_path: Path) -> None:
     assert config.performance.queries_per_round == 321
     assert config.performance.formal_timeout_seconds == 44
     assert config.correctness.queries_per_round == 1000
+
+
+def test_fuzz_mode_loads_concurrency_and_cli_compatibility_overrides(tmp_path: Path) -> None:
+    data = _config_data()
+    data["mode"] = "fuzz"
+    data["fuzz"] = {
+        "databases": 2,
+        "writer_threads_per_database": 3,
+        "reader_threads_per_database": 9,
+        "initial_tables": 2,
+        "initial_rows_per_table": 100,
+        "max_rows_per_database": 1000,
+    }
+    config = load_config(
+        _write_config(tmp_path, data),
+        cli={
+            "mode": "fuzz",
+            "databases": 4,
+            "writer_threads_per_database": 5,
+            "reader_threads_per_database": 12,
+            "timeout_seconds": 77,
+            "data_rows_min": 200,
+            "data_rows_max": 5000,
+            "workers": 1,
+            "queries_per_round": 1,
+            "degradation_ratio": 0.2,
+        },
+    )
+
+    assert config.mode is RunMode.FUZZ
+    assert config.fuzz.databases == 4
+    assert config.fuzz.writer_threads_per_database == 5
+    assert config.fuzz.reader_threads_per_database == 12
+    assert config.fuzz.query_timeout_seconds == 77
+    assert config.fuzz.initial_rows_per_table == 200
+    assert config.fuzz.max_rows_per_database == 5000
+    assert FuzzConfig().grammar_query_weight == 50
+
+
+def test_fuzz_rejects_multiple_coordinator_workers(tmp_path: Path) -> None:
+    with pytest.raises(ConfigLoadError, match="one coordinator"):
+        load_config(_write_config(tmp_path, _config_data()), cli={"mode": "fuzz", "workers": 2})
 
 
 def test_none_cli_mode_means_no_override(tmp_path: Path) -> None:
@@ -146,7 +188,6 @@ def test_fuzz_ranges_and_thread_sql_log_switch_are_strict() -> None:
             min_columns=3,
             max_columns=12,
             max_indexes_per_table=6,
-            max_query_depth=4,
         ),
         performance=PerformanceConfig(
             initial_table_rows=100_000,
@@ -158,7 +199,6 @@ def test_fuzz_ranges_and_thread_sql_log_switch_are_strict() -> None:
     )
 
     assert config.full_thread_sql_log is True
-    assert config.correctness.max_query_depth == 4
     assert config.performance.initial_table_rows_max == 500_000
 
     with pytest.raises(ValidationError, match="min_tables"):

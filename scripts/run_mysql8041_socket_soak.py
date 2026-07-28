@@ -246,7 +246,6 @@ def build_runtime(
         else CoverageLedger(coverage_path)
     )
     source = GeneratedRoundSource(
-        coverage,
         min_rows_per_table=config.min_rows_per_table,
         max_rows_per_table=config.max_rows_per_table,
         grammar_query_generator=GrammarQueryGenerator(SelectGrammar.default()),

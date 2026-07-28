@@ -116,7 +116,7 @@
 
 要求：correctness 生产路径只能使用 `catalog/mysql-8.0.41-select.grammar.yy`。
 
-验收：运行时记录 grammar hash；生成 SQL 的 coverage tag 必须包含 `grammar:*` 或 `grammar_alt:*`，不得回退到旧 `QueryGenerator`。
+验收：运行时记录 grammar hash；生成 SQL 的 coverage tag 必须包含 `grammar:*` 或 `grammar_alt:*`；生产代码中不存在第二套查询生成器或 fallback。
 
 ### 5.2 alternative 稳定 ID
 

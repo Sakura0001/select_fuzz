@@ -4,11 +4,8 @@ import re
 
 import pytest
 
-from select_fuzz.generation.query import (
-    QueryGenerator,
-    QueryLane,
-    TargetNotReachable,
-)
+from select_fuzz.generation.catalog import FeatureCatalog
+from select_fuzz.generation.catalog_schema import REVIEWED_VARIANT_IDS
 from select_fuzz.generation.query_scope import (
     DEFAULT_QUERY_SCOPE,
     QueryCoverageScope,
@@ -19,11 +16,6 @@ from select_fuzz.generation.query_grammar import (
     GrammarQueryGenerator,
     GrammarSchema,
     GrammarTable,
-)
-from select_fuzz.generation.schema import (
-    IndexKind,
-    SchemaGenerator,
-    SchemaLimits,
 )
 
 
@@ -46,8 +38,12 @@ USER_EXCLUDED_FEATURE_IDS = frozenset(
 )
 
 
+def _catalog() -> FeatureCatalog:
+    return FeatureCatalog.default(generator_supported_ids=REVIEWED_VARIANT_IDS)
+
+
 def test_default_query_scope_excludes_only_user_declared_families() -> None:
-    catalog = QueryGenerator.feature_catalog()
+    catalog = _catalog()
 
     assert DEFAULT_QUERY_SCOPE.excluded_feature_ids == USER_EXCLUDED_FEATURE_IDS
     assert set(DEFAULT_QUERY_SCOPE.exclusion_reasons) == USER_EXCLUDED_FEATURE_IDS
@@ -63,7 +59,7 @@ def test_default_query_scope_excludes_only_user_declared_families() -> None:
 
 
 def test_default_query_scope_filters_both_catalog_rows_and_scheduling_targets() -> None:
-    catalog = QueryGenerator.feature_catalog()
+    catalog = _catalog()
     scoped = DEFAULT_QUERY_SCOPE.filter_catalog(catalog)
 
     assert {spec.feature_id for spec in scoped} == {
@@ -82,7 +78,7 @@ def test_default_query_scope_filters_both_catalog_rows_and_scheduling_targets() 
 
 
 def test_query_scope_rejects_unknown_or_unexplained_exclusions() -> None:
-    catalog = QueryGenerator.feature_catalog()
+    catalog = _catalog()
 
     DEFAULT_QUERY_SCOPE.validate_catalog(catalog)
     with pytest.raises(TypeError, match="typed reason"):
@@ -94,39 +90,6 @@ def test_query_scope_rejects_unknown_or_unexplained_exclusions() -> None:
             {},
             excluded_profile_reasons={"missing_profile": QueryExclusionReason.SPATIAL},
         ).validate_catalog(catalog)
-
-
-def test_every_default_scoped_query_and_schema_omits_excluded_families() -> None:
-    generator = QueryGenerator()
-    catalog = DEFAULT_QUERY_SCOPE.filter_catalog(generator.feature_catalog())
-    schemas = SchemaGenerator()
-    limits = SchemaLimits(max_tables=3, max_columns=7)
-
-    for ordinal, target in enumerate(catalog.signature_targets(version=(8, 0, 41))):
-        for attempt in range(32):
-            seed = 80_410_000 + ordinal * 32 + attempt
-            manifest = schemas.generate(target, seed=seed, limits=limits)
-            try:
-                generated = generator.generate(
-                    manifest,
-                    target=target,
-                    seed=seed + 1,
-                    lane=QueryLane.VALID,
-                    estimated_rows_by_table={table.name: 8 for table in manifest.tables},
-                )
-            except TargetNotReachable:
-                continue
-            break
-        else:
-            pytest.fail(f"scoped target is unreachable: {target.feature_id}")
-
-        assert not re.search(r"\b(?:JSON_[A-Z0-9_]*|ST_[A-Z0-9_]*)\s*\(", generated.sql)
-        assert "MATCH(" not in generated.sql.upper()
-        assert all(
-            index.kind not in {IndexKind.FULLTEXT, IndexKind.MULTIVALUE, IndexKind.SPATIAL}
-            for table in manifest.tables
-            for index in table.indexes
-        )
 
 
 def test_default_scope_also_constrains_grammar_random_candidates() -> None:

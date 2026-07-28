@@ -89,6 +89,60 @@ def test_explicit_primary_and_replica_must_be_distinct(tmp_path: Path) -> None:
         load_config(config_path)
 
 
+def test_fuzz_allows_one_routing_proxy_for_primary_and_replica(tmp_path: Path) -> None:
+    proxy = {
+        "host": "192.168.243.82",
+        "port": 3306,
+        "username_env": "SELECT_FUZZ_MYSQL_USER",
+        "password_env": "SELECT_FUZZ_MYSQL_PASSWORD",
+    }
+    config_path = tmp_path / "fuzz.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "mode": "fuzz",
+                "nodes": [
+                    {"role": role.value, "primary": proxy, "replica": proxy}
+                    for role in NodeRole
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.fuzz.target_role is NodeRole.CUSTOM_ON
+    assert config.node_for(NodeRole.CUSTOM_ON).host == "192.168.243.82"
+    assert config.replica_for(NodeRole.CUSTOM_ON).port == 3306
+
+
+def test_fuzz_accepts_legacy_single_endpoint_entries(tmp_path: Path) -> None:
+    config_path = tmp_path / "fuzz-legacy.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "mode": "fuzz",
+                "nodes": [
+                    {
+                        "role": role.value,
+                        "host": "192.168.243.82",
+                        "port": 3306,
+                    }
+                    for role in NodeRole
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.node_for(NodeRole.CUSTOM_ON).port == config.replica_for(NodeRole.CUSTOM_ON).port
+
+
 def test_replica_parameter_file_requires_exact_roles_and_scalar_values(
     tmp_path: Path,
 ) -> None:

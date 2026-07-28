@@ -116,10 +116,15 @@ class DoctorService:
         snapshots: list[NodePreflight] = []
         replica_snapshots: list[NodePreflight] = []
         failures: list[PreflightIssue] = []
+        roles = (
+            (self._config.fuzz.target_role,)
+            if self._config.mode.value == "fuzz"
+            else tuple(NodeRole)
+        )
         jobs: dict[tuple[NodeRole, str], NodeConfig] = {
-            (role, "primary"): self._config.node_for(role) for role in NodeRole
+            (role, "primary"): self._config.node_for(role) for role in roles
         }
-        for role in NodeRole:
+        for role in roles:
             primary = self._config.node_for(role)
             replica = self._config.replica_for(role)
             if (primary.host.casefold(), primary.port) != (
@@ -141,6 +146,18 @@ class DoctorService:
                         raise ValueError("probe returned the wrong role")
                     target = snapshots if endpoint_kind == "primary" else replica_snapshots
                     target.append(snapshot)
+                    if (
+                        self._config.mode.value == "fuzz"
+                        and endpoint_kind == "primary"
+                        and self._config.node_for(role).host.casefold()
+                        == self._config.replica_for(role).host.casefold()
+                        and self._config.node_for(role).port
+                        == self._config.replica_for(role).port
+                    ):
+                        # A routing proxy represents both logical sides with
+                        # one endpoint. Reuse the probe for the replica
+                        # permission check instead of opening a duplicate job.
+                        replica_snapshots.append(snapshot)
                 except Exception as error:
                     failures.append(
                         PreflightIssue(
@@ -170,10 +187,25 @@ class DoctorService:
             if replica_snapshots
             else PreflightReport()
         )
+        selected_roles = set(roles)
+
+        def retain_selected_role_observations(
+            report: PreflightReport,
+        ) -> tuple[PreflightIssue, ...]:
+            return tuple(
+                issue
+                for issue in report.fatals
+                if issue.code != "missing_node_observation"
+                or issue.role in selected_roles
+            )
+
         failed_roles = {issue.role for issue in failures}
         retained_fatals = tuple(
             issue
-            for issue in (*evaluated.fatals, *replica_evaluated.fatals)
+            for issue in (
+                *retain_selected_role_observations(evaluated),
+                *retain_selected_role_observations(replica_evaluated),
+            )
             if not (
                 issue.code == "missing_node_observation" and issue.role in failed_roles
             )

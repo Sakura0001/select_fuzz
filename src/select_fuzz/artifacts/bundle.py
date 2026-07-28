@@ -34,7 +34,7 @@ from select_fuzz.config import NodeRole
 from select_fuzz.domain import ExecutionStatus, NodeExecution
 from select_fuzz.execution.setup import validate_database_name
 from select_fuzz.execution.triad import QueryLimits
-from select_fuzz.generation.query_ast import ExpectedErrorKind
+from select_fuzz.generation.query_contract import ExpectedErrorKind
 
 
 _ARTIFACT_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")

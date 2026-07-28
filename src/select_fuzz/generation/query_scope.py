@@ -17,7 +17,7 @@ class QueryExclusionReason(StrEnum):
 
 
 class QueryCoverageScope:
-    """Keep user exclusions explicit without deleting legacy renderers."""
+    """Keep product exclusions explicit for grammar and schema generation."""
 
     __slots__ = ("excluded_profile_reasons", "exclusion_reasons")
 

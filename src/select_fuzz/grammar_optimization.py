@@ -27,7 +27,6 @@ from select_fuzz.correctness import GeneratedRoundSource
 from select_fuzz.config import NodeConfig, NodeRole
 from select_fuzz.domain import ExecutionStatus, NodeExecution, RunRequest, SeedTree
 from select_fuzz.execution import MySQLConnectorFactory, NodeQueryRunner
-from select_fuzz.generation.coverage import CoverageLedger
 from select_fuzz.generation.query_grammar import (
     CandidateQuery,
     CandidateRejected,
@@ -318,9 +317,7 @@ def _materialize_round(
             "grammar_optimization", iteration, attempt
         )
         context = RoundContext(request, 0, iteration, round_seed)
-        ledger = CoverageLedger(config.artifact_root / "coverage.json")
         source = GeneratedRoundSource(
-            ledger,
             rows_per_table=config.rows_per_table,
             schema_limits=SchemaLimits(
                 min_tables=2,

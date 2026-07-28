@@ -233,7 +233,7 @@ class NodeExecution:
 @dataclass(frozen=True, slots=True)
 class RunRequest:
     run_id: str
-    mode: Literal["correctness", "performance"]
+    mode: Literal["correctness", "performance", "fuzz"]
     seed: int
     workers: int
     rounds: int | None
@@ -242,8 +242,8 @@ class RunRequest:
     def __post_init__(self) -> None:
         if not self.run_id:
             raise ValueError("run_id must not be empty")
-        if self.mode not in ("correctness", "performance"):
-            raise ValueError("mode must be correctness or performance")
+        if self.mode not in ("correctness", "performance", "fuzz"):
+            raise ValueError("mode must be correctness, performance, or fuzz")
         if self.workers <= 0:
             raise ValueError("workers must be positive")
         if self.mode == "performance" and self.workers != 1:

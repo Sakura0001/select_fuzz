@@ -1,10 +1,14 @@
-export type RunMode = "correctness" | "performance";
+export type RunMode = "correctness" | "performance" | "fuzz";
 export type RunState = "queued" | "starting" | "running" | "stopping" | "recovering" | "orphaned" | "stopped" | "completed" | "failed";
 
 export interface RunRequest {
   mode: RunMode; seed: number; workers: number; rounds: number | null;
   queries_per_round: number; timeout_seconds: number; degradation_ratio: number;
   data_rows_min: number; data_rows_max: number;
+  duration_seconds?: number | null;
+  databases?: number;
+  writer_threads_per_database?: number;
+  reader_threads_per_database?: number;
 }
 export interface RunView {id: string; state: RunState; request: RunRequest; created_at: string; updated_at: string; version: number}
 export interface EventEnvelope {sequence: number; kind: string; payload: Record<string, unknown>}

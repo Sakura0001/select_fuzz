@@ -10,7 +10,7 @@ from typing import TypeAlias
 from select_fuzz.config import NodeRole
 from select_fuzz.domain import ExecutionStatus, NodeExecution
 from select_fuzz.execution import INTERNAL_RESULT_LIMIT_ERRNO
-from select_fuzz.generation.query_ast import ExpectedError
+from select_fuzz.generation.query_contract import ExpectedError
 from select_fuzz.oracle.errors import OracleInputError
 
 

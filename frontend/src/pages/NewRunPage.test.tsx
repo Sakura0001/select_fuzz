@@ -51,4 +51,20 @@ describe("NewRunPage", () => {
     expect(screen.getByLabelText("Workers")).toHaveValue(10);
     expect(screen.getByLabelText("Minimum rows")).toHaveValue(10);
   });
+
+  it("exposes the 1:2 reader split for fuzz mode", async () => {
+    vi.mocked(api.createRun).mockRejectedValue(new Error("stopped"));
+    render(<NewRunPage onCreated={() => undefined}/>);
+    await userEvent.selectOptions(screen.getByLabelText("Mode"), "fuzz");
+    expect(screen.getByLabelText("Workers")).toHaveValue(1);
+    expect(screen.getByLabelText("Workers")).toBeDisabled();
+    expect(screen.getByLabelText("Readers per database (1:2 primary/replica)")).toHaveValue(6);
+    await userEvent.clear(screen.getByLabelText("Databases"));
+    await userEvent.type(screen.getByLabelText("Databases"), "3");
+    await userEvent.click(screen.getByRole("button", {name: "Start run"}));
+    expect(api.createRun).toHaveBeenCalledWith(expect.objectContaining({
+      mode: "fuzz", workers: 1, rounds: null, databases: 3,
+      writer_threads_per_database: 2, reader_threads_per_database: 6,
+    }));
+  });
 });

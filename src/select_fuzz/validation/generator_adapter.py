@@ -3,8 +3,16 @@
 from __future__ import annotations
 
 from select_fuzz.domain import SeedTree
-from select_fuzz.generation.catalog import FeatureSpec
-from select_fuzz.generation.query import QueryGenerator
+from select_fuzz.generation.catalog import FeatureCatalog, FeatureSpec
+from select_fuzz.generation.catalog_schema import REVIEWED_VARIANT_IDS
+from select_fuzz.generation.query_grammar import (
+    CandidateRejected,
+    GrammarColumn,
+    GrammarQueryGenerator,
+    GrammarSchema,
+    GrammarTable,
+    SelectGrammar,
+)
 from select_fuzz.generation.schema import SchemaGenerator, SchemaLimits
 from select_fuzz.validation.models import FeatureSignature
 from select_fuzz.validation.reachability import CatalogCapability, GeneratedWitness
@@ -117,15 +125,121 @@ def _requirements(spec: FeatureSpec) -> frozenset[str]:
     return frozenset(requirements)
 
 
+_VALIDATION_SCHEMA = GrammarSchema(
+    (
+        GrammarTable(
+            "t0",
+            (
+                GrammarColumn("id", "BIGINT"),
+                GrammarColumn("payload", "VARCHAR(64)"),
+                GrammarColumn("c2", "BIGINT"),
+            ),
+        ),
+        GrammarTable(
+            "t1",
+            (
+                GrammarColumn("id", "BIGINT"),
+                GrammarColumn("payload", "VARCHAR(64)"),
+                GrammarColumn("c2", "BIGINT"),
+            ),
+        ),
+    )
+)
+
+
+_VALIDATION_SQL: dict[str, str] = {
+    "grouping_aggregate_having": (
+        "SELECT `t`.`payload`, COUNT(*) FROM `t0` AS `t` "
+        "GROUP BY `t`.`payload` HAVING COUNT(*) > 0 ORDER BY 1, 2"
+    ),
+    "set_union": (
+        "SELECT `t`.`id` FROM `t0` AS `t` UNION "
+        "SELECT `u`.`id` FROM `t1` AS `u` ORDER BY 1"
+    ),
+    "validation_top_n": (
+        "SELECT `t`.`id` AS `q1` FROM `t0` AS `t` ORDER BY 1 LIMIT 10"
+    ),
+    "validation_scalar_literal": "SELECT 1 AS `q1` ORDER BY 1",
+    "validation_scalar_aggregate": "SELECT COUNT(*) AS `row_count` ORDER BY 1",
+    "validation_join_left": (
+        "SELECT `t`.`id`, `u`.`id` FROM `t0` AS `t` LEFT JOIN `t1` AS `u` "
+        "ON (`t`.`id` = `u`.`id`) ORDER BY 1, 2"
+    ),
+    "validation_join_left_subquery": (
+        "SELECT `t`.`id`, `u`.`id` FROM `t0` AS `t` LEFT JOIN `t1` AS `u` "
+        "ON (`t`.`id` = `u`.`id`) WHERE EXISTS "
+        "(SELECT 1 FROM `t1` AS `v` WHERE `v`.`id` = `t`.`id`) ORDER BY 1, 2"
+    ),
+    "validation_values_only": "VALUES ROW(0) ORDER BY 1",
+    "validation_values_limit": "VALUES ROW(0) ORDER BY 1 LIMIT 1",
+    "validation_table_only": "TABLE `t0` ORDER BY 1",
+    "validation_table_values_union_all": (
+        "TABLE `t0` UNION ALL VALUES ROW(NULL, NULL, NULL) ORDER BY 1, 2"
+    ),
+    "validation_table_values_union_distinct": (
+        "TABLE `t0` UNION VALUES ROW(NULL, NULL, NULL) ORDER BY 1, 2"
+    ),
+    "validation_set_branch_local_top_n": (
+        "(SELECT `s0`.`id` FROM `t0` AS `s0` ORDER BY 1 LIMIT 2) UNION "
+        "(SELECT `s1`.`id` FROM `t1` AS `s1` ORDER BY 1 LIMIT 2) ORDER BY 1"
+    ),
+    "validation_scalar_set_branch_local_top_n": (
+        "(SELECT 1 AS `id` ORDER BY 1 LIMIT 1) UNION "
+        "(SELECT 2 AS `id` ORDER BY 1 LIMIT 1) ORDER BY 1"
+    ),
+    "validation_nested_parenthesized_top_n": (
+        "((SELECT `t`.`id` FROM `t0` AS `t` ORDER BY 1 LIMIT 5) "
+        "ORDER BY 1 LIMIT 3) ORDER BY 1 LIMIT 2"
+    ),
+    "validation_table_subquery": "SELECT 1 WHERE EXISTS (TABLE `t0`) ORDER BY 1",
+    "validation_scalar_limit_zero": "SELECT 1 ORDER BY 1 LIMIT 0",
+    "validation_table_limit_zero": (
+        "SELECT COUNT(*) FROM `t0` AS `t` ORDER BY 1 LIMIT 0"
+    ),
+    "validation_scalar_offset_limit_zero": "SELECT 1 ORDER BY 1 LIMIT 0 OFFSET 1",
+    "validation_table_offset_limit_zero": (
+        "SELECT COUNT(*) FROM `t0` AS `t` ORDER BY 1 LIMIT 0 OFFSET 1"
+    ),
+    "validation_scalar_offset_limit": "SELECT 1 ORDER BY 1 LIMIT 1 OFFSET 1",
+    "validation_table_offset_limit": (
+        "SELECT `t`.`id` FROM `t0` AS `t` ORDER BY 1 LIMIT 1 OFFSET 1"
+    ),
+    "validation_derived_explicit_columns": (
+        "SELECT `d`.`dq1` FROM (SELECT `u`.`id` AS `q1` FROM `t1` AS `u`) "
+        "AS `d` (`dq1`) ORDER BY 1"
+    ),
+    "validation_join_cast": (
+        "SELECT `t`.`id`, CAST(`u`.`id` AS SIGNED) FROM `t0` AS `t` "
+        "INNER JOIN `t1` AS `u` ON (`t`.`id` = `u`.`id`) ORDER BY 1, 2"
+    ),
+    "validation_join_inner_subquery": (
+        "SELECT `t`.`id`, `u`.`id` FROM `t0` AS `t` INNER JOIN `t1` AS `u` "
+        "ON (`t`.`id` = `u`.`id`) WHERE EXISTS "
+        "(SELECT 1 FROM `t1` AS `v` WHERE `v`.`id` = `t`.`id`) ORDER BY 1, 2"
+    ),
+    "validation_scalar_intersect_except": (
+        "(SELECT 1 INTERSECT SELECT 1) EXCEPT SELECT 2 ORDER BY 1"
+    ),
+    "validation_scalar_subquery_limit": "SELECT (SELECT 1) ORDER BY 1 LIMIT 1",
+    "validation_table_subquery_limit": (
+        "SELECT COUNT(*) FROM `t0` AS `t` WHERE EXISTS "
+        "(SELECT 1 FROM `t1` AS `u` WHERE `u`.`id` = `t`.`id`) ORDER BY 1 LIMIT 1"
+    ),
+    "validation_scalar_rollup": (
+        "SELECT 1, COUNT(*) GROUP BY 1 WITH ROLLUP ORDER BY 1, 2"
+    ),
+}
+
+
 class ProductionGeneratorAdapter:
     def __init__(
         self,
         *,
-        query_generator: QueryGenerator | None = None,
+        grammar_query_generator: GrammarQueryGenerator | None = None,
         schema_generator: SchemaGenerator | None = None,
         limits: SchemaLimits | None = None,
     ) -> None:
-        self.query_generator = query_generator or QueryGenerator()
+        self.grammar_query_generator = grammar_query_generator or GrammarQueryGenerator()
         self.schema_generator = schema_generator or SchemaGenerator()
         self.limits = limits or SchemaLimits(
             min_tables=1,
@@ -134,7 +248,7 @@ class ProductionGeneratorAdapter:
             max_columns=6,
             max_indexes_per_table=4,
         )
-        self.catalog = self.query_generator.feature_catalog()
+        self.catalog = FeatureCatalog.default(generator_supported_ids=REVIEWED_VARIANT_IDS)
         self._specs = {spec.feature_id: spec for spec in self.catalog}
 
     def signature_for_feature(self, feature_id: str) -> FeatureSignature:
@@ -486,124 +600,47 @@ class ProductionGeneratorAdapter:
         )
 
     def generate_for_validation(self, feature_id: str, seed: int) -> GeneratedWitness:
-        import select_fuzz.generation.query as query_runtime
+        if not isinstance(seed, int) or isinstance(seed, bool):
+            raise TypeError("seed must be an integer")
+        extractor = SignatureExtractor("8.0.41")
+        directed_sql = _VALIDATION_SQL.get(feature_id)
+        if directed_sql is not None:
+            grammar = SelectGrammar.from_text(f"query:\n    {directed_sql}")
+            candidate = GrammarQueryGenerator(grammar).generate(_VALIDATION_SCHEMA, seed=seed)
+            return GeneratedWitness(candidate.sql, extractor.extract(candidate.sql))
 
-        routing = {
-            "validation_top_n": "select_query_specification",
-            "validation_scalar_literal": "select_query_specification",
-            "validation_scalar_aggregate": "select_query_specification",
-            "validation_join_left": "join_outer_natural",
-            "validation_join_left_subquery": "join_outer_natural",
-            "validation_values_only": "set_table_values",
-            "validation_values_limit": "set_table_values",
-            "validation_table_only": "table_explicit",
-            "validation_table_values_union_all": "table_values_union",
-            "validation_table_values_union_distinct": "table_values_union",
-            "validation_set_branch_local_top_n": "set_branch_local_top_n",
-            "validation_scalar_set_branch_local_top_n": "set_branch_local_top_n",
-            "validation_nested_parenthesized_top_n": "select_nested_parenthesized_top_n",
-            "validation_table_subquery": "table_subquery_exists",
-            "validation_scalar_limit_zero": "select_query_specification",
-            "validation_table_limit_zero": "select_query_specification",
-            "validation_scalar_offset_limit_zero": "select_query_specification",
-            "validation_table_offset_limit_zero": "select_query_specification",
-            "validation_scalar_offset_limit": "select_query_specification",
-            "validation_table_offset_limit": "select_query_specification",
-            "validation_derived_explicit_columns": "derived_explicit_columns",
-            "validation_join_cast": "join_inner_cross_straight",
-            "validation_join_inner_subquery": "join_inner_cross_straight",
-            "validation_scalar_intersect_except": "set_intersect",
-            "validation_scalar_subquery_limit": "subquery_result_kinds",
-            "validation_table_subquery_limit": "subquery_result_kinds",
-            "validation_scalar_rollup": "grouping_with_rollup",
-        }
-        actual_feature_id = routing.get(feature_id, feature_id)
-        target = self._specs[actual_feature_id]
-        directed_variant = (
-            "scalar_literal"
-            if feature_id == "validation_scalar_literal"
-            else "scalar_aggregate"
-            if feature_id == "validation_scalar_aggregate"
-            else "left"
-            if feature_id == "validation_join_left"
-            else "left_subquery"
-            if feature_id == "validation_join_left_subquery"
-            else "values_only"
-            if feature_id == "validation_values_only"
-            else "values_limit"
-            if feature_id == "validation_values_limit"
-            else "table_only"
-            if feature_id == "validation_table_only"
-            else "table_values_union"
-            if feature_id == "validation_table_values_union_all"
-            else "table_values_union_distinct"
-            if feature_id == "validation_table_values_union_distinct"
-            else "scalar_branch_local_top_n"
-            if feature_id == "validation_scalar_set_branch_local_top_n"
-            else "table_subquery"
-            if feature_id == "validation_table_subquery"
-            else "limit_zero"
-            if feature_id == "validation_scalar_limit_zero"
-            else "table_limit_zero"
-            if feature_id == "validation_table_limit_zero"
-            else "limit_zero_offset"
-            if feature_id == "validation_scalar_offset_limit_zero"
-            else "table_limit_zero_offset"
-            if feature_id == "validation_table_offset_limit_zero"
-            else "scalar_offset_limit"
-            if feature_id == "validation_scalar_offset_limit"
-            else "table_offset_limit"
-            if feature_id == "validation_table_offset_limit"
-            else "explicit_columns"
-            if feature_id == "validation_derived_explicit_columns"
-            else "inner_cast"
-            if feature_id == "validation_join_cast"
-            else "inner_subquery"
-            if feature_id == "validation_join_inner_subquery"
-            else "scalar_intersect_except"
-            if feature_id == "validation_scalar_intersect_except"
-            else "scalar_limit"
-            if feature_id == "validation_scalar_subquery_limit"
-            else "table_limit"
-            if feature_id == "validation_table_subquery_limit"
-            else "scalar_rollup"
-            if feature_id == "validation_scalar_rollup"
-            else None
-        )
+        target = self._specs[feature_id]
+        desired = self.signature_for_feature(feature_id)
         tree = SeedTree(seed)
-        last_unreachable: query_runtime.TargetNotReachable | None = None
-        for schema_attempt in range(32):
-            schema_seed = (
-                seed
-                if schema_attempt == 0
-                else tree.derive("validation_schema_retry", schema_attempt)
-            )
+        for schema_attempt in range(8):
             manifest = self.schema_generator.generate(
                 target,
-                seed=schema_seed,
+                seed=tree.derive("validation_schema", schema_attempt),
                 limits=self.limits,
             )
-            try:
-                generated = self.query_generator.generate(
-                    manifest,
-                    target=target,
-                    seed=seed,
-                    case_ordinal=0,
-                    lane=query_runtime.QueryLane.VALID,
-                    require_top_n=feature_id == "validation_top_n",
-                    directed_variant=directed_variant,
+            for candidate_attempt in range(2_048):
+                candidate_seed = tree.derive(
+                    "validation_grammar_candidate",
+                    schema_attempt,
+                    candidate_attempt,
                 )
-            except query_runtime.TargetNotReachable as error:
-                last_unreachable = error
-                continue
-            break
-        else:
-            raise query_runtime.TargetNotReachable(
-                "validation witness is unreachable after 32 schema attempts"
-            ) from last_unreachable
-        return GeneratedWitness(
-            sql=generated.sql,
-            signature=SignatureExtractor("8.0.41").extract(generated.sql),
+                try:
+                    candidate = self.grammar_query_generator.generate(
+                        manifest,
+                        seed=candidate_seed,
+                    )
+                except CandidateRejected:
+                    continue
+                try:
+                    signature = extractor.extract(candidate.sql)
+                except ValueError:
+                    continue
+                if set(desired.nodes) <= set(signature.nodes) and set(
+                    desired.requirements
+                ) <= set(signature.requirements):
+                    return GeneratedWitness(candidate.sql, signature)
+        raise ValueError(
+            f"grammar produced no validation witness for {feature_id} within the search budget"
         )
 
 

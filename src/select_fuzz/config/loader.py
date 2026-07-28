@@ -26,15 +26,12 @@ _CORRECTNESS_FLAT_KEYS = {
     "byte_limit",
     "min_rows_per_table",
     "max_rows_per_table",
-    "free_random_rate",
-    "negative_mutation_rate",
     "min_tables",
     "max_tables",
     "min_columns",
     "max_columns",
     "max_indexes_per_table",
     "max_query_tables",
-    "max_query_depth",
     "query_grammar_path",
     "grammar_compatible_type_percent",
     "explain_timeout_seconds",
@@ -62,6 +59,38 @@ _PERFORMANCE_FLAT_KEYS = {
     "materialization_timeout_seconds",
     "regression_threshold",
     "max_start_skew_ms",
+}
+_FUZZ_FLAT_KEYS = {
+    "target_role",
+    "databases",
+    "writer_threads_per_database",
+    "reader_threads_per_database",
+    "max_total_connections",
+    "initial_tables",
+    "initial_rows_per_table",
+    "max_rows_per_database",
+    "min_columns_per_table",
+    "max_columns_per_table",
+    "min_indexes_per_table",
+    "max_indexes_per_table",
+    "query_timeout_seconds",
+    "batch_rows_min",
+    "batch_rows_max",
+    "delete_batch_rows_min",
+    "delete_batch_rows_max",
+    "insert_weight",
+    "update_weight",
+    "delete_weight",
+    "upsert_weight",
+    "grammar_query_weight",
+    "load_shaped_query_weight",
+    "reconnect_initial_delay_seconds",
+    "reconnect_max_delay_seconds",
+    "data_rows_min",
+    "data_rows_max",
+    "degradation_ratio",
+    "workers",
+    "queries_per_round",
 }
 
 
@@ -93,6 +122,7 @@ def _set_dotted(target: dict[str, Any], dotted_key: str, value: object) -> None:
         not in {
             "correctness",
             "performance",
+            "fuzz",
         }
     ):
         raise ConfigLoadError(f"Unsupported CLI override key: {dotted_key}")
@@ -126,7 +156,7 @@ def _apply_cli_overrides(raw: dict[str, Any], cli: Mapping[str, object]) -> None
         if key == "full_thread_sql_log":
             raw[key] = deepcopy(value)
             continue
-        if key in {"correctness", "performance"}:
+        if key in {"correctness", "performance", "fuzz"}:
             if not isinstance(value, Mapping):
                 raise ConfigLoadError(f"CLI override {key} must be a mapping")
             section = raw.setdefault(key, {})
@@ -147,6 +177,22 @@ def _apply_cli_overrides(raw: dict[str, Any], cli: Mapping[str, object]) -> None
             if not isinstance(section, dict):
                 raise ConfigLoadError("Configuration section performance must be a mapping")
             target_key = "formal_timeout_seconds" if key == "timeout_seconds" else key
+            section[target_key] = deepcopy(value)
+        elif mode is RunMode.FUZZ and (
+            key in _FUZZ_FLAT_KEYS or key == "timeout_seconds"
+        ):
+            if key in {"workers", "queries_per_round", "degradation_ratio"}:
+                if key == "workers" and value != 1:
+                    raise ConfigLoadError("fuzz mode uses one coordinator worker")
+                continue
+            section = raw.setdefault("fuzz", {})
+            if not isinstance(section, dict):
+                raise ConfigLoadError("Configuration section fuzz must be a mapping")
+            target_key = {
+                "timeout_seconds": "query_timeout_seconds",
+                "data_rows_min": "initial_rows_per_table",
+                "data_rows_max": "max_rows_per_database",
+            }.get(key, key)
             section[target_key] = deepcopy(value)
         else:
             raise ConfigLoadError(f"Unsupported CLI override key: {key}")
@@ -201,7 +247,9 @@ def load_config(path: str | Path, *, cli: Mapping[str, object] | None = None) ->
         if parameter_reference is not None and "replica_parameters" in validation_message:
             raise ConfigLoadError(f"Invalid replica parameters: {validation_message}")
         raise ConfigLoadError(validation_message)
-    if any(node.legacy_single_endpoint for node in config.nodes):
+    if config.mode is not RunMode.FUZZ and any(
+        node.legacy_single_endpoint for node in config.nodes
+    ):
         raise ConfigLoadError(
             "Configuration must define distinct primary and replica endpoints for all three roles"
         )

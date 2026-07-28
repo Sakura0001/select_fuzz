@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from select_fuzz.config import AppConfig, NodeConfig, NodePreflight, NodeRole
+from select_fuzz.config import AppConfig, NodeConfig, NodePreflight, NodeRole, RunMode
 from select_fuzz.doctor import DoctorService
 
 
@@ -131,3 +131,27 @@ def test_doctor_probes_all_six_distinct_endpoints_and_only_warns_on_version_mism
     assert len(probe.ports) == 6
     assert report.can_start is True
     assert "version_mismatch" in {issue.code for issue in report.warnings}
+
+
+def test_fuzz_doctor_probes_only_the_selected_shared_proxy_once() -> None:
+    config = AppConfig(
+        mode=RunMode.FUZZ,
+        nodes=tuple(
+            NodeConfig(role=role, host="192.168.243.82", port=3306)
+            for role in NodeRole
+        ),
+    )
+
+    class ProxyProbe:
+        def __init__(self) -> None:
+            self.roles: list[NodeRole] = []
+
+        def probe(self, node: NodeConfig) -> NodePreflight:
+            self.roles.append(node.role)
+            return _snapshot(node.role)
+
+    probe = ProxyProbe()
+    report = DoctorService(config, probe).run()
+
+    assert probe.roles == [NodeRole.CUSTOM_ON]
+    assert report.can_start is True

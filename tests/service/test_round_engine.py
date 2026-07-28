@@ -14,8 +14,6 @@ from select_fuzz.correctness import (
     CorrectnessRoundEngine,
     GeneratedRoundSource,
     RoundMaterialization,
-    _gated_round_coverage_tags,
-    query_mix_from_rates,
 )
 from select_fuzz.domain import (
     ColumnMeta,
@@ -39,25 +37,8 @@ from select_fuzz.generation.mutation import (
     MutationOperation,
     MutationStatement,
 )
-from select_fuzz.generation.coverage import CoverageLedger
 from select_fuzz.generation.data import DataScenario
-from select_fuzz.generation.query import QueryGenerator, QueryLane, QueryMix
-from select_fuzz.generation.query_grammar import GrammarQueryGenerator
-from select_fuzz.generation.query_ast import (
-    ColumnRef,
-    ExpectedError,
-    ExpectedErrorKind,
-    Literal,
-    OrderBy,
-    Projection,
-    QueryAst,
-    QueryScope,
-    SelectQuery,
-    SqlType,
-    Star,
-    TableQuery,
-    TableRelation,
-)
+from select_fuzz.generation.query_contract import ExpectedError, ExpectedErrorKind, QueryLane
 from select_fuzz.generation.schema import (
     BoundaryDeclarationId,
     SchemaGenerator,
@@ -501,11 +482,10 @@ def test_dynamic_grammar_round_explains_first_and_counts_only_successful_triads(
     ] * 3
 
 
-def test_generated_round_source_exposes_an_immutable_schema_to_grammar_generation(
+def test_generated_round_source_defaults_to_grammar_only_generation(
     tmp_path: Path,
 ) -> None:
     source = GeneratedRoundSource(
-        CoverageLedger(tmp_path / "coverage.json"),
         rows_per_table=3,
         schema_limits=SchemaLimits(
             min_tables=1,
@@ -514,7 +494,6 @@ def test_generated_round_source_exposes_an_immutable_schema_to_grammar_generatio
             max_columns=4,
             max_indexes_per_table=2,
         ),
-        grammar_query_generator=GrammarQueryGenerator(),
     )
     context = _context(2)
 
@@ -532,6 +511,8 @@ def test_generated_round_source_exposes_an_immutable_schema_to_grammar_generatio
     assert first.seed != second.seed
     assert first.sql
     assert second.sql
+    with pytest.raises(TypeError, match="query_generator"):
+        GeneratedRoundSource(query_generator=object())  # type: ignore[call-arg]
 
 
 def test_each_worker_triggers_one_transaction_after_ten_completed_queries(
@@ -1187,37 +1168,6 @@ def test_internal_result_limit_is_resource_not_finding_pass_or_coverage(
     assert ArtifactReader(tmp_path).events() == []
 
 
-def test_generated_round_source_builds_real_schema_data_and_requested_query_count(
-    tmp_path: Path,
-) -> None:
-    source = GeneratedRoundSource(
-        CoverageLedger(tmp_path / "coverage.json"),
-        rows_per_table=10,
-    )
-
-    materialized = source.materialize(_context(5))
-
-    assert len(materialized.queries) == 5
-    assert materialized.database.startswith("sf_c_")
-    assert materialized.bundle.statements
-    assert all(query.sql for query in materialized.queries)
-
-
-def test_generated_round_source_preserves_lane_and_expected_error(tmp_path: Path) -> None:
-    source = GeneratedRoundSource(
-        CoverageLedger(tmp_path / "coverage.json"),
-        rows_per_table=10,
-        query_generator=QueryGenerator(mix=QueryMix(0, 0, 100)),
-    )
-
-    materialized = source.materialize(_context(3))
-
-    assert {query.lane for query in materialized.queries} == {QueryLane.NEGATIVE}
-    assert all(query.expected_error is not None for query in materialized.queries)
-    assert all(query.coverage_eligible is False for query in materialized.queries)
-    assert materialized.rows_per_table == 10
-
-
 def test_correctness_query_rejects_an_untyped_expected_error_contract() -> None:
     with pytest.raises(TypeError, match="expected_error"):
         replace(
@@ -1228,55 +1178,10 @@ def test_correctness_query_rejects_an_untyped_expected_error_contract() -> None:
         )
 
 
-def test_generated_round_source_uses_debt_as_bias_without_locking_target_selection(
-    tmp_path: Path,
-) -> None:
-    catalog = QueryGenerator().feature_catalog()
-    regular_targets = catalog.signature_targets(
-        version=(8, 0, 41), profiles=frozenset({"regular_innodb"})
-    )
-    counts = {target.feature_id: 20 for target in regular_targets}
-    counts["regression_8041_desc_pk_index_merge"] = 10
-    source = GeneratedRoundSource(
-        CoverageLedger(tmp_path / "coverage.json", counts=counts),
-        rows_per_table=10,
-    )
-    request = RunRequest(
-        run_id="run_schema_retry_1",
-        mode="correctness",
-        seed=2_026_071_301,
-        workers=1,
-        rounds=1,
-        queries_per_round=1,
-    )
-    context = RoundContext(
-        request,
-        worker_id=0,
-        round_number=38,
-        round_seed=274430528748168597422443301612522303236,
-    )
-
-    materialized = source.materialize(context)
-
-    assert materialized.queries[0].target_feature_id in {
-        target.feature_id for target in regular_targets
-    }
-    assert materialized.queries[0].sql
-    assert "FROM" in materialized.queries[0].sql.upper()
-
-
-def test_query_mix_rounding_always_totals_one_hundred() -> None:
-    mix = query_mix_from_rates(0.333, 0.333)
-
-    assert (mix.valid_percent + mix.free_random_percent + mix.negative_percent) == 100
-    assert mix.identity() == "34:33:33"
-
-
 def test_generated_round_source_chooses_deterministic_rows_inside_range(
     tmp_path: Path,
 ) -> None:
     source = GeneratedRoundSource(
-        CoverageLedger(tmp_path / "coverage.json"),
         min_rows_per_table=37,
         max_rows_per_table=419,
     )
@@ -1295,7 +1200,6 @@ def test_generated_round_source_preserves_explicit_fixed_row_count(
     rows_per_table: int,
 ) -> None:
     source = GeneratedRoundSource(
-        CoverageLedger(tmp_path / f"coverage-{rows_per_table}.json"),
         rows_per_table=rows_per_table,
     )
 
@@ -1308,7 +1212,6 @@ def test_generated_round_source_seed_randomizes_data_scenarios_and_row_counts(
     tmp_path: Path,
 ) -> None:
     source = GeneratedRoundSource(
-        CoverageLedger(tmp_path / "coverage.json"),
         min_rows_per_table=2,
         max_rows_per_table=5,
     )
@@ -1336,7 +1239,6 @@ def test_generated_round_source_seed_randomizes_data_scenarios_and_row_counts(
         observed_rows.add(materialized.rows_per_table)
         assert 2 <= materialized.rows_per_table <= 5
         assert materialized.rows_per_table >= witness_minimum[scenario]
-        assert all("row_cardinality:many" in query.coverage_tags for query in materialized.queries)
 
     assert observed_scenarios == {
         DataScenario.SEEDED_RANDOM,
@@ -1359,7 +1261,6 @@ def test_production_boundary_rounds_reach_every_typed_declaration(
         max_columns=3,
     )
     source = GeneratedRoundSource(
-        CoverageLedger(tmp_path / "coverage.json"),
         rows_per_table=8,
         schema_limits=limits,
     )
@@ -1380,123 +1281,6 @@ def test_production_boundary_rounds_reach_every_typed_declaration(
         reached[boundary.boundary_id] = declaration
 
     assert reached == {boundary.boundary_id: boundary.declaration for boundary in expected}
-
-
-def test_round_coverage_tags_require_the_query_to_observe_the_setup_value(
-    tmp_path: Path,
-) -> None:
-    limits = SchemaLimits(
-        min_tables=1,
-        max_tables=1,
-        min_columns=3,
-        max_columns=3,
-    )
-    materialized = GeneratedRoundSource(
-        CoverageLedger(tmp_path / "coverage.json"),
-        rows_per_table=8,
-        schema_limits=limits,
-    ).materialize(replace(_context(1), round_number=1, round_seed=_boundary_seed(limits, 0)))
-    schema = materialized.bundle.schema  # type: ignore[attr-defined]
-    data = materialized.bundle.data  # type: ignore[attr-defined]
-    table_name = schema.tables[0].name
-    boundary = SchemaGenerator.executable_boundary_declarations(limits)[0]
-
-    def ast(expression: object, *, reads_table: bool) -> QueryAst:
-        return QueryAst(
-            SelectQuery(
-                (Projection(expression, "value"),),  # type: ignore[arg-type]
-                source=(TableRelation(table_name, "t") if reads_table else None),
-            ),
-            OrderBy((1,)),
-            QueryScope(1, max_rows=1),
-        )
-
-    scalar_tags = _gated_round_coverage_tags(
-        ast(Literal(1, SqlType.NUMERIC), reads_table=False),
-        schema=schema,
-        data=data,
-        scenario=DataScenario.BOUNDARY,
-        row_cardinality="many",
-        boundary=boundary,
-        scenario_witness_met=True,
-    )
-    id_tags = _gated_round_coverage_tags(
-        ast(ColumnRef("t", "id", SqlType.NUMERIC), reads_table=True),
-        schema=schema,
-        data=data,
-        scenario=DataScenario.BOUNDARY,
-        row_cardinality="many",
-        boundary=boundary,
-        scenario_witness_met=True,
-    )
-    boundary_tags = _gated_round_coverage_tags(
-        ast(ColumnRef("t", "boundary_col", SqlType.NUMERIC), reads_table=True),
-        schema=schema,
-        data=data,
-        scenario=DataScenario.BOUNDARY,
-        row_cardinality="many",
-        boundary=boundary,
-        scenario_witness_met=True,
-    )
-    star_tags = _gated_round_coverage_tags(
-        QueryAst(
-            SelectQuery((Projection(Star()),), TableRelation(table_name, "t")),
-            OrderBy((1, 2, 3)),
-            QueryScope(3, max_rows=8),
-        ),
-        schema=schema,
-        data=data,
-        scenario=DataScenario.BOUNDARY,
-        row_cardinality="many",
-        boundary=boundary,
-        scenario_witness_met=True,
-    )
-    table_tags = _gated_round_coverage_tags(
-        QueryAst(
-            TableQuery(table_name),
-            OrderBy((1, 2, 3)),
-            QueryScope(3, max_rows=8),
-        ),
-        schema=schema,
-        data=data,
-        scenario=DataScenario.BOUNDARY,
-        row_cardinality="many",
-        boundary=boundary,
-        scenario_witness_met=True,
-    )
-
-    assert scalar_tags == frozenset()
-    assert id_tags == frozenset({"row_cardinality:many"})
-    assert "row_cardinality:many" in boundary_tags
-    assert "data_scenario:boundary" in boundary_tags
-    assert f"schema_boundary:{boundary.boundary_id.value}" in boundary_tags
-    for expanded_tags in (star_tags, table_tags):
-        assert "data_scenario:boundary" in expanded_tags
-        assert f"schema_boundary:{boundary.boundary_id.value}" in expanded_tags
-
-
-def test_insufficient_fixed_rows_emit_fallback_without_claiming_scenario_coverage(
-    tmp_path: Path,
-) -> None:
-    limits = SchemaLimits(
-        min_tables=1,
-        max_tables=1,
-        min_columns=3,
-        max_columns=3,
-    )
-    materialized = GeneratedRoundSource(
-        CoverageLedger(tmp_path / "coverage.json"),
-        rows_per_table=1,
-        schema_limits=limits,
-    ).materialize(replace(_context(5), round_number=1, round_seed=_boundary_seed(limits, 0)))
-
-    for query in materialized.queries:
-        assert any(
-            tag.startswith("data_scenario_fallback:boundary:insufficient_rows_1_required_8")
-            for tag in query.coverage_tags
-        )
-        assert "data_scenario:boundary" not in query.coverage_tags
-        assert not any(tag.startswith("schema_boundary:") for tag in query.coverage_tags)
 
 
 def test_setup_mismatch_persists_complete_finding_bundle(tmp_path: Path) -> None:

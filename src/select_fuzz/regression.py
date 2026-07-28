@@ -8,15 +8,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from select_fuzz.domain import SeedTree
-from select_fuzz.generation.query import QueryGenerator, QueryLane
+from select_fuzz.generation.query_grammar import SelectGrammar
 from select_fuzz.generation.schema import SchemaProfile
-
-
-NEGATIVE_ERROR_FAMILIES = (
-    "unknown_column",
-    "set_arity",
-    "function_arity",
-)
 
 
 def build_seed_corpus(seed: int) -> dict[str, object]:
@@ -25,37 +18,40 @@ def build_seed_corpus(seed: int) -> dict[str, object]:
     if not isinstance(seed, int) or isinstance(seed, bool):
         raise TypeError("seed must be an integer")
     tree = SeedTree(seed)
-    catalog = QueryGenerator.feature_catalog()
-    variants = sorted(catalog, key=lambda item: item.feature_id)
+    grammar = SelectGrammar.default()
     return {
-        "mysql_version": "8.0.41",
-        "negative_error_families": [
+        "grammar_alternatives": [
             {
-                "family": family,
-                "seed": tree.derive("regression", "negative", family),
-            }
-            for family in NEGATIVE_ERROR_FAMILIES
-        ],
-        "query_lanes": [
-            {
-                "lane": lane.value,
-                "seed": tree.derive("regression", "lane", lane.value),
-            }
-            for lane in QueryLane
-        ],
-        "query_variants": [
-            {
-                "evidence_lock_ready": variant.evidence_lock_ready,
-                "expected_tags": [variant.feature_id, "lane_valid"],
-                "family": variant.family,
-                "feature_id": variant.feature_id,
-                "profiles": sorted(variant.compatible_profiles),
+                "alternative_ordinal": ordinal,
+                "expected_tag": (
+                    "grammar_alt:"
+                    + grammar.stable_alternative_id(
+                        f"{production_name}@{alternative.source_line}"
+                    )
+                ),
+                "production": production_name,
                 "seed": tree.derive(
-                    "regression", "query_variant", variant.feature_id
+                    "regression",
+                    "grammar_alternative",
+                    production_name,
+                    ordinal,
                 ),
             }
-            for variant in variants
+            for production_name, production in sorted(grammar.productions.items())
+            for ordinal, alternative in enumerate(production.alternatives)
         ],
+        "grammar_productions": [
+            {
+                "expected_tag": f"grammar:{production_name}",
+                "production": production_name,
+                "seed": tree.derive(
+                    "regression", "grammar_production", production_name
+                ),
+            }
+            for production_name in sorted(grammar.productions)
+        ],
+        "grammar_sha256": grammar.sha256,
+        "mysql_version": "8.0.41",
         "root_seed": seed,
         "schema_profiles": [
             {
@@ -116,4 +112,4 @@ def write_seed_corpus(path: str | Path, *, seed: int) -> Path:
     return destination
 
 
-__all__ = ["NEGATIVE_ERROR_FAMILIES", "build_seed_corpus", "write_seed_corpus"]
+__all__ = ["build_seed_corpus", "write_seed_corpus"]

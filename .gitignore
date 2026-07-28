@@ -28,6 +28,7 @@ test-results/
 /config/local.yaml
 /config/local-8041.yaml
 /config/*-smoke.yaml
+/config/intranet-fuzz.yaml
 
 # Local runtime state
 /.local/

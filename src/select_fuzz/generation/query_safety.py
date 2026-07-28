@@ -93,7 +93,7 @@ _REGISTERED_FUNCTION_NAMES = frozenset(
 _ALLOWED_CALL_TOKENS = (
     frozenset(
         {
-            # Closed deterministic function set rendered by query_ast/query_render.
+            # Closed deterministic function set expanded by the grammar generator.
             "ABS",
             "AGAINST",
             "ALL",

@@ -48,6 +48,19 @@ class SelectFuzzCommandBuilder:
         ]
         if request.rounds is not None:
             argv.extend(("--rounds", str(request.rounds)))
+        if request.duration_seconds is not None:
+            argv.extend(("--duration-seconds", str(request.duration_seconds)))
+        if request.mode == "fuzz":
+            argv.extend(
+                (
+                    "--databases",
+                    str(request.databases),
+                    "--writer-threads-per-database",
+                    str(request.writer_threads_per_database),
+                    "--reader-threads-per-database",
+                    str(request.reader_threads_per_database),
+                )
+            )
         return tuple(argv)
 
 

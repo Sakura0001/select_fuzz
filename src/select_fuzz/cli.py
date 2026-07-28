@@ -32,7 +32,6 @@ from select_fuzz.cleanup import (
     ManagedDatabaseError,
     build_cleanup_service,
 )
-from select_fuzz.correctness import build_correctness_runner
 from select_fuzz.domain import RunRequest, deterministic_id
 from select_fuzz.doctor import build_doctor
 from select_fuzz.replay import (
@@ -42,25 +41,18 @@ from select_fuzz.replay import (
     build_replay_service,
 )
 from select_fuzz.regression import write_seed_corpus
-from select_fuzz.performance.entrypoint import build_performance_runner
-from select_fuzz.service import RunSummary
+from select_fuzz.modes import MODE_REGISTRY, ModeFactory, ModeRunner
 
 
 app = typer.Typer(
     name="select-fuzz",
     no_args_is_help=True,
-    help="Differential correctness and performance testing for MySQL SELECT queries.",
+    help="MySQL correctness, performance, and concurrent read/write fuzz testing.",
 )
 
 
-class ModeRunner(Protocol):
-    def run(self, request: RunRequest, stop_event: Event) -> RunSummary: ...
-
-
-ModeFactory = Callable[[AppConfig, Path], ModeRunner]
 MODE_RUNNERS: dict[str, ModeFactory] = {
-    "correctness": build_correctness_runner,
-    "performance": build_performance_runner,
+    name: definition.factory for name, definition in MODE_REGISTRY.items()
 }
 
 
@@ -89,6 +81,19 @@ def run_command(
     degradation_ratio: float | None = typer.Option(None, "--degradation-ratio", min=0),
     data_rows_min: int | None = typer.Option(None, "--data-rows-min", min=1),
     data_rows_max: int | None = typer.Option(None, "--data-rows-max", min=1),
+    databases: int | None = typer.Option(None, "--databases", min=1, max=32),
+    writer_threads_per_database: int | None = typer.Option(
+        None,
+        "--writer-threads-per-database",
+        min=1,
+        max=64,
+    ),
+    reader_threads_per_database: int | None = typer.Option(
+        None,
+        "--reader-threads-per-database",
+        min=3,
+        max=192,
+    ),
     full_thread_sql_log: bool | None = typer.Option(
         None,
         "--full-thread-sql-log/--no-full-thread-sql-log",
@@ -96,7 +101,7 @@ def run_command(
     ),
     artifacts: Path = typer.Option(Path("artifacts"), "--artifacts"),
 ) -> None:
-    """Run one registered correctness or performance mode."""
+    """Run one registered correctness, performance, or concurrent fuzz mode."""
 
     try:
         selected_mode = RunMode(mode)
@@ -114,13 +119,24 @@ def run_command(
                     "correctness.max_rows_per_table": data_rows_max,
                 }
             )
-        else:
+        elif selected_mode is RunMode.PERFORMANCE:
             overrides.update(
                 {
                     "performance.formal_timeout_seconds": timeout_seconds,
                     "performance.regression_threshold": degradation_ratio,
                     "performance.initial_table_rows": data_rows_min,
                     "performance.max_table_rows": data_rows_max,
+                }
+            )
+        else:
+            overrides.update(
+                {
+                    "fuzz.databases": databases,
+                    "fuzz.writer_threads_per_database": writer_threads_per_database,
+                    "fuzz.reader_threads_per_database": reader_threads_per_database,
+                    "fuzz.query_timeout_seconds": timeout_seconds,
+                    "fuzz.initial_rows_per_table": data_rows_min,
+                    "fuzz.max_rows_per_database": data_rows_max,
                 }
             )
         loaded = load_config(config, cli=overrides)
@@ -131,15 +147,23 @@ def run_command(
     if factory is None:
         typer.echo(f"mode is not registered: {selected_mode.value}", err=True)
         raise typer.Exit(code=2)
-    section = loaded.correctness if selected_mode is RunMode.CORRECTNESS else loaded.performance
+    if selected_mode is RunMode.CORRECTNESS:
+        request_workers = loaded.correctness.workers
+        request_queries = loaded.correctness.queries_per_round
+    elif selected_mode is RunMode.PERFORMANCE:
+        request_workers = loaded.performance.workers
+        request_queries = loaded.performance.queries_per_round
+    else:
+        request_workers = 1
+        request_queries = 1
     run_id = deterministic_id("run", selected_mode.value, seed, time.time_ns())
     request = RunRequest(
         run_id=run_id,
         mode=selected_mode.value,
         seed=seed,
-        workers=section.workers,
+        workers=request_workers,
         rounds=rounds,
-        queries_per_round=section.queries_per_round,
+        queries_per_round=request_queries,
     )
     stop_event = Event()
     timer = None if duration_seconds is None else Timer(duration_seconds, stop_event.set)

@@ -11,7 +11,7 @@ from select_fuzz.artifacts.reader import ArtifactReader, ArtifactValidationError
 from select_fuzz.config import NodeRole
 from select_fuzz.domain import ColumnMeta, ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.execution import DatabaseNameFactory, PrepareStatus, QueryLimits
-from select_fuzz.generation.query_ast import ExpectedErrorKind
+from select_fuzz.generation.query_contract import ExpectedErrorKind
 from select_fuzz.oracle import OracleVerdict, QueryErrorDisposition
 from select_fuzz.replay import (
     ReplayCase,

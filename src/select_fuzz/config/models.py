@@ -28,10 +28,11 @@ class StrictModel(BaseModel):
 
 
 class RunMode(StrEnum):
-    """The two intentionally separate test modes."""
+    """The independently packaged test modes."""
 
     CORRECTNESS = "correctness"
     PERFORMANCE = "performance"
+    FUZZ = "fuzz"
 
 
 MAX_STATEMENT_TIMEOUT_SECONDS = 300.0
@@ -186,15 +187,12 @@ class CorrectnessConfig(StrictModel):
     byte_limit: int = Field(default=32 * 1024 * 1024, ge=1)
     min_rows_per_table: int = Field(default=10, ge=1)
     max_rows_per_table: int = Field(default=500, ge=1)
-    free_random_rate: float = Field(default=0.20, ge=0, le=1)
-    negative_mutation_rate: float = Field(default=0.0, ge=0, le=1)
     min_tables: int = Field(default=1, ge=1, le=64)
     max_tables: int = Field(default=8, ge=1, le=64)
     min_columns: int = Field(default=2, ge=2, le=1017)
     max_columns: int = Field(default=16, ge=2, le=1017)
     max_indexes_per_table: int = Field(default=8, ge=1, le=65)
     max_query_tables: int = Field(default=4, ge=1, le=64)
-    max_query_depth: int = Field(default=3, ge=1, le=16)
     query_grammar_path: str | None = None
     grammar_compatible_type_percent: int = Field(default=80, ge=0, le=100)
     explain_timeout_seconds: float = Field(
@@ -204,9 +202,7 @@ class CorrectnessConfig(StrictModel):
     )
 
     @model_validator(mode="after")
-    def reserve_space_for_coverage_driven_queries(self) -> Self:
-        if self.free_random_rate + self.negative_mutation_rate > 1:
-            raise ValueError("free_random_rate and negative_mutation_rate must sum to at most 1")
+    def validate_correctness_bounds(self) -> Self:
         if self.min_rows_per_table > self.max_rows_per_table:
             raise ValueError("min_rows_per_table must not exceed max_rows_per_table")
         if self.min_tables > self.max_tables:
@@ -269,6 +265,78 @@ class PerformanceConfig(StrictModel):
         return self
 
 
+class FuzzConfig(StrictModel):
+    """Bounded concurrent read/write fuzzing on one configured topology."""
+
+    target_role: NodeRole = NodeRole.CUSTOM_ON
+    databases: int = Field(default=1, ge=1, le=32)
+    writer_threads_per_database: int = Field(default=2, ge=1, le=64)
+    reader_threads_per_database: int = Field(default=6, ge=3, le=192)
+    max_total_connections: int = Field(default=1024, ge=1, le=4096)
+    initial_tables: int = Field(default=4, ge=1, le=16)
+    initial_rows_per_table: int = Field(default=10_000, ge=100)
+    max_rows_per_database: int = Field(default=10_000_000, ge=100)
+    min_columns_per_table: int = Field(default=200, ge=50, le=500)
+    max_columns_per_table: int = Field(default=500, ge=50, le=500)
+    min_indexes_per_table: int = Field(default=4, ge=4, le=64)
+    max_indexes_per_table: int = Field(default=12, ge=4, le=64)
+    query_timeout_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        le=MAX_STATEMENT_TIMEOUT_SECONDS,
+    )
+    batch_rows_min: int = Field(default=100, ge=1)
+    batch_rows_max: int = Field(default=100_000, ge=1, le=1_000_000)
+    delete_batch_rows_min: int = Field(default=10, ge=1, le=100)
+    delete_batch_rows_max: int = Field(default=100, ge=1, le=100)
+    insert_weight: int = Field(default=35, ge=0, le=100)
+    update_weight: int = Field(default=45, ge=0, le=100)
+    delete_weight: int = Field(default=10, ge=0, le=100)
+    upsert_weight: int = Field(default=10, ge=0, le=100)
+    grammar_query_weight: Literal[50] = 50
+    load_shaped_query_weight: Literal[50] = 50
+    reconnect_initial_delay_seconds: float = Field(default=0.25, gt=0, le=30)
+    reconnect_max_delay_seconds: float = Field(default=10.0, gt=0, le=60)
+
+    @model_validator(mode="after")
+    def validate_fuzz_bounds(self) -> Self:
+        if self.reader_threads_per_database % 3 != 0:
+            raise ValueError("reader_threads_per_database must be divisible by 3")
+        if self.batch_rows_min > self.batch_rows_max:
+            raise ValueError("batch_rows_min must not exceed batch_rows_max")
+        if self.delete_batch_rows_min > self.delete_batch_rows_max:
+            raise ValueError(
+                "delete_batch_rows_min must not exceed delete_batch_rows_max"
+            )
+        if self.initial_rows_per_table * self.initial_tables > self.max_rows_per_database:
+            raise ValueError(
+                "initial_rows_per_table times initial_tables must not exceed "
+                "max_rows_per_database"
+            )
+        if self.min_columns_per_table > self.max_columns_per_table:
+            raise ValueError(
+                "min_columns_per_table must not exceed max_columns_per_table"
+            )
+        if self.min_indexes_per_table > self.max_indexes_per_table:
+            raise ValueError(
+                "min_indexes_per_table must not exceed max_indexes_per_table"
+            )
+        if (
+            self.insert_weight
+            + self.update_weight
+            + self.delete_weight
+            + self.upsert_weight
+            != 100
+        ):
+            raise ValueError("fuzz DML weights must sum to 100")
+        if self.reconnect_initial_delay_seconds > self.reconnect_max_delay_seconds:
+            raise ValueError(
+                "reconnect_initial_delay_seconds must not exceed "
+                "reconnect_max_delay_seconds"
+            )
+        return self
+
+
 class AppConfig(StrictModel):
     """Top-level configuration with one node for every fixed role."""
 
@@ -283,6 +351,7 @@ class AppConfig(StrictModel):
     full_thread_sql_log: bool = False
     correctness: CorrectnessConfig = Field(default_factory=CorrectnessConfig)
     performance: PerformanceConfig = Field(default_factory=PerformanceConfig)
+    fuzz: FuzzConfig = Field(default_factory=FuzzConfig)
 
     @model_validator(mode="after")
     def require_fixed_unique_topology(self) -> Self:
@@ -291,6 +360,15 @@ class AppConfig(StrictModel):
         roles = [node.role for node in self.nodes]
         if set(roles) != set(NodeRole) or len(roles) != len(set(roles)):
             raise ValueError("nodes must contain baseline, custom_off, and custom_on exactly once")
+
+        # Fuzz mode deliberately targets one logical cluster through a routing
+        # proxy.  The proxy can expose the same host/port for both the primary
+        # and replica connection, and the other two fixed role entries are not
+        # used by the fuzz runner.  Differential modes retain the strict
+        # six-endpoint isolation contract below.
+        if self.mode is RunMode.FUZZ:
+            return self
+
         if any(
             not node.legacy_single_endpoint
             and (node.primary.host.casefold(), node.primary.port)

@@ -18,7 +18,9 @@ RUN set -eux; \
       test -n "$resolved"; \
       resolved=$(readlink -f "$resolved"); \
       cp -a "$resolved" "$bundle/python/lib/$(basename "$resolved")"; \
-      ln -sf "$(basename "$resolved")" "$bundle/python/lib/$library"; \
+      if [ "$(basename "$resolved")" != "$library" ]; then \
+        ln -sf "$(basename "$resolved")" "$bundle/python/lib/$library"; \
+      fi; \
     done; \
     site="$bundle/python/lib/python3.11/site-packages"; \
     "$BUNDLE_PYTHON" -m pip install \

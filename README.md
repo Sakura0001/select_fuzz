@@ -62,6 +62,35 @@ Actions workflow `build-centos7-bundle` produces the same archive when Docker is
 not available locally. The bundle is for Linux x86_64; ARM64 requires a separate
 build.
 
+从 GitHub Actions 下载 artifact 后，可以在 CentOS 7 上按以下方式运行：
+
+```bash
+# GitHub Actions artifact 通常先下载为 zip，解压后使用其中的 tar.gz
+unzip select-fuzz-centos7-x86_64.zip
+tar -xzf select-fuzz-centos7-x86_64.tar.gz
+cd select-fuzz-centos7-x86_64
+
+cp config/intranet-fuzz.example.yaml config/intranet-fuzz.yaml
+vi config/intranet-fuzz.yaml
+
+export SELECT_FUZZ_MYSQL_USER=root
+export SELECT_FUZZ_MYSQL_PASSWORD='<set-in-shell-only>'
+
+./select-fuzz doctor \
+  --mode fuzz \
+  --config config/intranet-fuzz.yaml
+
+./select-fuzz run \
+  --mode fuzz \
+  --config config/intranet-fuzz.yaml \
+  --duration-seconds 300 \
+  --full-thread-sql-log \
+  --artifacts artifacts/intranet-fuzz
+```
+
+`doctor` 建议在每次压测前先执行；确认连接和配置正常后，再执行 `run`。
+密码只通过当前 shell 环境变量提供，不要写入配置文件或提交到 Git。
+
 ## CLI
 
 Always run `doctor` first. Comparison modes probe all six distinct endpoints;

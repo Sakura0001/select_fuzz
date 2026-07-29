@@ -12,6 +12,14 @@ RUN set -eux; \
     rm -rf "$bundle" /out; \
     mkdir -p "$bundle"; \
     cp -a "/opt/python/${PYTHON_TAG}/." "$bundle/python"; \
+    ssl_module=$("$BUNDLE_PYTHON" -c 'import _ssl; print(_ssl.__file__)'); \
+    for library in libssl.so.3 libcrypto.so.3; do \
+      resolved=$(ldd "$ssl_module" | awk -v library="$library" '$1 == library { print $3; exit }'); \
+      test -n "$resolved"; \
+      resolved=$(readlink -f "$resolved"); \
+      cp -a "$resolved" "$bundle/python/lib/$(basename "$resolved")"; \
+      ln -sf "$(basename "$resolved")" "$bundle/python/lib/$library"; \
+    done; \
     site="$bundle/python/lib/python3.11/site-packages"; \
     "$BUNDLE_PYTHON" -m pip install \
       --no-cache-dir \

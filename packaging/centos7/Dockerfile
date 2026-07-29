@@ -24,7 +24,7 @@ RUN set -eux; \
     done; \
     sqlite_module=$("$BUNDLE_PYTHON" -c 'import _sqlite3; print(_sqlite3.__file__)'); \
     library=libsqlite3.so.0; \
-    resolved=$({ ldd "$sqlite_module"; ldd "$BUNDLE_PYTHON"; } | awk -v library="$library" '$1 == library && $3 ~ /^\\// { print $3; exit } $1 == library && $2 ~ /^\\// { print $2; exit }'); \
+    resolved=$({ ldd "$sqlite_module"; ldd "$BUNDLE_PYTHON"; } | awk -v library="$library" '$1 == library && index($3, "/") == 1 { print $3; exit } $1 == library && index($2, "/") == 1 { print $2; exit }'); \
     if [ -z "$resolved" ]; then \
       resolved=$(find /opt/_internal -name "$library" -print -quit); \
     fi; \

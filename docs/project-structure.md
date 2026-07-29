@@ -53,12 +53,19 @@ select_fuzz 2/
 ├── config/                  # correctness/performance 示例配置
 ├── docs/                    # 研究报告、测试计划、项目结构
 ├── frontend/                # React + TypeScript 控制台
+├── packaging/centos7/       # CentOS 7 / glibc 2.17 bundle 构建定义
+├── python/                  # 无系统 Python 时的可移植运行时构建入口
 ├── scripts/                 # soak、grammar 优化、来源锁、长时验证脚本
 ├── src/select_fuzz/         # Python 主程序
 ├── tests/                   # 单元、集成、性质、API、前端外的后端测试
 ├── pyproject.toml           # Python 包、命令入口和工具配置
 └── uv.lock                  # Python 依赖锁
 ```
+
+`python/build-centos7-bundle.sh` 使用 manylinux2014 x86_64 构建镜像，把
+CPython 3.11、运行时依赖、源码和 SQL catalog 收集到一个可复制的目录中；
+CentOS 7 目标机只需运行 bundle 内的 `select-fuzz`，不需要预装 Python、pip
+或 uv。
 
 ## 查询生成核心
 

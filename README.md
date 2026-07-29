@@ -22,8 +22,9 @@ JSON-array indexes are excluded from the default fuzz scope.
 
 ## Install
 
-Python 3.11 and Node.js are required. Credentials are resolved only from shell
-environment variables and must never be written into YAML or Git.
+Source-checkout development requires Python 3.11 and Node.js. Credentials are
+resolved only from shell environment variables and must never be written into
+YAML or Git. For a target machine without Python, use the CentOS 7 bundle below.
 
 ```bash
 UV_CACHE_DIR=.uv-cache uv sync --locked --all-groups
@@ -43,6 +44,23 @@ comparable resources and working primary-to-replica replication. For a fuzz-only
 load-balancing proxy, copy `config/intranet-fuzz.example.yaml`; fuzz uses only
 `fuzz.target_role` and permits one proxy endpoint to represent both primary and
 replica.
+
+## CentOS 7 without a system Python
+
+The [`python/`](python) directory contains a builder for an x86_64 bundle that
+includes CPython 3.11, runtime dependencies, the `select_fuzz` package, and the
+bundled SQL catalogs. The target CentOS 7 machine does not need Python, pip, or
+uv. Build it on any machine with Docker:
+
+```bash
+./python/build-centos7-bundle.sh
+```
+
+Copy `python/output/select-fuzz-centos7-x86_64.tar.gz` to the CentOS 7 host,
+extract it, and run the included `./select-fuzz` launcher. The manual GitHub
+Actions workflow `build-centos7-bundle` produces the same archive when Docker is
+not available locally. The bundle is for Linux x86_64; ARM64 requires a separate
+build.
 
 ## CLI
 

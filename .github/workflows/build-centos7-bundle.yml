@@ -1,0 +1,26 @@
+name: build-centos7-bundle
+
+on:
+  push:
+    branches:
+      - "agent/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Build portable CentOS 7 bundle
+        run: ./python/build-centos7-bundle.sh
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: select-fuzz-centos7-x86_64
+          path: |
+            python/output/select-fuzz-centos7-x86_64.tar.gz
+            python/output/select-fuzz-centos7-x86_64/
+          if-no-files-found: error

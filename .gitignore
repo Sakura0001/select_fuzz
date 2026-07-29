@@ -37,6 +37,7 @@ test-results/
 /artifacts/
 /reports/
 *.log
+/python/output/
 
 # macOS
 .DS_Store

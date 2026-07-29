@@ -22,6 +22,15 @@ RUN set -eux; \
         ln -sf "$(basename "$resolved")" "$bundle/python/lib/$library"; \
       fi; \
     done; \
+    sqlite_module=$("$BUNDLE_PYTHON" -c 'import _sqlite3; print(_sqlite3.__file__)'); \
+    library=libsqlite3.so.0; \
+    resolved=$(ldd "$sqlite_module" | awk -v library="$library" '$1 == library { print $3; exit }'); \
+    test -n "$resolved"; \
+    resolved=$(readlink -f "$resolved"); \
+    cp -a "$resolved" "$bundle/python/lib/$(basename "$resolved")"; \
+    if [ "$(basename "$resolved")" != "$library" ]; then \
+      ln -sf "$(basename "$resolved")" "$bundle/python/lib/$library"; \
+    fi; \
     site="$bundle/python/lib/python3.11/site-packages"; \
     "$BUNDLE_PYTHON" -m pip install \
       --no-cache-dir \

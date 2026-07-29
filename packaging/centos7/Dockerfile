@@ -5,6 +5,7 @@ ENV BUNDLE_PYTHON=/opt/python/${PYTHON_TAG}/bin/python
 
 WORKDIR /src
 COPY . /src
+COPY packaging/centos7/select-fuzz-launcher.sh /tmp/select-fuzz-launcher.sh
 
 RUN set -eux; \
     bundle=/tmp/select-fuzz-centos7-x86_64; \
@@ -29,18 +30,7 @@ RUN set -eux; \
     mkdir -p "$bundle/config"; \
     cp /src/config/intranet-fuzz.example.yaml "$bundle/config/"; \
     cp /src/config/replica-parameters.example.yaml "$bundle/config/"; \
-    cat > "$bundle/select-fuzz" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PYTHON_ROOT="$ROOT_DIR/python"
-export PYTHONHOME="$PYTHON_ROOT"
-export PYTHONPATH="$PYTHON_ROOT/lib/python3.11/site-packages${PYTHONPATH:+:$PYTHONPATH}"
-export LD_LIBRARY_PATH="$PYTHON_ROOT/lib:$PYTHON_ROOT/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-exec "$PYTHON_ROOT/bin/python3.11" -m select_fuzz "$@"
-EOF
+    cp /tmp/select-fuzz-launcher.sh "$bundle/select-fuzz"; \
     chmod +x "$bundle/select-fuzz"; \
     "$bundle/select-fuzz" --help >/dev/null; \
     mkdir -p /out; \

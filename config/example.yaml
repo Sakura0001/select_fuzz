@@ -232,6 +232,18 @@ fuzz:
   # SELECT 生成器权重：50% 负载型查询，50% 完全随机文法查询。
   grammar_query_weight: 50
   load_shaped_query_weight: 50
+  # reader SELECT 使用独立生成进程并只预取下一条；0 表示按数据库数与 CPU 核数自动计算。
+  query_generator_processes: 0
+  # 从每代开始建库时计时，默认每 1800 秒停止旧连接并并发创建整批新库；0 表示关闭换代。
+  # 历史库和失败时留下的半成品库均保留，不自动删除。
+  schema_refresh_interval_seconds: 1800
+  # fuzz 结果流的 Connector 实现；auto 优先 C 扩展，不可用时回退 pure Python。
+  connector_implementation: auto
+  # doctor 为 setup、超时 KILL QUERY 和诊断连接保留的 endpoint 连接数；
+  # fuzz 运行时的并发控制连接也以此为上限。
+  control_connection_reserve: 8
+  # KILL QUERY 后等待语句结束的宽限秒数；超出后安全断开该服务端会话。
+  query_kill_grace_seconds: 1
   # 连接失效后的指数退避重连范围；普通 SQL 错误会复用当前长连接。
   reconnect_initial_delay_seconds: 0.25
   reconnect_max_delay_seconds: 10

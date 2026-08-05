@@ -39,6 +39,10 @@ class FuzzExecutionResult:
     affected_rows: int | None = None
     error: str | None = None
     connection_lost: bool = False
+    execute_elapsed_ns: int = 0
+    fetch_elapsed_ns: int = 0
+    timed_out: bool = False
+    stopped: bool = False
 
 
 class FuzzRowBudget:

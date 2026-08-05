@@ -59,10 +59,17 @@ class BarrierLike(Protocol):
     def wait(self, timeout: float | None = None) -> object: ...
 
 
+class StopEventLike(Protocol):
+    def is_set(self) -> bool: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
+
+
 __all__ = [
     "BarrierLike",
     "ConnectionFactory",
     "ControlConnectionFactory",
     "CursorLike",
     "QuerySession",
+    "StopEventLike",
 ]

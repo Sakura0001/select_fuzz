@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import mysql.connector
+
 from select_fuzz.artifacts import JsonlWriter
 from select_fuzz.config import AppConfig
 from select_fuzz.execution import MySQLConnectorFactory
@@ -13,6 +15,10 @@ from select_fuzz.generation.query.load_shaped import LoadShapedQueryGenerator
 from select_fuzz.generation.query_grammar import GrammarQueryConfig, GrammarQueryGenerator
 from select_fuzz.modes.fuzz.materialization import FuzzMaterializer
 from select_fuzz.modes.fuzz.models import FuzzConnectionLayout
+from select_fuzz.modes.fuzz.query_pipeline import (
+    ProcessQueryPipeline,
+    resolve_query_generator_processes,
+)
 from select_fuzz.modes.fuzz.service import FuzzModeService
 from select_fuzz.modes.fuzz.sql_log import FuzzSqlRecorder
 
@@ -23,7 +29,28 @@ def build_fuzz_runner(config: AppConfig, artifact_root: Path) -> FuzzModeService
     FuzzConnectionLayout.from_config(config.fuzz)
     primary = config.node_for(config.fuzz.target_role)
     replica = config.replica_for(config.fuzz.target_role)
-    factory = MySQLConnectorFactory()
+    have_cext = bool(getattr(mysql.connector, "HAVE_CEXT", False))
+    requested_connector = config.fuzz.connector_implementation
+    if requested_connector == "c" and not have_cext:
+        raise RuntimeError("fuzz connector_implementation=c requires MySQL Connector C extension")
+    use_pure = requested_connector == "python" or (
+        requested_connector == "auto" and not have_cext
+    )
+    actual_connector = "python" if use_pure else "c"
+    worker_factory = MySQLConnectorFactory(
+        use_pure=use_pure,
+        control_use_pure=True,
+        control_connection_limit=config.fuzz.control_connection_reserve,
+    )
+    setup_factory = MySQLConnectorFactory(
+        use_pure=True,
+        control_use_pure=True,
+        control_connection_limit=config.fuzz.control_connection_reserve,
+    )
+    generation_processes = resolve_query_generator_processes(
+        config.fuzz.query_generator_processes,
+        databases=config.fuzz.databases,
+    )
     sql_recorder = (
         FuzzSqlRecorder(artifact_root / "sql")
         if config.full_thread_sql_log
@@ -48,12 +75,17 @@ def build_fuzz_runner(config: AppConfig, artifact_root: Path) -> FuzzModeService
         config=config.fuzz,
         primary=primary,
         replica=replica,
-        factory=factory,
+        factory=worker_factory,
         records=JsonlWriter(artifact_root / "events.jsonl"),
         query_generator=query_generator,
+        query_pipeline_factory=lambda: ProcessQueryPipeline(
+            process_count=generation_processes,
+            max_tables_per_query_block=config.fuzz.initial_tables,
+        ),
         sql_recorder=sql_recorder,
+        connector_implementation=actual_connector,
         materializer_factory=lambda: FuzzMaterializer(
-            factory,
+            setup_factory,
             primary,
             replica,
             config.fuzz,

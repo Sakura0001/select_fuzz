@@ -295,6 +295,11 @@ class FuzzConfig(StrictModel):
     upsert_weight: int = Field(default=10, ge=0, le=100)
     grammar_query_weight: Literal[50] = 50
     load_shaped_query_weight: Literal[50] = 50
+    query_generator_processes: int = Field(default=0, ge=0, le=32)
+    schema_refresh_interval_seconds: float = Field(default=1800.0, ge=0)
+    connector_implementation: Literal["auto", "c", "python"] = "auto"
+    control_connection_reserve: int = Field(default=8, ge=1, le=128)
+    query_kill_grace_seconds: float = Field(default=1.0, gt=0, le=10)
     reconnect_initial_delay_seconds: float = Field(default=0.25, gt=0, le=30)
     reconnect_max_delay_seconds: float = Field(default=10.0, gt=0, le=60)
 
@@ -426,6 +431,7 @@ class NodePreflight(StrictModel):
     permissions: frozenset[str] = Field(default_factory=frozenset)
     role_probe_matches: bool | None = None
     server_version: str | None = None
+    max_connections: int | None = Field(default=None, ge=1)
 
 
 class PreflightIssue(StrictModel):

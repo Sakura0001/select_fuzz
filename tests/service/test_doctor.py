@@ -39,6 +39,7 @@ def _snapshot(role: NodeRole, *, fingerprint: str = "same") -> NodePreflight:
             }
         ),
         role_probe_matches=None,
+        max_connections=1000,
     )
 
 
@@ -155,3 +156,36 @@ def test_fuzz_doctor_probes_only_the_selected_shared_proxy_once() -> None:
 
     assert probe.roles == [NodeRole.CUSTOM_ON]
     assert report.can_start is True
+
+
+def test_fuzz_doctor_rejects_shared_endpoint_connection_budget_over_server_limit() -> None:
+    config = AppConfig(
+        mode=RunMode.FUZZ,
+        nodes=tuple(
+            NodeConfig(role=role, host="127.0.0.1", port=3306)
+            for role in NodeRole
+        ),
+        fuzz={
+            "databases": 12,
+            "writer_threads_per_database": 4,
+            "reader_threads_per_database": 12,
+            "max_total_connections": 256,
+            "initial_rows_per_table": 100,
+            "max_rows_per_database": 1000,
+        },
+    )
+
+    class LimitedProbe:
+        def probe(self, node: NodeConfig) -> NodePreflight:
+            return _snapshot(node.role).model_copy(update={"max_connections": 151})
+
+    report = DoctorService(config, LimitedProbe()).run()
+
+    assert report.can_start is False
+    issue = next(
+        issue
+        for issue in report.fatals
+        if issue.code == "fuzz_connection_budget_exceeded"
+    )
+    assert "192" in issue.message
+    assert "151" in issue.message

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-import time
 import math
+from collections.abc import Callable
+from threading import Event, Lock
+import time
+from typing import Any
 
 from select_fuzz.config import NodeConfig
 from select_fuzz.execution.protocols import ConnectionFactory, QuerySession
+from select_fuzz.execution.timeout import KillQueryWatchdog
 from select_fuzz.modes.fuzz.models import FuzzExecutionResult
 
 
@@ -25,11 +29,21 @@ def _error_identity(error: Exception) -> tuple[str, bool]:
 
 
 class StreamingQueryExecutor:
-    def __init__(self, factory: ConnectionFactory, *, fetch_rows: int = 128) -> None:
+    def __init__(
+        self,
+        factory: ConnectionFactory,
+        *,
+        fetch_rows: int = 128,
+        watchdog: KillQueryWatchdog | None = None,
+    ) -> None:
         if fetch_rows <= 0:
             raise ValueError("fetch_rows must be positive")
         self._factory = factory
         self._fetch_rows = fetch_rows
+        self._watchdog = watchdog or KillQueryWatchdog(factory)
+        self._active: dict[object, Any] = {}
+        self._manually_stopped: set[object] = set()
+        self._active_lock = Lock()
 
     def execute(
         self,
@@ -52,6 +66,8 @@ class StreamingQueryExecutor:
                 return self.execute_session(
                     session,
                     sql,
+                    node=node,
+                    database=database,
                     started_ns=started,
                     timeout_seconds=float(timeout_seconds),
                 )
@@ -70,8 +86,11 @@ class StreamingQueryExecutor:
         session: QuerySession,
         sql: str,
         *,
+        node: NodeConfig | None = None,
+        database: str | None = None,
         started_ns: int | None = None,
         timeout_seconds: float | None = None,
+        on_stage: Callable[[str], None] | None = None,
     ) -> FuzzExecutionResult:
         started = time.monotonic_ns() if started_ns is None else started_ns
         deadline_ns = None
@@ -84,40 +103,126 @@ class StreamingQueryExecutor:
             ):
                 raise ValueError("timeout_seconds must be finite and positive")
             deadline_ns = started + int(float(timeout_seconds) * 1_000_000_000)
+            if node is None or not database:
+                raise ValueError(
+                    "node and database are required when timeout_seconds is provided"
+                )
         cursor = None
         rows_seen = 0
+        affected_rows: int | None = None
+        execute_elapsed_ns = 0
+        fetch_elapsed_ns = 0
+        success = False
+        error_identity: str | None = None
+        connection_lost = False
+        client_deadline_exceeded = False
+        statement_token: object | None = None
+        statement_done: Event | None = None
+        handle: Any | None = None
         try:
+            if timeout_seconds is not None:
+                assert node is not None
+                assert database is not None
+                statement_token = object()
+                statement_done = Event()
+                handle = self._watchdog.arm(
+                    node,
+                    database,
+                    session.connection_id(),
+                    float(timeout_seconds),
+                    statement_token=statement_token,
+                    fallback_abort=session.abort,
+                    statement_done=statement_done,
+                )
+                self._register_active(handle, statement_token)
+            if on_stage is not None:
+                on_stage("executing")
+            execute_started = time.monotonic_ns()
             cursor = session.execute(sql)
+            execute_elapsed_ns = max(0, time.monotonic_ns() - execute_started)
             affected_rows = cursor.affected_rows
+            if on_stage is not None:
+                on_stage("fetching")
+            fetch_started = time.monotonic_ns()
             while True:
                 if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
-                    session.abort()
                     raise TimeoutError("fuzz query exceeded client deadline")
                 batch = cursor.fetchmany(self._fetch_rows)
                 if not batch:
                     break
                 rows_seen += len(batch)
-            return FuzzExecutionResult(
-                True,
-                rows_seen,
-                time.monotonic_ns() - started,
-                affected_rows=affected_rows,
-            )
+            fetch_elapsed_ns = max(0, time.monotonic_ns() - fetch_started)
+            success = True
         except Exception as error:
-            identity, lost = _error_identity(error)
-            return FuzzExecutionResult(
-                False,
-                rows_seen,
-                time.monotonic_ns() - started,
-                error=identity,
-                connection_lost=lost,
-            )
+            error_identity, connection_lost = _error_identity(error)
+            client_deadline_exceeded = isinstance(error, TimeoutError)
         finally:
+            if statement_done is not None:
+                statement_done.set()
+            if handle is not None and statement_token is not None:
+                try:
+                    handle.cancel(statement_token=statement_token)
+                finally:
+                    self._remove_active(statement_token)
             if cursor is not None:
                 try:
                     cursor.close()
                 except Exception:
                     pass
+        timed_out = client_deadline_exceeded or bool(
+            handle is not None and handle.timed_out
+        )
+        stopped = bool(
+            statement_token is not None and self._consume_manual_stop(statement_token)
+        )
+        if timed_out:
+            success = False
+            error_identity = "query_timeout"
+        elif stopped:
+            success = False
+            error_identity = "query_stopped"
+        return FuzzExecutionResult(
+            success,
+            rows_seen,
+            max(0, time.monotonic_ns() - started),
+            affected_rows=affected_rows,
+            error=error_identity,
+            connection_lost=connection_lost,
+            execute_elapsed_ns=execute_elapsed_ns,
+            fetch_elapsed_ns=fetch_elapsed_ns,
+            timed_out=timed_out,
+            stopped=stopped,
+        )
+
+    def _register_active(self, handle: Any, statement_token: object) -> None:
+        with self._active_lock:
+            self._active[statement_token] = handle
+
+    def _register_active_for_test(self, handle: Any, statement_token: object) -> None:
+        self._register_active(handle, statement_token)
+
+    def _remove_active(self, statement_token: object) -> None:
+        with self._active_lock:
+            self._active.pop(statement_token, None)
+
+    def _consume_manual_stop(self, statement_token: object) -> bool:
+        with self._active_lock:
+            if statement_token not in self._manually_stopped:
+                return False
+            self._manually_stopped.remove(statement_token)
+            return True
+
+    @property
+    def active_queries(self) -> int:
+        with self._active_lock:
+            return len(self._active)
+
+    def stop_active(self) -> None:
+        with self._active_lock:
+            active = tuple(self._active.items())
+            self._manually_stopped.update(token for token, _handle in active)
+        for token, handle in active:
+            handle.trigger(statement_token=token)
 
 
 __all__ = ["StreamingQueryExecutor"]

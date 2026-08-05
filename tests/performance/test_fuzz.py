@@ -102,6 +102,10 @@ def test_performance_seed_window_reaches_safe_composite_index_families() -> None
         )
         for table in case.schema.tables:
             assert len(table.indexes) <= 6
+            signatures = [
+                (index.unique, index.kind, index.parts) for index in table.indexes
+            ]
+            assert len(signatures) == len(set(signatures))
             for index in table.indexes:
                 assert index.kind not in {
                     IndexKind.FULLTEXT,
@@ -219,3 +223,33 @@ def test_performance_fuzz_rejects_invalid_volume_limits(
 
     with pytest.raises(ValueError, match=message):
         PerformanceFuzzTemplate(**values)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"seed": True}, TypeError, "seed"),
+        ({"schema_seed": True}, TypeError, "schema_seed"),
+        ({"case_id": "not-safe"}, ValueError, "case_id"),
+        ({"max_total_rows": 29}, ValueError, "max_total_rows"),
+        ({"min_tables": 2, "max_tables": 1}, ValueError, "min_tables"),
+        ({"min_columns": 4, "max_columns": 3}, ValueError, "min_columns"),
+        ({"batch_rows": 10_001}, ValueError, "batch_rows"),
+    ],
+)
+def test_performance_fuzz_rejects_invalid_identity_and_shape_limits(
+    kwargs: dict[str, object], error: type[Exception], message: str
+) -> None:
+    values: dict[str, object] = {
+        "seed": 1,
+        "case_id": "case",
+        "min_initial_rows": 10,
+        "max_initial_rows": 20,
+        "max_table_rows": 30,
+        "max_total_rows": 90,
+        "batch_rows": 10,
+        **kwargs,
+    }
+
+    with pytest.raises(error, match=message):
+        PerformanceFuzzTemplate(**values)  # type: ignore[arg-type]

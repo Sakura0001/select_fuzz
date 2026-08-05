@@ -18,6 +18,7 @@ from select_fuzz.execution.protocols import (
     ControlConnectionFactory,
     CursorLike,
     QuerySession,
+    StopEventLike,
 )
 from select_fuzz.execution.replication import (
     MARKER_DDL_SQL,
@@ -88,6 +89,7 @@ __all__ = [
     "SetupNodeResult",
     "SetupStatementNodeResult",
     "SetupStatementRecord",
+    "StopEventLike",
     "TriadCoordinator",
     "TriadExecutionResult",
     "TriadMutationCoordinator",

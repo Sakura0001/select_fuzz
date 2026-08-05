@@ -230,6 +230,19 @@ uv run select-fuzz run --mode fuzz --config config/local.yaml \
 - 每次读查询 50% 选择负载型查询，50% 选择完全随机 SQL grammar。负载型查询覆盖扫描、
   聚合、JOIN、GROUP BY、窗口函数和子查询；随机 grammar 覆盖 CTE、LATERAL、派生表、
   嵌套子查询、窗口、HAVING、Hints、类型转换和随机表达式。
+- reader 的下一条 SELECT 由有界多进程流水线提前生成，每个 reader 最多预取一条；
+  每代内 seed、SQL 顺序、长期连接和固定 endpoint 保持稳定，换代时使用新 schema seed
+  并重建连接。writer 的 DML 仍在线程内按事务即时生成。
+- `schema_refresh_interval_seconds` 默认 1800 秒，并从本代开始创建数据库时计时。到点后
+  先停止旧批次派发、等待当前 SQL 在既有超时内结束并关闭连接，再同时创建完整的新
+  `databases` 批次；全部主库初始化、备库可见和首批 SELECT 预生成完成后才启动新连接。
+  设置为 `0` 可关闭周期换代。
+- 查询使用独立 pure-Python 控制连接执行 wall-clock watchdog；超时或停止时先
+  `KILL QUERY`，宽限期后仍未结束再安全断开服务端会话。控制连接并发不超过
+  `control_connection_reserve`。事件日志周期记录等待生成、执行、结果拉取和重连阶段。
+- 每条 fuzz worker 会话设置只用于观测的 `@select_fuzz_worker` 标签：
+  `primary_writer`、`primary_reader` 或 `replica_reader`。共享代理 endpoint 下也能通过
+  `performance_schema.user_variables_by_thread` 核对逻辑主备连接分布。
 - 每张表默认随机生成 200～500 列，包含固定业务列和随机类型列；候选类型池包含整数、精确数值、
   浮点、BIT、日期时间、字符、二进制、TEXT/BLOB、ENUM、SET 等 56 个变体。每张表随机
   抽样，不保证单表一次运行出现全部 56 个变体。
@@ -251,6 +264,16 @@ uv run select-fuzz run --mode fuzz --config config/local.yaml \
 - INSERT/UPDATE/UPSERT 批量默认 100～100000 行；DELETE 默认 10～100 行且有 `id=1`
   保护。DML 权重四项之和必须为 100，默认 INSERT/UPDATE/DELETE/UPSERT = 35/45/10/10。
 - 查询超时不超过 300 秒；连接重连退避初始值不超过 30 秒，最大值不超过 60 秒。
+- `query_generator_processes=0` 时按数据库数与 CPU 核数自动选择生成进程；每个 reader
+  的预取深度固定为 1。`connector_implementation=auto` 在 fuzz 模式优先使用 Connector
+  C 扩展，不可用时回退 pure Python。
+- 周期换代不会叠加两代 worker 连接，也没有代数上限。旧批次数据库、失败批次中已经
+  创建的数据库和半成品对象均不删除；新批次任一数据库初始化或主备同步失败都会使整个
+  fuzz 运行失败，不会回退到旧批次。
+- `doctor` 按 primary/replica 的真实 host/port 汇总 worker 连接，并加上
+  `control_connection_reserve` 后与服务端 `max_connections` 比较；同一代理 endpoint
+  会合并计算。例如 12 ×（4 writer + 12 reader）在共享 endpoint 上需要 192 条 worker
+  连接。
 - fuzz 不判断结果正确性、不做三节点差分、不读取服务端错误日志、不自动确认数据库是否
   crash；程序只记录自身观察到的 SQL 错误、连接断开、重连和吞吐统计。
 - 随机 grammar 可能产生数据库拒绝的 SQL，这是 fuzz 输入的一部分；普通拒绝不会停止
@@ -271,7 +294,7 @@ uv run select-fuzz run --mode fuzz --config config/local.yaml \
 保存建库/建表/初始数据文件和每个 reader/writer 的实际执行 SQL。fuzz 成功 SELECT
 的结果行不会保存，错误 SQL 和必要的上下文会保存。
 
-数据库默认保留，不会在运行结束后自动删除。`cleanup` 当前只接受
+数据库及每次周期换代产生的历史批次默认保留，不会在运行结束后自动删除。`cleanup` 当前只接受
 correctness/performance 生成的 `sf_c_...` 或 `sf_p_...` managed ID；fuzz 生成的
 `sf_f_...` 数据库不会被该命令接受，需要由授权环境的运维流程单独清理。对支持的
 managed ID，先做计划，再显式执行：

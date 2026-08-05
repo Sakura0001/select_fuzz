@@ -7,6 +7,8 @@ import pytest
 from select_fuzz.generation.composite_indexes import (
     CompositeColumn,
     CompositeIndexFamily,
+    CompositeIndexPartPlan,
+    CompositeIndexPlan,
     build_composite_index_candidates,
 )
 
@@ -147,3 +149,121 @@ def test_planner_rejects_duplicate_column_names() -> None:
             rng=random.Random(1),
             index_byte_budget=3072,
         )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"name": "not-safe"}, "column name"),
+        ({"mysql_type": "  "}, "mysql_type"),
+        ({"charset_bytes": 0}, "charset_bytes"),
+    ],
+)
+def test_composite_column_rejects_invalid_physical_metadata(
+    kwargs: dict[str, object], message: str
+) -> None:
+    values: dict[str, object] = {
+        "name": "payload",
+        "mysql_type": "VARCHAR(32)",
+        "charset_bytes": 4,
+        **kwargs,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        CompositeColumn(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"column_name": "not-safe"}, ValueError, "column name"),
+        ({"estimated_bytes": 0}, ValueError, "estimated_bytes"),
+        ({"prefix_length": 0}, ValueError, "prefix_length"),
+        ({"descending": 1}, TypeError, "descending"),
+    ],
+)
+def test_composite_part_rejects_invalid_rendering_metadata(
+    kwargs: dict[str, object], error: type[Exception], message: str
+) -> None:
+    values: dict[str, object] = {
+        "column_name": "payload",
+        "estimated_bytes": 8,
+        **kwargs,
+    }
+
+    with pytest.raises(error, match=message):
+        CompositeIndexPartPlan(**values)  # type: ignore[arg-type]
+
+
+def test_composite_plan_rejects_invalid_shape_metadata() -> None:
+    first = CompositeIndexPartPlan("first", 4)
+    second = CompositeIndexPartPlan("second", 4)
+
+    with pytest.raises(TypeError, match="family"):
+        CompositeIndexPlan("ordinary", (first, second))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="between two and four"):
+        CompositeIndexPlan(CompositeIndexFamily.ORDINARY, (first,))
+    with pytest.raises(ValueError, match="must be unique"):
+        CompositeIndexPlan(CompositeIndexFamily.ORDINARY, (first, first))
+    with pytest.raises(TypeError, match="unique"):
+        CompositeIndexPlan(
+            CompositeIndexFamily.ORDINARY,
+            (first, second),
+            unique=1,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"identity_column": "not-safe"}, "identity_column"),
+        ({"unique_required_columns": ("not-safe",)}, "unique_required_columns"),
+    ],
+)
+def test_planner_rejects_invalid_unique_column_identifiers(
+    kwargs: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        build_composite_index_candidates(
+            _columns(),
+            rng=random.Random(1),
+            index_byte_budget=3072,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+
+def test_planner_omits_unique_family_when_required_shape_is_impossible() -> None:
+    missing_required = build_composite_index_candidates(
+        _columns(),
+        rng=random.Random(7),
+        index_byte_budget=3072,
+        unique_required_columns=("missing",),
+    )
+    too_many_required = build_composite_index_candidates(
+        (
+            CompositeColumn("id", "BIGINT"),
+            CompositeColumn("a", "INT"),
+            CompositeColumn("b", "INT"),
+            CompositeColumn("c", "INT"),
+            CompositeColumn("d", "INT"),
+        ),
+        rng=random.Random(7),
+        index_byte_budget=3072,
+        unique_required_columns=("a", "b", "c"),
+    )
+
+    assert CompositeIndexFamily.UNIQUE not in {plan.family for plan in missing_required}
+    assert CompositeIndexFamily.UNIQUE not in {plan.family for plan in too_many_required}
+
+
+def test_planner_ignores_unrecognized_declared_type() -> None:
+    candidates = build_composite_index_candidates(
+        (
+            CompositeColumn("id", "BIGINT"),
+            CompositeColumn("opaque", "UUID(16)"),
+        ),
+        rng=random.Random(11),
+        index_byte_budget=3072,
+    )
+
+    assert candidates == ()

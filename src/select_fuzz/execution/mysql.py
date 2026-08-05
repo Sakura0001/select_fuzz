@@ -7,7 +7,7 @@ from contextlib import AbstractContextManager, contextmanager
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 import math
-from threading import Event
+from threading import BoundedSemaphore, Event, Lock
 import time as time_module
 from typing import Any
 
@@ -550,7 +550,12 @@ class _ConnectorSession:
         )
 
     def abort(self) -> None:
-        self._connection.shutdown()
+        try:
+            self._connection.shutdown()
+        except NotImplementedError:
+            raise RuntimeError(
+                "safe local abort is unavailable for this connector"
+            ) from None
 
     def close(self) -> None:
         self._connection.close()
@@ -568,6 +573,9 @@ class MySQLConnectorFactory:
         read_timeout_s: int = 310,
         control_timeout_s: int = 5,
         diagnostic_timeout_s: int = 5,
+        use_pure: bool = True,
+        control_use_pure: bool | None = None,
+        control_connection_limit: int = 8,
         session_variables_by_role: Mapping[NodeRole, Mapping[str, bool | int | float | str]]
         | None = None,
     ) -> None:
@@ -575,6 +583,11 @@ class MySQLConnectorFactory:
         _positive_bound(read_timeout_s, "read_timeout_s")
         _positive_bound(control_timeout_s, "control_timeout_s")
         _positive_bound(diagnostic_timeout_s, "diagnostic_timeout_s")
+        _positive_bound(control_connection_limit, "control_connection_limit")
+        if not isinstance(use_pure, bool):
+            raise TypeError("use_pure must be a boolean")
+        if control_use_pure is not None and not isinstance(control_use_pure, bool):
+            raise TypeError("control_use_pure must be a boolean or None")
         if read_timeout_s <= MAX_STATEMENT_TIMEOUT_SECONDS:
             raise ValueError(
                 "read_timeout_s must be greater than 300 seconds to leave watchdog grace"
@@ -585,6 +598,15 @@ class MySQLConnectorFactory:
         self._read_timeout_s = read_timeout_s
         self._control_timeout_s = control_timeout_s
         self._diagnostic_timeout_s = diagnostic_timeout_s
+        self._use_pure = use_pure
+        self._control_use_pure = (
+            use_pure if control_use_pure is None else control_use_pure
+        )
+        self._control_slots = BoundedSemaphore(control_connection_limit)
+        # Connector/Python's C extension can crash when several threads enter
+        # connect() together on macOS. Serialize only connection construction;
+        # established sessions still execute concurrently.
+        self._cext_connect_lock = Lock()
         self._session_sql_by_role = {
             role: render_session_variable_sql(variables)
             for role, variables in (session_variables_by_role or {}).items()
@@ -598,23 +620,29 @@ class MySQLConnectorFactory:
         *,
         connection_timeout_s: int,
         read_timeout_s: int,
+        use_pure: bool,
     ) -> Iterator[QuerySession]:
         credentials = resolve_credentials(node, self._environ)
-        connection = self._connect(
-            host=node.host,
-            port=node.port,
-            user=credentials.username.get_secret_value(),
-            password=credentials.password.get_secret_value(),
-            database=database,
-            autocommit=True,
-            buffered=False,
-            get_warnings=False,
-            raise_on_warnings=False,
-            connection_timeout=connection_timeout_s,
-            read_timeout=read_timeout_s,
-            write_timeout=read_timeout_s,
-            use_pure=True,
-        )
+        connect_kwargs = {
+            "host": node.host,
+            "port": node.port,
+            "user": credentials.username.get_secret_value(),
+            "password": credentials.password.get_secret_value(),
+            "database": database,
+            "autocommit": True,
+            "buffered": False,
+            "get_warnings": False,
+            "raise_on_warnings": False,
+            "connection_timeout": connection_timeout_s,
+            "read_timeout": read_timeout_s,
+            "write_timeout": read_timeout_s,
+            "use_pure": use_pure,
+        }
+        if use_pure:
+            connection = self._connect(**connect_kwargs)
+        else:
+            with self._cext_connect_lock:
+                connection = self._connect(**connect_kwargs)
         session = _ConnectorSession(connection, self._diagnostic_timeout_s)
         try:
             for sql in self._session_sql_by_role.get(node.role, ()):
@@ -630,14 +658,36 @@ class MySQLConnectorFactory:
             database,
             connection_timeout_s=self._connection_timeout_s,
             read_timeout_s=self._read_timeout_s,
+            use_pure=self._use_pure,
         )
 
+    @contextmanager
+    def _bounded_control_session(
+        self,
+        node: NodeConfig,
+        database: str,
+        *,
+        timeout_s: int,
+    ) -> Iterator[QuerySession]:
+        if not self._control_slots.acquire(timeout=float(timeout_s)):
+            raise TimeoutError("control connection concurrency limit wait expired")
+        try:
+            with self._session(
+                node,
+                database,
+                connection_timeout_s=timeout_s,
+                read_timeout_s=timeout_s,
+                use_pure=self._control_use_pure,
+            ) as session:
+                yield session
+        finally:
+            self._control_slots.release()
+
     def control_session(self, node: NodeConfig, database: str):  # type: ignore[no-untyped-def]
-        return self._session(
+        return self._bounded_control_session(
             node,
             database,
-            connection_timeout_s=self._control_timeout_s,
-            read_timeout_s=self._control_timeout_s,
+            timeout_s=self._control_timeout_s,
         )
 
     def control_session_with_timeout(
@@ -656,11 +706,10 @@ class MySQLConnectorFactory:
         ):
             raise ValueError("timeout_seconds must be finite and at least one second")
         bounded = min(self._control_timeout_s, max(1, math.floor(timeout_seconds)))
-        return self._session(
+        return self._bounded_control_session(
             node,
             database,
-            connection_timeout_s=bounded,
-            read_timeout_s=bounded,
+            timeout_s=bounded,
         )
 
     @contextmanager
@@ -685,31 +734,37 @@ class MySQLConnectorFactory:
                 raise TimeoutError("control session deadline expired")
             return min(self._control_timeout_s, max(1, math.floor(remaining)))
 
-        credentials = resolve_credentials(node, self._environ)
-        initial_timeout = remaining_seconds()
-        connection = self._connect(
-            host=node.host,
-            port=node.port,
-            user=credentials.username.get_secret_value(),
-            password=credentials.password.get_secret_value(),
-            database=database,
-            autocommit=True,
-            buffered=False,
-            get_warnings=False,
-            raise_on_warnings=False,
-            connection_timeout=initial_timeout,
-            read_timeout=initial_timeout,
-            write_timeout=initial_timeout,
-            use_pure=True,
-        )
-        session = _ConnectorSession(connection, self._diagnostic_timeout_s)
+        slot_timeout = max(0.0, deadline_monotonic - time_module.monotonic())
+        if not self._control_slots.acquire(timeout=slot_timeout):
+            raise TimeoutError("control connection concurrency limit wait expired")
         try:
-            query_timeout = remaining_seconds()
-            connection.read_timeout = query_timeout
-            connection.write_timeout = query_timeout
-            yield session
+            credentials = resolve_credentials(node, self._environ)
+            initial_timeout = remaining_seconds()
+            connection = self._connect(
+                host=node.host,
+                port=node.port,
+                user=credentials.username.get_secret_value(),
+                password=credentials.password.get_secret_value(),
+                database=database,
+                autocommit=True,
+                buffered=False,
+                get_warnings=False,
+                raise_on_warnings=False,
+                connection_timeout=initial_timeout,
+                read_timeout=initial_timeout,
+                write_timeout=initial_timeout,
+                use_pure=self._control_use_pure,
+            )
+            session = _ConnectorSession(connection, self._diagnostic_timeout_s)
+            try:
+                query_timeout = remaining_seconds()
+                connection.read_timeout = query_timeout
+                connection.write_timeout = query_timeout
+                yield session
+            finally:
+                session.close()
         finally:
-            session.close()
+            self._control_slots.release()
 
 
 __all__ = [

@@ -126,9 +126,13 @@ class FuzzMaterializer:
         raise TimeoutError(f"replica did not observe initial fuzz marker: {error_name}")
 
 
-def fuzz_database_name(run_id: str, ordinal: int) -> str:
-    digest = sha256(f"{run_id}:{ordinal}".encode()).hexdigest()[:16]
-    return validate_database_name(f"sf_f_{digest}_{ordinal}")
+def fuzz_database_name(run_id: str, ordinal: int, *, generation: int = 0) -> str:
+    if ordinal < 0:
+        raise ValueError("fuzz database ordinal must be nonnegative")
+    if generation < 0:
+        raise ValueError("fuzz database generation must be nonnegative")
+    digest = sha256(f"{run_id}:{generation}:{ordinal}".encode()).hexdigest()[:16]
+    return validate_database_name(f"sf_f_{digest}_g{generation}_{ordinal}")
 
 
 __all__ = [

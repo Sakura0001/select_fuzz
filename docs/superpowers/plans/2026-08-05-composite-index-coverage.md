@@ -364,3 +364,62 @@ Stop the local service if it was stopped before testing. Report artifact paths, 
 - [ ] **Step 7: Commit verification-only fixes if any**
 
 Stage only files changed to fix reproduced failures and commit them with a message that names the verified defect. If verification required no code changes, do not create an empty commit.
+
+### Task 6: Publish the complete workspace and verify GitHub Actions
+
+**Files:**
+- Stage every tracked and untracked project file remaining in the current workspace, as explicitly authorized by the user.
+
+**Interfaces:**
+- Consumes: the verified workspace and local commits from Tasks 1–5.
+- Produces: a pushed remote branch and completed GitHub Actions evidence.
+
+- [ ] **Step 1: Review the complete publish scope**
+
+Run: `git status -sb`
+
+Run: `git diff --stat`
+
+Run: `git diff --cached --stat`
+
+Confirm no credential files, generated databases, `/private/tmp` artifacts, or unrelated filesystem content would be staged.
+
+- [ ] **Step 2: Verify GitHub CLI and repository state**
+
+Run: `gh --version`
+
+Run: `gh auth status`
+
+Run: `git remote -v`
+
+Run: `gh repo view --json nameWithOwner,defaultBranchRef`
+
+Expected: GitHub CLI is authenticated and the remote repository is accessible.
+
+- [ ] **Step 3: Commit all remaining authorized workspace changes**
+
+Run: `git add -A`
+
+Run: `git diff --cached --check`
+
+Run: `git diff --cached --stat`
+
+Commit with a terse message covering fuzz lifecycle and composite-index coverage. Do not commit secrets or local smoke artifacts.
+
+- [ ] **Step 4: Push the current branch**
+
+Run: `git push -u origin "$(git branch --show-current)"`
+
+Expected: the remote branch updates successfully and triggers the repository's configured workflow event.
+
+- [ ] **Step 5: Open a draft PR only when required to trigger pull-request workflows**
+
+Inspect `.github/workflows` triggers. If the required compile workflow runs only for `pull_request`, open a draft PR from the current branch to the remote default branch; otherwise do not create an unnecessary PR.
+
+- [ ] **Step 6: Wait for Actions and resolve failures**
+
+Use `gh run list --branch "$(git branch --show-current)"` to identify the new workflow run, then `gh run watch <run-id> --exit-status` to wait for completion. If a job fails, inspect it with `gh run view <run-id> --log-failed`, reproduce the issue locally when possible, fix it using TDD/systematic debugging, rerun local verification, commit, push, and watch the replacement run.
+
+- [ ] **Step 7: Report publication evidence**
+
+Report the branch, final commit hash, push result, PR URL if one was necessary, Actions run URL, workflow conclusion, and the compile/test jobs that completed.

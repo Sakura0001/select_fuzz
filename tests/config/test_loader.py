@@ -146,6 +146,17 @@ def test_fuzz_mode_loads_concurrency_and_cli_compatibility_overrides(tmp_path: P
     assert config.fuzz.initial_rows_per_table == 200
     assert config.fuzz.max_rows_per_database == 5000
     assert FuzzConfig().grammar_query_weight == 50
+    assert config.fuzz.query_generator_processes == 0
+    assert config.fuzz.schema_refresh_interval_seconds == 1800
+    assert config.fuzz.connector_implementation == "auto"
+    assert config.fuzz.control_connection_reserve == 8
+    assert config.fuzz.query_kill_grace_seconds == 1.0
+
+
+def test_fuzz_schema_refresh_interval_can_be_disabled_but_not_negative() -> None:
+    assert FuzzConfig(schema_refresh_interval_seconds=0).schema_refresh_interval_seconds == 0
+    with pytest.raises(ValidationError):
+        FuzzConfig(schema_refresh_interval_seconds=-1)
 
 
 def test_fuzz_rejects_multiple_coordinator_workers(tmp_path: Path) -> None:

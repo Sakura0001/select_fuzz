@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable
 from threading import Event, Lock, Thread
 
@@ -40,6 +41,7 @@ class KillHandle:
         self._timed_out = False
         self._fired = False
         self._kill_error_type: str | None = None
+        self._kill_finished = Event()
         self._thread = Thread(
             target=self._worker,
             name=f"select-fuzz-kill-{node.role.value}-{connection_id}",
@@ -64,7 +66,48 @@ class KillHandle:
             else:  # pragma: no cover - defensive state invariant
                 return
             self._fired = True
-        kill_failed = False
+            manual_kill = self._action == "manual_kill"
+        kill_thread = Thread(
+            target=self._kill_query,
+            name=f"select-fuzz-kill-control-{self._connection_id}",
+            daemon=True,
+        )
+        kill_thread.start()
+        if self._fallback_abort is not None:
+            should_abort = manual_kill
+            if not manual_kill:
+                deadline = time.monotonic() + self._kill_grace_s
+                while True:
+                    if (
+                        self._statement_done is not None
+                        and self._statement_done.is_set()
+                    ):
+                        break
+                    with self._lock:
+                        kill_failed = (
+                            self._kill_finished.is_set()
+                            and self._kill_error_type is not None
+                        )
+                    if kill_failed or time.monotonic() >= deadline:
+                        should_abort = True
+                        break
+                    if self._statement_done is None:
+                        self._kill_finished.wait(
+                            min(0.01, max(0.0, deadline - time.monotonic()))
+                        )
+                    else:
+                        self._statement_done.wait(
+                            min(0.01, max(0.0, deadline - time.monotonic()))
+                        )
+            if should_abort:
+                if not self._abort_connection():
+                    self._kill_connection()
+        # Do not permit connection reuse until an in-flight KILL has completed:
+        # a delayed KILL QUERY could otherwise target the next statement on the
+        # same connection ID.
+        kill_thread.join()
+
+    def _kill_query(self) -> None:
         try:
             with self._factory.control_session(self._node, self._database) as session:
                 cursor = session.execute(f"KILL QUERY {self._connection_id}")
@@ -75,23 +118,32 @@ class KillHandle:
         except Exception as error:  # connector failures are diagnostics, not thread crashes
             with self._lock:
                 self._kill_error_type = type(error).__name__
-            kill_failed = True
-        if self._fallback_abort is None:
-            return
-        should_abort = kill_failed or self._action == "manual_kill"
-        if (
-            not should_abort
-            and self._statement_done is not None
-            and not self._statement_done.wait(self._kill_grace_s)
-        ):
-            should_abort = True
-        if should_abort:
-            try:
-                self._fallback_abort()
-            except Exception as error:
-                with self._lock:
-                    if self._kill_error_type is None:
-                        self._kill_error_type = type(error).__name__
+        finally:
+            self._kill_finished.set()
+
+    def _abort_connection(self) -> bool:
+        assert self._fallback_abort is not None
+        try:
+            self._fallback_abort()
+            return True
+        except Exception as error:
+            with self._lock:
+                if self._kill_error_type is None:
+                    self._kill_error_type = type(error).__name__
+            return False
+
+    def _kill_connection(self) -> None:
+        try:
+            with self._factory.control_session(self._node, self._database) as session:
+                cursor = session.execute(f"KILL CONNECTION {self._connection_id}")
+                try:
+                    cursor.fetchmany(1)
+                finally:
+                    cursor.close()
+        except Exception as error:
+            with self._lock:
+                if self._kill_error_type is None:
+                    self._kill_error_type = type(error).__name__
 
     def cancel(self, *, statement_token: object | None = None) -> None:
         """Cancel the deadline and synchronously join any in-flight KILL."""

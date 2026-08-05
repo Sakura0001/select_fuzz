@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
-from threading import Barrier, Event, Thread
+from threading import Barrier, Event, Lock, Thread
 import time
 from typing import Any
 
@@ -799,9 +800,101 @@ def test_connector_adapter_preserves_flags_and_fetches_warnings_after_result(
 
     assert connect_kwargs["get_warnings"] is False
     assert connect_kwargs["read_timeout"] == 310
+    assert connect_kwargs["use_pure"] is True
     assert connection.warning_cursor.executed == ["SHOW WARNINGS"]
     assert connection.cursor_calls[-1]["read_timeout"] == 5
     assert connection.cursor_calls[-1]["write_timeout"] == 5
+    assert connection.closed is True
+
+
+def test_connector_can_select_c_extension_for_fuzz_sessions(
+    node: NodeConfig,
+) -> None:
+    connection = _RawConnection()
+    connect_calls: list[dict[str, object]] = []
+
+    def connect(**kwargs: object) -> _RawConnection:
+        connect_calls.append(dict(kwargs))
+        return connection
+
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=connect,
+        use_pure=False,
+        control_use_pure=True,
+    )
+
+    with factory.query_session(node, "sf_case_1"):
+        pass
+    with factory.control_session(node, "sf_case_1"):
+        pass
+
+    assert connect_calls[0]["use_pure"] is False
+    assert connect_calls[1]["use_pure"] is True
+
+
+def test_c_connector_serializes_only_concurrent_connection_construction(
+    node: NodeConfig,
+) -> None:
+    state_lock = Lock()
+    active_connects = 0
+    maximum_active_connects = 0
+
+    def connect(**kwargs: object) -> _RawConnection:
+        nonlocal active_connects, maximum_active_connects
+        assert kwargs["use_pure"] is False
+        with state_lock:
+            active_connects += 1
+            maximum_active_connects = max(maximum_active_connects, active_connects)
+        time.sleep(0.01)
+        with state_lock:
+            active_connects -= 1
+        return _RawConnection()
+
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=connect,
+        use_pure=False,
+        control_use_pure=True,
+    )
+
+    def open_and_close(_: int) -> None:
+        with factory.query_session(node, "sf_case_1"):
+            pass
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        tuple(pool.map(open_and_close, range(8)))
+
+    assert maximum_active_connects == 1
+
+
+def test_c_connector_abort_reports_unsupported_without_private_socket_close(
+    node: NodeConfig,
+) -> None:
+    class _CConnection(_RawConnection):
+        def shutdown(self) -> None:
+            raise NotImplementedError
+
+    connection = _CConnection()
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=lambda **kwargs: connection,
+        use_pure=False,
+    )
+
+    with factory.query_session(node, "sf_case_1") as session:
+        with pytest.raises(RuntimeError, match="safe local abort"):
+            session.abort()
+
     assert connection.closed is True
 
 
@@ -868,6 +961,51 @@ def test_control_connections_use_a_short_independent_timeout(node: NodeConfig) -
     assert connect_calls[0]["connection_timeout"] == 5
     assert connect_calls[0]["read_timeout"] == 5
     assert connect_calls[0]["write_timeout"] == 5
+
+
+def test_control_connection_concurrency_is_bounded(node: NodeConfig) -> None:
+    entered = Event()
+    release = Event()
+    second_entered = Event()
+    connect_count = 0
+    connect_lock = Lock()
+
+    def connect(**kwargs: object) -> _RawConnection:
+        nonlocal connect_count
+        with connect_lock:
+            connect_count += 1
+            if connect_count == 1:
+                entered.set()
+            else:
+                second_entered.set()
+        return _RawConnection()
+
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=connect,
+        control_connection_limit=1,
+    )
+
+    def hold_control_session() -> None:
+        with factory.control_session(node, "sf_case_1"):
+            release.wait(1)
+
+    first = Thread(target=hold_control_session)
+    second = Thread(target=hold_control_session)
+    first.start()
+    assert entered.wait(1)
+    second.start()
+    assert second_entered.wait(0.05) is False
+    release.set()
+    first.join(1)
+    second.join(1)
+
+    assert second_entered.is_set()
+    assert first.is_alive() is False
+    assert second.is_alive() is False
 
 
 def test_control_connection_can_be_bounded_by_replication_deadline(

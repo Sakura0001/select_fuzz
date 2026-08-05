@@ -55,6 +55,34 @@ class _ControlFactory:
         yield _ControlSession(self.killed, self.kill_seen)
 
 
+class _SlowControlSession(_ControlSession):
+    def __init__(
+        self,
+        killed: list[str],
+        kill_seen: Event,
+        release_kill: Event,
+    ) -> None:
+        super().__init__(killed, kill_seen)
+        self._release_kill = release_kill
+
+    def execute(self, sql: str) -> _ControlCursor:
+        self._killed.append(sql)
+        self._kill_seen.set()
+        assert self._release_kill.wait(2)
+        return _ControlCursor()
+
+
+class _SlowControlFactory(_ControlFactory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_kill = Event()
+
+    @contextmanager
+    def control_session(self, node: NodeConfig, database: str):  # type: ignore[no-untyped-def]
+        self.control_databases.append(database)
+        yield _SlowControlSession(self.killed, self.kill_seen, self.release_kill)
+
+
 @pytest.fixture
 def node() -> NodeConfig:
     return NodeConfig(role=NodeRole.BASELINE, host="127.0.0.1", port=33061)
@@ -103,6 +131,56 @@ def test_watchdog_cancellation_joins_before_connection_can_be_reused(
 
     time.sleep(0.07)
     assert factory.killed == []
+
+
+def test_fallback_abort_uses_absolute_grace_even_when_control_kill_blocks(
+    node: NodeConfig,
+) -> None:
+    factory = _SlowControlFactory()
+    abort_seen = Event()
+    statement_done = Event()
+    handle = KillQueryWatchdog(factory, kill_grace_s=0.02).arm(
+        node,
+        "sf_case_1",
+        connection_id=41,
+        timeout_s=0.01,
+        fallback_abort=abort_seen.set,
+        statement_done=statement_done,
+    )
+
+    assert factory.kill_seen.wait(1)
+    assert abort_seen.wait(0.2)
+
+    statement_done.set()
+    factory.release_kill.set()
+    handle.cancel()
+    assert handle.timed_out is True
+    assert handle.thread_alive is False
+
+
+def test_failed_local_abort_falls_back_to_server_connection_kill(
+    node: NodeConfig,
+) -> None:
+    factory = _ControlFactory()
+
+    def unsupported_abort() -> None:
+        raise RuntimeError("safe local abort is unavailable")
+
+    handle = KillQueryWatchdog(factory, kill_grace_s=0.01).arm(
+        node,
+        "sf_case_1",
+        connection_id=41,
+        timeout_s=0.01,
+        fallback_abort=unsupported_abort,
+        statement_done=Event(),
+    )
+
+    assert factory.kill_seen.wait(1)
+    handle.cancel()
+
+    assert handle.timed_out is True
+    assert factory.killed == ["KILL QUERY 41", "KILL CONNECTION 41"]
+    assert handle.kill_error_type == "RuntimeError"
 
 
 def test_watchdog_rejects_a_stale_statement_token(node: NodeConfig) -> None:

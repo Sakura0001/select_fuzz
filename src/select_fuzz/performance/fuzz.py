@@ -366,6 +366,13 @@ def _table_plan(
             index_byte_budget=_INNODB_INDEX_BYTE_BUDGET,
         )
     )
+    distinct_candidates: dict[
+        tuple[bool, IndexKind, tuple[IndexPart, ...]], IndexDef
+    ] = {}
+    for candidate in secondary_candidates:
+        signature = (candidate.unique, candidate.kind, candidate.parts)
+        distinct_candidates.setdefault(signature, candidate)
+    secondary_candidates = list(distinct_candidates.values())
     rng.shuffle(secondary_candidates)
     secondary_count = rng.randint(
         0,

@@ -48,10 +48,11 @@ _FIXED_BYTES = {
     "DATETIME": 8,
     "TIMESTAMP": 7,
     "YEAR": 1,
-    "BOOL": 1,
-    "BOOLEAN": 1,
-    "ENUM": 2,
-    "SET": 8,
+    # Match SchemaRules' conservative fallback for aliases and value lists.
+    "BOOL": 16,
+    "BOOLEAN": 16,
+    "ENUM": 16,
+    "SET": 16,
 }
 
 
@@ -158,13 +159,13 @@ def _full_index_bytes(column: CompositeColumn) -> int | None:
         return _FIXED_BYTES[base]
     length = _declared_length(column)
     if base == "BIT" and length is not None:
-        return max(1, (length + 7) // 8)
+        return (max(1, length) + 7) // 8
     if base in {"DECIMAL", "NUMERIC"} and length is not None:
-        return (length + 1) // 2 + 1
+        return (max(1, length) + 1) // 2 + 1
     if base in {"CHAR", "VARCHAR", "NCHAR", "NVARCHAR"} and length is not None:
-        return length * column.charset_bytes
+        return max(1, length) * column.charset_bytes
     if base in {"BINARY", "VARBINARY"} and length is not None:
-        return length
+        return max(1, length)
     return None
 
 

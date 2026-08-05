@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -44,7 +44,7 @@ from select_fuzz.execution import (
     TriadMutationCoordinator,
     with_replication_marker,
 )
-from select_fuzz.generation.catalog import FeatureCatalog
+from select_fuzz.generation.catalog import FeatureCatalog, FeatureSpec
 from select_fuzz.generation.catalog_schema import REVIEWED_VARIANT_IDS
 from select_fuzz.generation.coverage import CoverageLedger
 from select_fuzz.generation.mutation import MutationBatch, MutationBatchGenerator
@@ -76,6 +76,33 @@ from select_fuzz.service import (
     RoundContext,
     RoundSummary,
 )
+
+
+_PRODUCTION_SCHEMA_PROFILES = frozenset(
+    {
+        SchemaProfile.REGULAR_INNODB.value,
+        SchemaProfile.PARTITIONED_INNODB.value,
+        SchemaProfile.TEMPORARY_INNODB.value,
+        SchemaProfile.FOREIGN_KEY_GRAPH.value,
+        SchemaProfile.JSON_MULTIVALUE_INNODB.value,
+    }
+)
+
+
+def _production_schema_targets(
+    catalog: FeatureCatalog,
+    *,
+    replica_mode: bool,
+) -> tuple[FeatureSpec, ...]:
+    allowed_profiles = _PRODUCTION_SCHEMA_PROFILES
+    if replica_mode:
+        allowed_profiles -= {SchemaProfile.TEMPORARY_INNODB.value}
+    targets: list[FeatureSpec] = []
+    for target in catalog.signature_targets(version=(8, 0, 41), profiles=allowed_profiles):
+        compatible_profiles = target.compatible_profiles & allowed_profiles
+        if compatible_profiles:
+            targets.append(replace(target, compatible_profiles=compatible_profiles))
+    return tuple(targets)
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,13 +425,10 @@ class GeneratedRoundSource:
 
     def materialize(self, context: RoundContext) -> RoundMaterialization:
         tree = SeedTree(context.round_seed)
-        enabled = self._catalog.signature_targets(version=(8, 0, 41))
-        if self._replica_mode:
-            enabled = tuple(
-                target
-                for target in enabled
-                if set(target.compatible_profiles) - {SchemaProfile.TEMPORARY_INNODB.value}
-            )
+        enabled = _production_schema_targets(
+            self._catalog,
+            replica_mode=self._replica_mode,
+        )
         if not enabled:
             raise RuntimeError("no evidence-verified query feature is enabled")
         data_seed = tree.derive("data")

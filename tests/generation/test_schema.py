@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from select_fuzz.generation.catalog import FeatureSpec
+from select_fuzz.generation.composite_indexes import CompositeIndexFamily
 from select_fuzz.generation.schema import (
     BoundaryDeclarationId,
     ColumnDef,
@@ -21,6 +22,7 @@ from select_fuzz.generation.schema import (
     SchemaLimits,
     SchemaManifest,
     SchemaProfile,
+    SortDirection,
     TableDef,
 )
 from select_fuzz.generation.schema_rules import SchemaRuleViolation, SchemaRules
@@ -691,6 +693,48 @@ def test_regular_primary_key_and_secondary_index_matrix_is_reachable() -> None:
         "ix_payload_prefix",
         "ix_payload_lower",
     } <= index_names
+
+
+def test_correctness_seed_window_reaches_safe_composite_index_families() -> None:
+    limits = SchemaLimits(
+        min_tables=1,
+        max_tables=1,
+        min_columns=6,
+        max_columns=10,
+        max_indexes_per_table=8,
+    )
+    reached: dict[CompositeIndexFamily, IndexDef] = {}
+    name_to_family = {
+        "ix_comp_ordinary": CompositeIndexFamily.ORDINARY,
+        "uq_comp_unique": CompositeIndexFamily.UNIQUE,
+        "ix_comp_mixed_direction": CompositeIndexFamily.MIXED_DIRECTION,
+        "ix_comp_prefix": CompositeIndexFamily.PREFIX,
+        "ix_comp_wide": CompositeIndexFamily.WIDE,
+    }
+
+    for seed in range(800):
+        manifest = SchemaGenerator().generate(
+            _target(SchemaProfile.REGULAR_INNODB),
+            seed=seed,
+            limits=limits,
+        )
+        assert len(manifest.tables[0].indexes) <= limits.max_indexes_per_table
+        for index in manifest.tables[0].indexes:
+            family = name_to_family.get(index.name)
+            if family is not None:
+                reached.setdefault(family, index)
+
+    assert set(reached) == set(CompositeIndexFamily)
+    assert reached[CompositeIndexFamily.UNIQUE].parts[0].column_name == "id"
+    assert {
+        part.direction
+        for part in reached[CompositeIndexFamily.MIXED_DIRECTION].parts
+    } == {SortDirection.ASC, SortDirection.DESC}
+    assert any(
+        part.prefix_length is not None
+        for part in reached[CompositeIndexFamily.PREFIX].parts
+    )
+    assert 3 <= len(reached[CompositeIndexFamily.WIDE].parts) <= 4
 
 
 def test_partition_rejects_spatial_columns_and_multi_column_hash_tuple() -> None:

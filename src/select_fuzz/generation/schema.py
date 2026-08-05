@@ -11,6 +11,12 @@ from typing import TYPE_CHECKING
 
 from select_fuzz.domain import SeedTree
 from select_fuzz.generation.catalog import FeatureSpec
+from select_fuzz.generation.composite_indexes import (
+    CompositeColumn,
+    CompositeIndexFamily,
+    CompositeIndexPlan,
+    build_composite_index_candidates,
+)
 
 if TYPE_CHECKING:
     from select_fuzz.generation.schema_rules import SchemaRules
@@ -58,6 +64,40 @@ _SUPPORTED_COLLATIONS = {
         }
     ),
 }
+
+
+def _composite_column(column: ColumnDef) -> CompositeColumn:
+    charset_bytes = (
+        1
+        if column.charset is None
+        else {
+            "ascii": 1,
+            "latin1": 1,
+            "utf8mb3": 3,
+            "utf8mb4": 4,
+        }.get(column.charset, 4)
+    )
+    return CompositeColumn(column.name, column.mysql_type, charset_bytes=charset_bytes)
+
+
+def _composite_index(plan: CompositeIndexPlan) -> IndexDef:
+    name = (
+        "uq_comp_unique"
+        if plan.family is CompositeIndexFamily.UNIQUE
+        else f"ix_comp_{plan.family.value}"
+    )
+    return IndexDef(
+        name,
+        tuple(
+            IndexPart(
+                column_name=part.column_name,
+                prefix_length=part.prefix_length,
+                direction=(SortDirection.DESC if part.descending else SortDirection.ASC),
+            )
+            for part in plan.parts
+        ),
+        unique=plan.unique,
+    )
 
 
 def _require_identifier(value: str, label: str) -> None:
@@ -1525,6 +1565,22 @@ class SchemaGenerator:
                         ),
                     )
                 )
+            candidate_signatures = {
+                (candidate.unique, candidate.kind, candidate.parts)
+                for candidate in candidates
+            }
+            for plan in build_composite_index_candidates(
+                tuple(_composite_column(column) for column in columns),
+                rng=rng,
+                index_byte_budget=physical_budget,
+                unique_required_columns=partition_columns,
+            ):
+                candidate = _composite_index(plan)
+                signature = (candidate.unique, candidate.kind, candidate.parts)
+                if signature in candidate_signatures:
+                    continue
+                candidates.append(candidate)
+                candidate_signatures.add(signature)
             rng.shuffle(candidates)
             capacity = max(0, limits.max_indexes_per_table - len(indexes))
             selected_count = rng.randint(0, min(len(candidates), capacity))

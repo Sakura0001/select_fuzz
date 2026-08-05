@@ -98,6 +98,35 @@ def test_planner_omits_unsupported_and_over_budget_shapes() -> None:
     assert candidates == ()
 
 
+def test_planner_treats_zero_length_character_and_binary_columns_as_one_byte_minimum() -> None:
+    candidates = build_composite_index_candidates(
+        (
+            CompositeColumn("id", "BIGINT UNSIGNED"),
+            CompositeColumn("empty_text", "CHAR(0)", charset_bytes=4),
+            CompositeColumn("empty_binary", "BINARY(0)"),
+        ),
+        rng=random.Random(4),
+        index_byte_budget=16,
+    )
+
+    assert candidates
+    assert all(part.estimated_bytes >= 1 for plan in candidates for part in plan.parts)
+    assert all(plan.estimated_bytes <= 16 for plan in candidates)
+
+
+def test_planner_does_not_underestimate_boolean_alias_storage() -> None:
+    candidates = build_composite_index_candidates(
+        (
+            CompositeColumn("id", "BIGINT UNSIGNED"),
+            CompositeColumn("flag", "BOOLEAN"),
+        ),
+        rng=random.Random(5),
+        index_byte_budget=9,
+    )
+
+    assert candidates == ()
+
+
 @pytest.mark.parametrize("budget", (0, -1))
 def test_planner_rejects_nonpositive_budget(budget: int) -> None:
     with pytest.raises(ValueError, match="index_byte_budget"):

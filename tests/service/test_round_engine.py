@@ -7,6 +7,7 @@ from typing import cast
 
 import pytest
 
+import select_fuzz.correctness as correctness_module
 from select_fuzz.artifacts import ArtifactReader, CaseBundleWriter, read_jsonl
 from select_fuzz.config import NodeRole
 from select_fuzz.correctness import (
@@ -38,12 +39,15 @@ from select_fuzz.generation.mutation import (
     MutationStatement,
 )
 from select_fuzz.generation.data import DataScenario
+from select_fuzz.generation.catalog import FeatureCatalog, FeatureSpec
 from select_fuzz.generation.query_contract import ExpectedError, ExpectedErrorKind, QueryLane
 from select_fuzz.generation.schema import (
     BoundaryDeclarationId,
+    IndexKind,
     SchemaGenerator,
     SchemaLimits,
     SchemaManifest,
+    SchemaProfile,
 )
 from select_fuzz.service import EventPublisher, RoundContext
 
@@ -1249,6 +1253,65 @@ def test_generated_round_source_seed_randomizes_data_scenarios_and_row_counts(
         DataScenario.HOTSPOT,
     }
     assert len(observed_rows) > 1
+
+
+def test_production_schema_targets_remove_unsupported_engine_profiles() -> None:
+    catalog = FeatureCatalog(
+        (
+            FeatureSpec(
+                feature_id="profile_filter_target",
+                family="schema",
+                min_version=(8, 0, 0),
+                compatible_profiles=frozenset(
+                    {
+                        SchemaProfile.REGULAR_INNODB.value,
+                        SchemaProfile.TEMPORARY_INNODB.value,
+                        SchemaProfile.FULLTEXT_INNODB.value,
+                        SchemaProfile.SPATIAL_INNODB.value,
+                    }
+                ),
+                ast_nodes=frozenset({"query_expression"}),
+                guards=frozenset({"read_only_select"}),
+            ),
+        )
+    )
+
+    primary_targets = correctness_module._production_schema_targets(  # type: ignore[attr-defined]
+        catalog,
+        replica_mode=False,
+    )
+    replica_targets = correctness_module._production_schema_targets(  # type: ignore[attr-defined]
+        catalog,
+        replica_mode=True,
+    )
+
+    assert primary_targets[0].compatible_profiles == frozenset(
+        {
+            SchemaProfile.REGULAR_INNODB.value,
+            SchemaProfile.TEMPORARY_INNODB.value,
+        }
+    )
+    assert replica_targets[0].compatible_profiles == frozenset(
+        {SchemaProfile.REGULAR_INNODB.value}
+    )
+
+
+def test_generated_round_source_never_emits_fulltext_or_spatial_indexes() -> None:
+    source = GeneratedRoundSource(rows_per_table=0)
+
+    for seed in range(1, 80):
+        materialized = source.materialize(
+            replace(_context(1), round_number=seed, round_seed=seed)
+        )
+        assert materialized.schema.profile not in {
+            SchemaProfile.FULLTEXT_INNODB,
+            SchemaProfile.SPATIAL_INNODB,
+        }
+        assert all(
+            index.kind not in {IndexKind.FULLTEXT, IndexKind.SPATIAL}
+            for table in materialized.schema.tables
+            for index in table.indexes
+        )
 
 
 def test_production_boundary_rounds_reach_every_typed_declaration(

@@ -4,7 +4,8 @@ import re
 
 import pytest
 
-from select_fuzz.generation.schema import IndexKind
+from select_fuzz.generation.composite_indexes import CompositeIndexFamily
+from select_fuzz.generation.schema import IndexKind, SortDirection
 from select_fuzz.performance.calibration import PerformanceTemplate
 from select_fuzz.performance.fuzz import (
     PerformanceFuzzTemplate,
@@ -79,6 +80,49 @@ def test_performance_fuzz_excludes_special_types_indexes_and_always_reads_genera
         )
         assert sql.lstrip().upper().startswith("SELECT")
         assert ";" not in sql
+
+
+def test_performance_seed_window_reaches_safe_composite_index_families() -> None:
+    reached = {}
+    name_to_family = {
+        "idx_comp_ordinary": CompositeIndexFamily.ORDINARY,
+        "uq_comp_unique": CompositeIndexFamily.UNIQUE,
+        "idx_comp_mixed_direction": CompositeIndexFamily.MIXED_DIRECTION,
+        "idx_comp_prefix": CompositeIndexFamily.PREFIX,
+        "idx_comp_wide": CompositeIndexFamily.WIDE,
+    }
+
+    for seed in range(300):
+        case = PerformanceFuzzTemplate(
+            seed=seed,
+            case_id=f"composite_{seed}",
+            min_columns=6,
+            max_columns=10,
+            max_indexes_per_table=6,
+        )
+        for table in case.schema.tables:
+            assert len(table.indexes) <= 6
+            for index in table.indexes:
+                assert index.kind not in {
+                    IndexKind.FULLTEXT,
+                    IndexKind.SPATIAL,
+                    IndexKind.MULTIVALUE,
+                }
+                family = name_to_family.get(index.name)
+                if family is not None:
+                    reached.setdefault(family, index)
+
+    assert set(reached) == set(CompositeIndexFamily)
+    assert reached[CompositeIndexFamily.UNIQUE].parts[0].column_name == "id"
+    assert {
+        part.direction
+        for part in reached[CompositeIndexFamily.MIXED_DIRECTION].parts
+    } == {SortDirection.ASC, SortDirection.DESC}
+    assert any(
+        part.prefix_length is not None
+        for part in reached[CompositeIndexFamily.PREFIX].parts
+    )
+    assert 3 <= len(reached[CompositeIndexFamily.WIDE].parts) <= 4
 
 
 def test_scalable_manifest_uses_deterministic_batched_procedures_with_bounded_sql() -> None:

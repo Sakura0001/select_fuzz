@@ -14,6 +14,12 @@ import random
 import re
 
 from select_fuzz.domain import SeedTree
+from select_fuzz.generation.composite_indexes import (
+    CompositeColumn,
+    CompositeIndexFamily,
+    CompositeIndexPlan,
+    build_composite_index_candidates,
+)
 from select_fuzz.generation.schema import (
     ColumnDef,
     IndexDef,
@@ -65,6 +71,7 @@ _QUERY_SHAPES = (
     "window_sort",
     "filtered_scan",
 )
+_INNODB_INDEX_BYTE_BUDGET = 3072
 _INTEGER_BOUNDS: dict[str, tuple[int, int]] = {
     "TINYINT": (-(2**7), 2**7 - 1),
     "SMALLINT": (-(2**15), 2**15 - 1),
@@ -273,6 +280,34 @@ def _index_parts(
     return (column_part,)
 
 
+def _composite_column(column: ColumnDef) -> CompositeColumn:
+    charset_bytes = 1
+    if column.base_type in _TEXT_TYPES:
+        charset_bytes = 1 if column.charset in {"ascii", "latin1"} else 4
+    return CompositeColumn(column.name, column.mysql_type, charset_bytes=charset_bytes)
+
+
+def _composite_index(plan: CompositeIndexPlan, *, visible: bool) -> IndexDef:
+    name = (
+        "uq_comp_unique"
+        if plan.family is CompositeIndexFamily.UNIQUE
+        else f"idx_comp_{plan.family.value}"
+    )
+    return IndexDef(
+        name,
+        tuple(
+            IndexPart(
+                column_name=part.column_name,
+                prefix_length=part.prefix_length,
+                direction=(SortDirection.DESC if part.descending else SortDirection.ASC),
+            )
+            for part in plan.parts
+        ),
+        unique=plan.unique,
+        visible=visible,
+    )
+
+
 def _table_plan(
     seed_tree: SeedTree,
     seed: int,
@@ -296,12 +331,14 @@ def _table_plan(
             primary=True,
         )
     ]
-    candidates = [column for column in columns[1:] if column.base_type in _INDEXABLE_TYPES]
-    secondary_count = rng.randint(0, min(max_indexes_per_table - 1, len(candidates)))
-    for index_ordinal, column in enumerate(rng.sample(candidates, secondary_count)):
+    indexable_columns = [
+        column for column in columns[1:] if column.base_type in _INDEXABLE_TYPES
+    ]
+    secondary_candidates: list[IndexDef] = []
+    for index_ordinal, column in enumerate(rng.sample(indexable_columns, len(indexable_columns))):
         unique = rng.random() < 0.25
         if column.base_type in _TEXT_TYPES and rng.random() < 0.25:
-            indexes.append(
+            secondary_candidates.append(
                 IndexDef(
                     f"idx_{table_ordinal}_{index_ordinal}",
                     (IndexPart(expression=IndexExpression.lower_char(column.name, 255)),),
@@ -310,7 +347,7 @@ def _table_plan(
                 )
             )
         else:
-            indexes.append(
+            secondary_candidates.append(
                 IndexDef(
                     f"idx_{table_ordinal}_{index_ordinal}",
                     _index_parts(rng, column, unique=unique),
@@ -318,6 +355,23 @@ def _table_plan(
                     visible=rng.random() >= 0.15,
                 )
             )
+    composite_rng = random.Random(
+        seed_tree.derive("performance_fuzz", "table", table_ordinal, "composite_indexes")
+    )
+    secondary_candidates.extend(
+        _composite_index(plan, visible=composite_rng.random() >= 0.15)
+        for plan in build_composite_index_candidates(
+            tuple(_composite_column(column) for column in columns),
+            rng=composite_rng,
+            index_byte_budget=_INNODB_INDEX_BYTE_BUDGET,
+        )
+    )
+    rng.shuffle(secondary_candidates)
+    secondary_count = rng.randint(
+        0,
+        min(max_indexes_per_table - 1, len(secondary_candidates)),
+    )
+    indexes.extend(secondary_candidates[:secondary_count])
     table = TableDef(
         name=f"pf_t{table_ordinal}",
         temporary=False,

@@ -6,6 +6,12 @@ from dataclasses import dataclass
 import random
 
 from select_fuzz.config import FuzzConfig
+from select_fuzz.generation.composite_indexes import (
+    CompositeColumn,
+    CompositeIndexFamily,
+    CompositeIndexPlan,
+    build_composite_index_candidates,
+)
 from select_fuzz.generation.query_grammar import GrammarColumn, GrammarTable
 
 
@@ -89,6 +95,19 @@ _LOB_TYPES = frozenset(
         "LONGBLOB",
     }
 )
+_CHARACTER_TYPES = frozenset(
+    {
+        "CHAR",
+        "VARCHAR",
+        "NCHAR",
+        "NVARCHAR",
+        "TINYTEXT",
+        "TEXT",
+        "MEDIUMTEXT",
+        "LONGTEXT",
+    }
+)
+_INNODB_INDEX_BYTE_BUDGET = 3072
 
 
 def _quote_identifier(value: str) -> str:
@@ -260,6 +279,33 @@ def _is_indexable(column: FuzzColumnSpec) -> bool:
     return column.mysql_type.upper() not in _LOB_TYPES
 
 
+def _composite_column(column: FuzzColumnSpec) -> CompositeColumn:
+    base_type = column.mysql_type.upper().split("(", maxsplit=1)[0]
+    charset_bytes = 4 if base_type in _CHARACTER_TYPES else 1
+    return CompositeColumn(column.name, column.mysql_type, charset_bytes=charset_bytes)
+
+
+def _render_composite_index(plan: CompositeIndexPlan) -> FuzzIndexSpec:
+    name = (
+        "uq_comp_unique"
+        if plan.family is CompositeIndexFamily.UNIQUE
+        else f"idx_comp_{plan.family.value}"
+    )
+    rendered_parts: list[str] = []
+    for part in plan.parts:
+        rendered = _quote_identifier(part.column_name)
+        if part.prefix_length is not None:
+            rendered += f"({part.prefix_length})"
+        if part.descending:
+            rendered += " DESC"
+        rendered_parts.append(rendered)
+    prefix = "UNIQUE KEY" if plan.unique else "KEY"
+    return FuzzIndexSpec(
+        name,
+        f"{prefix} {_quote_identifier(name)} ({', '.join(rendered_parts)})",
+    )
+
+
 def build_table_specs(
     table_names: tuple[str, ...],
     config: FuzzConfig,
@@ -270,7 +316,8 @@ def build_table_specs(
 
     specs: list[FuzzTableSpec] = []
     for table_index, table_name in enumerate(table_names):
-        rng = random.Random(seed + table_index * 1_000_003)
+        table_seed = seed + table_index * 1_000_003
+        rng = random.Random(table_seed)
         column_count = rng.randint(
             config.min_columns_per_table,
             config.max_columns_per_table,
@@ -332,6 +379,19 @@ def build_table_specs(
             config.min_indexes_per_table,
             config.max_indexes_per_table,
         )
+        composite_rng = random.Random(table_seed ^ 0x5F3759DF)
+        composite_plans = list(
+            build_composite_index_candidates(
+                tuple(_composite_column(column) for column in columns),
+                rng=composite_rng,
+                index_byte_budget=_INNODB_INDEX_BYTE_BUDGET,
+            )
+        )
+        composite_rng.shuffle(composite_plans)
+        for plan in composite_plans:
+            if len(indexes) >= target_indexes:
+                break
+            indexes.append(_render_composite_index(plan))
         index_number = 1
         while len(indexes) < target_indexes:
             column = rng.choice(indexable_extras)

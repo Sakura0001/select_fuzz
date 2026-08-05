@@ -49,7 +49,9 @@ def build_fuzz_runner(config: AppConfig, artifact_root: Path) -> FuzzModeService
     )
     generation_processes = resolve_query_generator_processes(
         config.fuzz.query_generator_processes,
-        databases=config.fuzz.databases,
+        reader_workers=(
+            config.fuzz.databases * config.fuzz.reader_threads_per_database
+        ),
     )
     sql_recorder = (
         FuzzSqlRecorder(artifact_root / "sql")

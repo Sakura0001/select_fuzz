@@ -437,6 +437,36 @@ def test_nested_scope_avoids_mysql_unsupported_repeated_grandparent_reference() 
     assert immediate in generator._visible_column_pool(context)
 
 
+def test_generation_snapshot_reuses_immutable_schema_metadata() -> None:
+    column = GrammarColumn("wide_column", "VARCHAR(255)")
+    binding = _ColumnBinding("r1", column)
+    scope = _QueryScope(
+        local_columns=[binding],
+        projection_columns=[column],
+        selected_outer_bindings={binding.identity},
+    )
+    context = _GenerationContext(
+        schema=GrammarSchema((GrammarTable("wide_table", (column,)),)),
+        rng=random.Random(17),
+        config=GrammarQueryConfig(),
+        scopes=[scope],
+    )
+
+    snapshot = context.snapshot()
+    context.scope.local_columns.clear()
+    context.scope.selected_outer_bindings.clear()
+
+    snapshotted_scope = snapshot.scopes[0]
+    assert snapshotted_scope.local_columns[0] is binding
+    assert snapshotted_scope.local_columns[0].column is column
+    assert snapshotted_scope.projection_columns[0] is column
+    assert snapshotted_scope.selected_outer_bindings == {binding.identity}
+
+    context.restore(snapshot)
+    context.scope.projection_columns.clear()
+    assert snapshot.scopes[0].projection_columns == [column]
+
+
 def test_query_result_ordinal_comes_from_real_projection_width() -> None:
     grammar = SelectGrammar.from_text(
         """

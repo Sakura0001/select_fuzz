@@ -264,9 +264,10 @@ uv run select-fuzz run --mode fuzz --config config/local.yaml \
 - INSERT/UPDATE/UPSERT 批量默认 100～100000 行；DELETE 默认 10～100 行且有 `id=1`
   保护。DML 权重四项之和必须为 100，默认 INSERT/UPDATE/DELETE/UPSERT = 35/45/10/10。
 - 查询超时不超过 300 秒；连接重连退避初始值不超过 30 秒，最大值不超过 60 秒。
-- `query_generator_processes=0` 时按数据库数与 CPU 核数自动选择生成进程；每个 reader
-  的预取深度固定为 1。`connector_implementation=auto` 在 fuzz 模式优先使用 Connector
-  C 扩展，不可用时回退 pure Python。
+- `query_generator_processes=0` 时按总 reader 数与 CPU 核数自动选择生成进程，自动模式
+  最多 32 个；同一数据库的生成任务也会分散到全部进程，避免 reader 在单进程队列中
+  串行等待。每个 reader 的预取深度固定为 1。`connector_implementation=auto` 在 fuzz
+  模式优先使用 Connector C 扩展，不可用时回退 pure Python。
 - 周期换代不会叠加两代 worker 连接，也没有代数上限。旧批次数据库、失败批次中已经
   创建的数据库和半成品对象均不删除；新批次任一数据库初始化或主备同步失败都会使整个
   fuzz 运行失败，不会回退到旧批次。

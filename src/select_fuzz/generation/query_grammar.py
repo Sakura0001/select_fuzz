@@ -8,7 +8,6 @@ needs a dependency-ordered scope transition (derived tables and CTEs).
 
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from hashlib import sha256
@@ -525,6 +524,39 @@ class _GenerationSnapshot:
     cte_frames: list[_CteFrame]
 
 
+def _clone_query_scope(scope: _QueryScope | None) -> _QueryScope | None:
+    if scope is None:
+        return None
+    return _QueryScope(
+        outer_columns=list(scope.outer_columns),
+        local_columns=list(scope.local_columns),
+        table_aliases=list(scope.table_aliases),
+        table_indexes=dict(scope.table_indexes),
+        derived_aliases=list(scope.derived_aliases),
+        projection_columns=list(scope.projection_columns),
+        output_columns=list(scope.output_columns),
+        prepared_relation=scope.prepared_relation,
+        named_window_enabled=scope.named_window_enabled,
+        projection_has_star=scope.projection_has_star,
+        group_column=scope.group_column,
+        group_columns=list(scope.group_columns),
+        last_value_family=scope.last_value_family,
+        window_value_family=scope.window_value_family,
+        selected_outer_bindings=set(scope.selected_outer_bindings),
+        blocked_outer_bindings=set(scope.blocked_outer_bindings),
+    )
+
+
+def _clone_pending_cte(pending: _PendingCte | None) -> _PendingCte | None:
+    if pending is None:
+        return None
+    return _PendingCte(pending.name, pending.columns, pending.body_sql)
+
+
+def _clone_cte_frames(frames: list[_CteFrame]) -> list[_CteFrame]:
+    return [_CteFrame(list(frame.bindings)) for frame in frames]
+
+
 @dataclass(slots=True)
 class _GenerationContext:
     schema: GrammarSchema
@@ -552,31 +584,39 @@ class _GenerationContext:
 
     def snapshot(self) -> _GenerationSnapshot:
         return _GenerationSnapshot(
-            scopes=deepcopy(self.scopes),
+            scopes=[
+                cloned
+                for scope in self.scopes
+                if (cloned := _clone_query_scope(scope)) is not None
+            ],
             trace=list(self.trace),
             relation_alias_counter=self.relation_alias_counter,
             cte_counter=self.cte_counter,
-            last_completed_scope=deepcopy(self.last_completed_scope),
-            pending_cte=deepcopy(self.pending_cte),
-            last_query_result=deepcopy(self.last_query_result),
-            set_signatures=deepcopy(self.set_signatures),
-            row_signatures=deepcopy(self.row_signatures),
-            membership_signatures=deepcopy(self.membership_signatures),
-            cte_frames=deepcopy(self.cte_frames),
+            last_completed_scope=_clone_query_scope(self.last_completed_scope),
+            pending_cte=_clone_pending_cte(self.pending_cte),
+            last_query_result=self.last_query_result,
+            set_signatures=list(self.set_signatures),
+            row_signatures=list(self.row_signatures),
+            membership_signatures=list(self.membership_signatures),
+            cte_frames=_clone_cte_frames(self.cte_frames),
         )
 
     def restore(self, snapshot: _GenerationSnapshot) -> None:
-        self.scopes = deepcopy(snapshot.scopes)
+        self.scopes = [
+            cloned
+            for scope in snapshot.scopes
+            if (cloned := _clone_query_scope(scope)) is not None
+        ]
         self.trace = list(snapshot.trace)
         self.relation_alias_counter = snapshot.relation_alias_counter
         self.cte_counter = snapshot.cte_counter
-        self.last_completed_scope = deepcopy(snapshot.last_completed_scope)
-        self.pending_cte = deepcopy(snapshot.pending_cte)
-        self.last_query_result = deepcopy(snapshot.last_query_result)
-        self.set_signatures = deepcopy(snapshot.set_signatures)
-        self.row_signatures = deepcopy(snapshot.row_signatures)
-        self.membership_signatures = deepcopy(snapshot.membership_signatures)
-        self.cte_frames = deepcopy(snapshot.cte_frames)
+        self.last_completed_scope = _clone_query_scope(snapshot.last_completed_scope)
+        self.pending_cte = _clone_pending_cte(snapshot.pending_cte)
+        self.last_query_result = snapshot.last_query_result
+        self.set_signatures = list(snapshot.set_signatures)
+        self.row_signatures = list(snapshot.row_signatures)
+        self.membership_signatures = list(snapshot.membership_signatures)
+        self.cte_frames = _clone_cte_frames(snapshot.cte_frames)
 
 
 def _quote_identifier(value: str) -> str:

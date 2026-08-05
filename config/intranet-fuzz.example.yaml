@@ -53,6 +53,7 @@ fuzz:
   upsert_weight: 10
   grammar_query_weight: 50
   load_shaped_query_weight: 50
+  # 0 表示按总 reader 数与 CPU 核数自动选择 SQL 生成进程，最多 32 个。
   query_generator_processes: 0
   # 每 30 分钟停掉旧批次连接，再并发创建全新的 databases 批次；旧库始终保留。
   schema_refresh_interval_seconds: 1800

@@ -232,7 +232,7 @@ fuzz:
   # SELECT 生成器权重：50% 负载型查询，50% 完全随机文法查询。
   grammar_query_weight: 50
   load_shaped_query_weight: 50
-  # reader SELECT 使用独立生成进程并只预取下一条；0 表示按数据库数与 CPU 核数自动计算。
+  # reader SELECT 使用独立生成进程并只预取下一条；0 表示按总 reader 数与 CPU 核数自动计算，最多 32 个。
   query_generator_processes: 0
   # 从每代开始建库时计时，默认每 1800 秒停止旧连接并并发创建整批新库；0 表示关闭换代。
   # 历史库和失败时留下的半成品库均保留，不自动删除。

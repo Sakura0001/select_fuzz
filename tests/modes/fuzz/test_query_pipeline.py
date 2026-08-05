@@ -63,6 +63,14 @@ class _RecordingGenerator:
         )
 
 
+class _RecordingQueue:
+    def __init__(self) -> None:
+        self.messages: list[object] = []
+
+    def put(self, message: object) -> None:
+        self.messages.append(message)
+
+
 def _production_generator() -> WeightedQueryGenerator:
     return WeightedQueryGenerator(
         (
@@ -128,6 +136,36 @@ def test_process_pipeline_matches_inline_production_sql_and_stops_children() -> 
     assert pipeline.alive_processes == 0
 
 
+def test_process_pipeline_broadcasts_schema_and_balances_one_database_readers() -> None:
+    pipeline = ProcessQueryPipeline(
+        process_count=4,
+        max_tables_per_query_block=1,
+    )
+    queues = [_RecordingQueue() for _ in range(4)]
+    pipeline._request_queues = queues  # type: ignore[attr-defined]
+    pipeline._started = True  # type: ignore[attr-defined]
+
+    pipeline.register_database(0, "sf_f_case", _schema())
+
+    assert [len(queue.messages) for queue in queues] == [1, 1, 1, 1]
+    for queue in queues:
+        queue.messages.clear()
+
+    pipeline.replace_database(0, "sf_f_replaced", _schema())
+
+    assert [len(queue.messages) for queue in queues] == [1, 1, 1, 1]
+    for queue in queues:
+        queue.messages.clear()
+
+    tickets = [
+        pipeline.submit(0, reader_id, 0, seed=reader_id)
+        for reader_id in range(4)
+    ]
+
+    assert len(tickets) == 4
+    assert [len(queue.messages) for queue in queues] == [1, 1, 1, 1]
+
+
 def test_pipeline_rejects_more_than_one_outstanding_query_per_reader() -> None:
     pipeline = ProcessQueryPipeline(
         process_count=1,
@@ -191,7 +229,7 @@ def test_process_pipeline_replaces_schema_without_restarting_children() -> None:
     pipeline.close()
 
 
-def test_auto_process_count_is_bounded_by_databases_cpu_and_config() -> None:
-    assert resolve_query_generator_processes(0, databases=12, cpu_count=8) == 8
-    assert resolve_query_generator_processes(3, databases=12, cpu_count=8) == 3
-    assert resolve_query_generator_processes(20, databases=4, cpu_count=8) == 4
+def test_auto_process_count_is_bounded_by_readers_cpu_and_config() -> None:
+    assert resolve_query_generator_processes(0, reader_workers=144, cpu_count=64) == 32
+    assert resolve_query_generator_processes(3, reader_workers=144, cpu_count=8) == 3
+    assert resolve_query_generator_processes(20, reader_workers=12, cpu_count=8) == 12

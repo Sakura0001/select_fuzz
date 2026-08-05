@@ -81,14 +81,14 @@ class QueryGenerationPipeline(Protocol):
 def resolve_query_generator_processes(
     configured: int,
     *,
-    databases: int,
+    reader_workers: int,
     cpu_count: int | None = None,
 ) -> int:
-    """Resolve 0=auto while never creating more workers than databases."""
+    """Resolve 0=auto across readers while keeping process growth bounded."""
 
     available = max(1, cpu_count if cpu_count is not None else (os.cpu_count() or 1))
-    requested = available if configured == 0 else configured
-    return max(1, min(requested, databases))
+    requested = min(available, 32) if configured == 0 else configured
+    return max(1, min(requested, reader_workers))
 
 
 class _InlineTicket:
@@ -415,9 +415,9 @@ class ProcessQueryPipeline:
             if database_ordinal in self._registered:
                 raise ValueError("database ordinal is already registered")
             self._registered.add(database_ordinal)
-        self._queue_for(database_ordinal).put(
-            _RegisterDatabase(database_ordinal, database, schema)
-        )
+        message = _RegisterDatabase(database_ordinal, database, schema)
+        for request_queue in self._request_queues:
+            request_queue.put(message)
 
     def replace_database(
         self,
@@ -431,9 +431,9 @@ class ProcessQueryPipeline:
                 raise KeyError(f"database ordinal is not registered: {database_ordinal}")
             if any(key[0] == database_ordinal for key in self._pending_readers):
                 raise RuntimeError("database still has outstanding generation requests")
-        self._queue_for(database_ordinal).put(
-            _RegisterDatabase(database_ordinal, database, schema)
-        )
+        message = _RegisterDatabase(database_ordinal, database, schema)
+        for request_queue in self._request_queues:
+            request_queue.put(message)
 
     def submit(
         self,
@@ -456,13 +456,11 @@ class ProcessQueryPipeline:
             future: Future[_GenerationResponse] = Future()
             self._futures[job_id] = future
             self._pending_readers.add(key)
-        self._queue_for(database_ordinal).put(
+            queue_index = (job_id - 1) % self._process_count
+        self._request_queues[queue_index].put(
             _Generate(job_id, database_ordinal, seed)
         )
         return _ProcessTicket(self, future, key)
-
-    def _queue_for(self, database_ordinal: int) -> Any:
-        return self._request_queues[database_ordinal % self._process_count]
 
     def _require_started(self) -> None:
         with self._lock:

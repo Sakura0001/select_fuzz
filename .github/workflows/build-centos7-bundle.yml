@@ -3,8 +3,7 @@ name: build-centos7-bundle
 on:
   push:
     branches:
-      - "agent/**"
-  pull_request:
+      - main
   workflow_dispatch:
 
 permissions:

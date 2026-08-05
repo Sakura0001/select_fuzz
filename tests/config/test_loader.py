@@ -432,3 +432,17 @@ def test_example_configuration_loads_and_contains_no_password_literal() -> None:
     document = example.read_text(encoding="utf-8")
     assert "password:" not in document
     assert "password_env:" in document
+
+
+def test_intranet_fuzz_example_requires_only_distinct_primary_and_replica_ips() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    example = repository / "config" / "intranet-fuzz.example.yaml"
+
+    config = load_config(example)
+    primary = config.node_for(NodeRole.CUSTOM_ON)
+    replica = config.replica_for(NodeRole.CUSTOM_ON)
+    document = example.read_text(encoding="utf-8")
+
+    assert (primary.host, primary.port) != (replica.host, replica.port)
+    assert document.count("host:") == 2
+    assert "password:" not in document

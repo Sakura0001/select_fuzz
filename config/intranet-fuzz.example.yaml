@@ -1,26 +1,33 @@
-# 内网负载均衡代理的 fuzz 示例配置。
-# 使用前复制为 config/intranet-fuzz.yaml；密码只通过环境变量提供。
+# 内网主备集群的 fuzz 示例配置。
+# 使用前复制为 config/intranet-fuzz.yaml；以后只需要修改下面两行 host。
+# 密码只通过环境变量提供，不要写入本文件。
 mode: fuzz
 full_thread_sql_log: false
 replica_parameters_file: null
 replica_sync_timeout_seconds: 10
 
-# fuzz 只使用 fuzz.target_role 指定的节点。固定三角色字段是兼容现有配置模型；
-# 在 fuzz 模式下可以让它们都指向同一个代理入口，主库和备库也允许相同地址。
+# fuzz 只使用 fuzz.target_role 指定的节点。固定三角色字段用于兼容现有配置模型；
+# 三个角色通过 YAML 锚点复用同一组主备地址，所以只需要维护两行 IP。
 nodes:
   - role: baseline
-    primary: &intranet_proxy
-      host: 192.168.243.82
+    primary: &fuzz_primary
+      # 主节点 IP：writer 全部连接这里，1/3 reader 也连接这里。
+      host: 10.0.0.10
       port: 3306
       username_env: SELECT_FUZZ_MYSQL_USER
       password_env: SELECT_FUZZ_MYSQL_PASSWORD
-    replica: *intranet_proxy
+    replica: &fuzz_replica
+      # 备节点 IP：2/3 reader 连接这里。
+      host: 10.0.0.11
+      port: 3306
+      username_env: SELECT_FUZZ_MYSQL_USER
+      password_env: SELECT_FUZZ_MYSQL_PASSWORD
   - role: custom_off
-    primary: *intranet_proxy
-    replica: *intranet_proxy
+    primary: *fuzz_primary
+    replica: *fuzz_replica
   - role: custom_on
-    primary: *intranet_proxy
-    replica: *intranet_proxy
+    primary: *fuzz_primary
+    replica: *fuzz_replica
 
 fuzz:
   target_role: custom_on

@@ -180,7 +180,7 @@ def run_command(
             timer.start()
         summary = factory(loaded, artifacts).run(request, stop_event)
     except Exception as error:
-        typer.echo(f"run failed: {type(error).__name__}", err=True)
+        typer.echo(f"run failed: {type(error).__name__}: {error}", err=True)
         raise typer.Exit(code=1) from None
     finally:
         if timer is not None:

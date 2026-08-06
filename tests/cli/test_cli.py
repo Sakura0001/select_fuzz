@@ -134,7 +134,10 @@ def test_cli_overrides_seed_workers_and_queries(monkeypatch, tmp_path: Path) -> 
     assert (request.seed, request.workers, request.queries_per_round) == (99, 3, 7)
 
 
-def test_run_cli_sanitizes_runner_failures(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+def test_run_cli_prints_runner_failure_without_traceback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
     class FailingRunner:
         def run(self, request: RunRequest, stop_event: Event) -> RunSummary:
             raise RuntimeError("must-not-leak-database-error-detail")
@@ -161,8 +164,10 @@ def test_run_cli_sanitizes_runner_failures(monkeypatch, tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 1
-    assert "run failed: RuntimeError" in result.output
-    assert "must-not-leak" not in result.output
+    assert (
+        "run failed: RuntimeError: must-not-leak-database-error-detail"
+        in result.output
+    )
     assert "Traceback" not in result.output
 
 

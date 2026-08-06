@@ -123,13 +123,13 @@ class FuzzMaterializer:
             except Exception as error:
                 last_error = error
             self._sleeper(0.1)
-        detail = "replication marker not visible"
+        detail = "主节点同步标记在备节点尚不可见"
         if last_error is not None:
-            detail = f"last probe error={type(last_error).__name__}: {last_error}"
+            detail = f"最后一次探测异常={type(last_error).__name__}：{last_error}"
         raise TimeoutError(
-            "replica synchronization timeout after "
-            f"{self._replica_sync_timeout_seconds:g} seconds; "
-            f"database={database}; {detail}"
+            "等待备节点同步超时：已等待 "
+            f"{self._replica_sync_timeout_seconds:g} 秒；"
+            f"数据库={database}；{detail}"
         )
 
 

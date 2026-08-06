@@ -83,9 +83,8 @@ def test_replica_timeout_reports_last_probe_exception() -> None:
         materializer._wait_for_replica("sf_f_timeout")
 
     assert str(captured.value) == (
-        "replica synchronization timeout after 0.001 seconds; "
-        "database=sf_f_timeout; last probe error=RuntimeError: "
-        "replica route unavailable"
+        "等待备节点同步超时：已等待 0.001 秒；数据库=sf_f_timeout；"
+        "最后一次探测异常=RuntimeError：replica route unavailable"
     )
 
 
@@ -96,6 +95,6 @@ def test_replica_timeout_reports_marker_not_visible() -> None:
         materializer._wait_for_replica("sf_f_timeout")
 
     assert str(captured.value) == (
-        "replica synchronization timeout after 0.001 seconds; "
-        "database=sf_f_timeout; replication marker not visible"
+        "等待备节点同步超时：已等待 0.001 秒；数据库=sf_f_timeout；"
+        "主节点同步标记在备节点尚不可见"
     )

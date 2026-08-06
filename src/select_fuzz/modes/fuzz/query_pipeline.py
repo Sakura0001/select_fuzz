@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 import multiprocessing
 import os
 from queue import Empty
-from threading import Event, Lock, Thread
+from threading import Lock
 import time
 from typing import Any, Protocol
 
@@ -225,6 +224,7 @@ class _RegisterDatabase:
 class _Generate:
     job_id: int
     database_ordinal: int
+    reader_id: int
     seed: int
 
 
@@ -259,7 +259,7 @@ def _production_query_generator(max_tables_per_query_block: int) -> WeightedQuer
 
 def _generation_worker(
     request_queue: Any,
-    response_queue: Any,
+    response_queues: dict[tuple[int, int], Any],
     stop_event: Any,
     max_tables_per_query_block: int,
 ) -> None:
@@ -297,18 +297,20 @@ def _generation_worker(
                 type(error).__name__,
                 max(0, time.monotonic_ns() - started_ns),
             )
-        response_queue.put(response)
+        response_queues[(message.database_ordinal, message.reader_id)].put(response)
 
 
 class _ProcessTicket:
     def __init__(
         self,
         broker: ProcessQueryPipeline,
-        future: Future[_GenerationResponse],
+        response_queue: Any,
+        job_id: int,
         key: tuple[int, int],
     ) -> None:
         self._broker = broker
-        self._future = future
+        self._response_queue = response_queue
+        self._job_id = job_id
         self._key = key
         self._released = False
         self._lock = Lock()
@@ -319,12 +321,16 @@ class _ProcessTicket:
             while True:
                 if stop_event.is_set():
                     raise QueryGenerationStopped("query generation stopped")
-                self._broker.assert_healthy()
                 try:
-                    response = self._future.result(timeout=0.1)
-                    break
-                except FutureTimeoutError:
+                    response = self._response_queue.get(timeout=0.1)
+                except Empty:
+                    self._broker.assert_healthy()
                     continue
+                if not isinstance(response, _GenerationResponse):
+                    continue
+                if response.job_id != self._job_id:
+                    continue
+                break
             return GenerationOutcome(
                 response.query,
                 response.error_type,
@@ -339,13 +345,14 @@ class _ProcessTicket:
 
 
 class ProcessQueryPipeline:
-    """Sharded generators whose waiting readers dispatch their process results."""
+    """Sharded generators with one direct result channel per reader."""
 
     def __init__(
         self,
         *,
         process_count: int,
         max_tables_per_query_block: int,
+        reader_keys: tuple[tuple[int, int], ...],
         shutdown_timeout_seconds: float = 5.0,
     ) -> None:
         if process_count <= 0:
@@ -354,17 +361,34 @@ class ProcessQueryPipeline:
             raise ValueError("max_tables_per_query_block must be positive")
         if shutdown_timeout_seconds <= 0:
             raise ValueError("shutdown_timeout_seconds must be positive")
+        if not reader_keys:
+            raise ValueError("reader_keys must not be empty")
+        if len(reader_keys) != len(set(reader_keys)):
+            raise ValueError("reader_keys must be unique")
+        if any(
+            not isinstance(database_ordinal, int)
+            or isinstance(database_ordinal, bool)
+            or database_ordinal < 0
+            or not isinstance(reader_id, int)
+            or isinstance(reader_id, bool)
+            or reader_id < 0
+            for database_ordinal, reader_id in reader_keys
+        ):
+            raise ValueError("reader_keys must contain nonnegative integer pairs")
+        if process_count > len(reader_keys):
+            raise ValueError("process_count must not exceed configured readers")
         self._process_count = process_count
         self._max_tables_per_query_block = max_tables_per_query_block
         self._shutdown_timeout_seconds = float(shutdown_timeout_seconds)
+        self._reader_keys = reader_keys
+        self._reader_process_indices = {
+            key: ordinal % process_count for ordinal, key in enumerate(reader_keys)
+        }
         self._context = multiprocessing.get_context("spawn")
         self._request_queues: list[Any] = []
-        self._response_queues: list[Any] = []
+        self._response_queues: dict[tuple[int, int], Any] = {}
         self._processes: list[Any] = []
         self._stop_event: Any | None = None
-        self._collector_stop = Event()
-        self._collectors: list[Thread] = []
-        self._futures: dict[int, Future[_GenerationResponse]] = {}
         self._pending_readers: set[tuple[int, int]] = set()
         self._registered: set[int] = set()
         self._next_job_id = 1
@@ -378,35 +402,66 @@ class ProcessQueryPipeline:
                 raise RuntimeError("query generation pipeline is closed")
             if self._started:
                 return
+        try:
             self._stop_event = self._context.Event()
+            self._response_queues = {
+                key: self._context.Queue() for key in self._reader_keys
+            }
             for ordinal in range(self._process_count):
                 request_queue = self._context.Queue()
-                response_queue = self._context.Queue()
+                worker_response_queues = {
+                    key: self._response_queues[key]
+                    for key, process_index in self._reader_process_indices.items()
+                    if process_index == ordinal
+                }
                 process = self._context.Process(
                     target=_generation_worker,
                     args=(
                         request_queue,
-                        response_queue,
+                        worker_response_queues,
                         self._stop_event,
                         self._max_tables_per_query_block,
                     ),
                     name=f"sf-query-generator-{ordinal}",
                     daemon=True,
                 )
-                process.start()
+                try:
+                    process.start()
+                except BaseException:
+                    request_queue.close()
+                    request_queue.join_thread()
+                    raise
                 self._request_queues.append(request_queue)
-                self._response_queues.append(response_queue)
                 self._processes.append(process)
-            for ordinal, response_queue in enumerate(self._response_queues):
-                collector = Thread(
-                    target=self._collect_responses,
-                    args=(response_queue,),
-                    name=f"sf-query-generator-results-{ordinal}",
-                    daemon=True,
-                )
-                collector.start()
-                self._collectors.append(collector)
+        except BaseException:
+            self._rollback_start()
+            with self._lock:
+                self._closed = True
+            raise
+        with self._lock:
             self._started = True
+
+    def _rollback_start(self) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
+        for request_queue in self._request_queues:
+            try:
+                request_queue.put_nowait(_StopWorker())
+            except Exception:
+                pass
+        for process in self._processes:
+            if process.is_alive():
+                process.terminate()
+            process.join()
+        for queue in (*self._request_queues, *self._response_queues.values()):
+            try:
+                queue.close()
+                queue.join_thread()
+            except Exception:
+                pass
+        self._request_queues.clear()
+        self._response_queues.clear()
+        self._processes.clear()
 
     def register_database(
         self,
@@ -453,18 +508,19 @@ class ProcessQueryPipeline:
         with self._lock:
             if database_ordinal not in self._registered:
                 raise KeyError(f"database ordinal is not registered: {database_ordinal}")
+            if key not in self._reader_process_indices:
+                raise KeyError(f"reader is not configured: {key}")
             if key in self._pending_readers:
                 raise RuntimeError("reader already has an outstanding generation request")
             job_id = self._next_job_id
             self._next_job_id += 1
-            future: Future[_GenerationResponse] = Future()
-            self._futures[job_id] = future
             self._pending_readers.add(key)
-            queue_index = (job_id - 1) % self._process_count
+            queue_index = self._reader_process_indices[key]
+            response_queue = self._response_queues[key]
         self._request_queues[queue_index].put(
-            _Generate(job_id, database_ordinal, seed)
+            _Generate(job_id, database_ordinal, reader_id, seed)
         )
-        return _ProcessTicket(self, future, key)
+        return _ProcessTicket(self, response_queue, job_id, key)
 
     def _require_started(self) -> None:
         with self._lock:
@@ -472,19 +528,6 @@ class ProcessQueryPipeline:
                 raise RuntimeError("query generation pipeline is not started")
             if self._closed:
                 raise RuntimeError("query generation pipeline is closed")
-
-    def _collect_responses(self, response_queue: Any) -> None:
-        while not self._collector_stop.is_set():
-            try:
-                response = response_queue.get(timeout=0.1)
-            except Empty:
-                continue
-            if not isinstance(response, _GenerationResponse):
-                continue
-            with self._lock:
-                response_future = self._futures.pop(response.job_id, None)
-            if response_future is not None and not response_future.done():
-                response_future.set_result(response)
 
     def assert_healthy(self) -> None:
         with self._lock:
@@ -533,23 +576,15 @@ class ProcessQueryPipeline:
             if process.is_alive():
                 process.terminate()
                 process.join()
-        self._collector_stop.set()
-        for collector in self._collectors:
-            collector.join(timeout=self._shutdown_timeout_seconds)
         with self._lock:
-            futures = tuple(self._futures.values())
-            self._futures.clear()
             self._pending_readers.clear()
-        for future in futures:
-            if not future.done():
-                future.set_exception(QueryGenerationStopped("query generation stopped"))
         for request_queue in queues:
             try:
                 request_queue.close()
                 request_queue.join_thread()
             except Exception:
                 pass
-        for response_queue in self._response_queues:
+        for response_queue in self._response_queues.values():
             try:
                 response_queue.close()
                 response_queue.join_thread()

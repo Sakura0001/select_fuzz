@@ -17,28 +17,7 @@ from select_fuzz.generation.query_grammar import (
 )
 from select_fuzz.modes.fuzz.materialization import FuzzDatabaseSchema, fuzz_database_name
 from select_fuzz.modes.fuzz.query_pipeline import GenerationOutcome, InlineQueryPipeline
-from select_fuzz.modes.fuzz.service import (
-    FuzzModeService,
-    _fair_worker_thread_scheduling,
-    _tag_worker_session,
-)
-
-
-def test_fair_worker_thread_scheduling_restores_process_setting(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    applied: list[float] = []
-    monkeypatch.setattr(
-        "select_fuzz.modes.fuzz.service.sys.getswitchinterval",
-        lambda: 0.005,
-    )
-    monkeypatch.setattr(
-        "select_fuzz.modes.fuzz.service.sys.setswitchinterval",
-        applied.append,
-    )
-
-    with _fair_worker_thread_scheduling():
-        assert applied == [0.001]
-
-    assert applied == [0.001, 0.005]
+from select_fuzz.modes.fuzz.service import FuzzModeService, _tag_worker_session
 
 
 def _schema(database: str) -> FuzzDatabaseSchema:

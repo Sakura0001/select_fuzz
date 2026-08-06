@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
-from threading import enumerate as enumerate_threads
+
+import pytest
 
 from select_fuzz.generation.query import (
     GeneratedQuery,
@@ -73,6 +74,75 @@ class _RecordingQueue:
         self.messages.append(message)
 
 
+class _RollbackQueue(_RecordingQueue):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+        self.joined = False
+
+    def put_nowait(self, message: object) -> None:
+        self.put(message)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def join_thread(self) -> None:
+        self.joined = True
+
+
+class _RollbackEvent:
+    def __init__(self) -> None:
+        self.is_set = False
+
+    def set(self) -> None:
+        self.is_set = True
+
+
+class _RollbackProcess:
+    def __init__(self, *, fail_start: bool) -> None:
+        self._fail_start = fail_start
+        self.started = False
+        self.terminated = False
+        self.joined = False
+        self.exitcode: int | None = None
+        self.name = "rollback-process"
+
+    def start(self) -> None:
+        if self._fail_start:
+            raise RuntimeError("injected process start failure")
+        self.started = True
+
+    def is_alive(self) -> bool:
+        return self.started and not self.terminated
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def join(self, timeout: float | None = None) -> None:
+        del timeout
+        self.joined = True
+
+
+class _FailingSpawnContext:
+    def __init__(self) -> None:
+        self.queues: list[_RollbackQueue] = []
+        self.processes: list[_RollbackProcess] = []
+
+    def Event(self) -> _RollbackEvent:  # noqa: N802
+        return _RollbackEvent()
+
+    def Queue(self) -> _RollbackQueue:  # noqa: N802
+        queue = _RollbackQueue()
+        self.queues.append(queue)
+        return queue
+
+    def Process(self, **kwargs: object) -> _RollbackProcess:  # noqa: N802
+        del kwargs
+        process = _RollbackProcess(fail_start=len(self.processes) == 1)
+        self.processes.append(process)
+        return process
+
+
 def _production_generator() -> WeightedQueryGenerator:
     return WeightedQueryGenerator(
         (
@@ -123,6 +193,7 @@ def test_process_pipeline_matches_inline_production_sql_and_stops_children() -> 
     pipeline = ProcessQueryPipeline(
         process_count=1,
         max_tables_per_query_block=1,
+        reader_keys=tuple((0, reader_id) for reader_id in range(len(seeds))),
         shutdown_timeout_seconds=2,
     )
     pipeline.start()
@@ -138,10 +209,11 @@ def test_process_pipeline_matches_inline_production_sql_and_stops_children() -> 
     assert pipeline.alive_processes == 0
 
 
-def test_process_results_use_one_blocking_collector_per_response_shard() -> None:
+def test_process_results_use_one_direct_response_queue_per_reader() -> None:
     pipeline = ProcessQueryPipeline(
         process_count=4,
         max_tables_per_query_block=1,
+        reader_keys=tuple((0, reader_id) for reader_id in range(16)),
         shutdown_timeout_seconds=2,
     )
     pipeline.start()
@@ -153,19 +225,8 @@ def test_process_results_use_one_blocking_collector_per_response_shard() -> None
 
     try:
         response_queues = pipeline._response_queues  # type: ignore[attr-defined]
-        assert len(response_queues) == 4
-        assert len({id(queue) for queue in response_queues}) == 4
-        collector_names = {
-            thread.name
-            for thread in enumerate_threads()
-            if thread.name.startswith("sf-query-generator-results-")
-        }
-        assert collector_names == {
-            "sf-query-generator-results-0",
-            "sf-query-generator-results-1",
-            "sf-query-generator-results-2",
-            "sf-query-generator-results-3",
-        }
+        assert len(response_queues) == 16
+        assert len({id(queue) for queue in response_queues.values()}) == 16
         with ThreadPoolExecutor(max_workers=len(tickets)) as pool:
             outcomes = tuple(
                 pool.map(lambda ticket: ticket.result(Event()), tickets)
@@ -173,19 +234,37 @@ def test_process_results_use_one_blocking_collector_per_response_shard() -> None
         assert all(outcome.query is not None for outcome in outcomes)
     finally:
         pipeline.close()
-    assert not any(
-        thread.name.startswith("sf-query-generator-results-")
-        for thread in enumerate_threads()
+
+
+def test_process_pipeline_rolls_back_partial_start_failure() -> None:
+    context = _FailingSpawnContext()
+    pipeline = ProcessQueryPipeline(
+        process_count=2,
+        max_tables_per_query_block=1,
+        reader_keys=((0, 0), (0, 1)),
     )
+    pipeline._context = context  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="injected process start failure"):
+        pipeline.start()
+
+    assert context.processes[0].terminated
+    assert context.processes[0].joined
+    assert all(queue.closed and queue.joined for queue in context.queues)
+    assert pipeline.alive_processes == 0
 
 
 def test_process_pipeline_broadcasts_schema_and_balances_one_database_readers() -> None:
     pipeline = ProcessQueryPipeline(
         process_count=4,
         max_tables_per_query_block=1,
+        reader_keys=tuple((0, reader_id) for reader_id in range(4)),
     )
     queues = [_RecordingQueue() for _ in range(4)]
     pipeline._request_queues = queues  # type: ignore[attr-defined]
+    pipeline._response_queues = {  # type: ignore[attr-defined]
+        (0, reader_id): _RecordingQueue() for reader_id in range(4)
+    }
     pipeline._started = True  # type: ignore[attr-defined]
 
     pipeline.register_database(0, "sf_f_case", _schema())
@@ -213,6 +292,7 @@ def test_pipeline_rejects_more_than_one_outstanding_query_per_reader() -> None:
     pipeline = ProcessQueryPipeline(
         process_count=1,
         max_tables_per_query_block=1,
+        reader_keys=((0, 2),),
         shutdown_timeout_seconds=2,
     )
     pipeline.start()
@@ -227,6 +307,25 @@ def test_pipeline_rejects_more_than_one_outstanding_query_per_reader() -> None:
         raise AssertionError("second outstanding generation request was accepted")
 
     first.result(Event())
+    pipeline.close()
+
+
+def test_direct_reader_channel_discards_a_cancelled_job_response() -> None:
+    pipeline = ProcessQueryPipeline(
+        process_count=1,
+        max_tables_per_query_block=1,
+        reader_keys=((0, 0),),
+        shutdown_timeout_seconds=2,
+    )
+    pipeline.start()
+    pipeline.register_database(0, "sf_f_case", _schema())
+    pipeline.submit(0, 0, 0, seed=101)
+    pipeline.cancel_reader(0, 0)
+
+    current = pipeline.submit(0, 0, 1, seed=202).result(Event()).query
+
+    assert current is not None
+    assert current.seed == 202
     pipeline.close()
 
 
@@ -257,6 +356,7 @@ def test_process_pipeline_replaces_schema_without_restarting_children() -> None:
     pipeline = ProcessQueryPipeline(
         process_count=1,
         max_tables_per_query_block=1,
+        reader_keys=((0, 0),),
         shutdown_timeout_seconds=2,
     )
     pipeline.start()

@@ -83,6 +83,11 @@ def build_fuzz_runner(config: AppConfig, artifact_root: Path) -> FuzzModeService
         query_pipeline_factory=lambda: ProcessQueryPipeline(
             process_count=generation_processes,
             max_tables_per_query_block=config.fuzz.initial_tables,
+            reader_keys=tuple(
+                (database_ordinal, reader_id)
+                for database_ordinal in range(config.fuzz.databases)
+                for reader_id in range(config.fuzz.reader_threads_per_database)
+            ),
         ),
         sql_recorder=sql_recorder,
         connector_implementation=actual_connector,

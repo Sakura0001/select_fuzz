@@ -620,9 +620,7 @@ class FuzzModeService:
                 if outcome.query is None:
                     next_operation = operation + 1
                     if next_operation >= 100:
-                        raise RuntimeError(
-                            "failed to pre-generate a reader query after 100 attempts"
-                        )
+                        raise RuntimeError("尝试 100 次后仍无法为读线程预生成查询")
                     pending.append((built, reader_id, next_operation))
                     continue
                 prepared[(built.schema.database, reader_id)] = _PreparedReaderQuery(

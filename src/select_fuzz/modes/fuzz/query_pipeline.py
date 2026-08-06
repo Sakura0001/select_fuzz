@@ -570,7 +570,7 @@ class ProcessQueryPipeline:
             ]
         if failed:
             raise QueryGenerationProcessDied(
-                "query generator process exited: " + ", ".join(failed)
+                "查询生成进程异常退出：" + "，".join(failed)
             )
 
     def release_reader(self, key: tuple[int, int]) -> None:

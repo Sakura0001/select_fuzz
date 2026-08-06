@@ -23,6 +23,7 @@ from select_fuzz.modes.fuzz.query_pipeline import (
     _configure_generation_worker_scheduling,
     InlineQueryPipeline,
     ProcessQueryPipeline,
+    QueryGenerationProcessDied,
     resolve_query_generator_processes,
 )
 
@@ -177,6 +178,24 @@ class _FailingProcessConstructionContext(_FailingSpawnContext):
     def Process(self, **kwargs: object) -> _RollbackProcess:  # noqa: N802
         del kwargs
         raise RuntimeError("injected process construction failure")
+
+
+def test_pipeline_reports_dead_generator_process_in_chinese() -> None:
+    pipeline = ProcessQueryPipeline(
+        process_count=1,
+        max_tables_per_query_block=1,
+        reader_keys=((0, 0),),
+    )
+    process = _RollbackProcess(fail_start=False)
+    process.name = "sf-query-generator-0"
+    process.exitcode = 1
+    pipeline._processes = [process]
+
+    with pytest.raises(
+        QueryGenerationProcessDied,
+        match="查询生成进程异常退出：sf-query-generator-0",
+    ):
+        pipeline.assert_healthy()
 
 
 class _BlockingStartContext(_FailingSpawnContext):

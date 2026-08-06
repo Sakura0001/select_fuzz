@@ -19,6 +19,7 @@ from select_fuzz.modes.fuzz.materialization import FuzzDatabaseSchema, fuzz_data
 from select_fuzz.modes.fuzz.query_pipeline import GenerationOutcome, InlineQueryPipeline
 from select_fuzz.modes.fuzz.service import (
     FuzzModeService,
+    _GenerationDatabase,
     _fair_worker_thread_scheduling,
     _tag_worker_session,
 )
@@ -327,6 +328,25 @@ class _PrefetchPipeline:
         self.events.append(("close",))
 
 
+class _RejectingTicket:
+    def result(self, stop_event: Event) -> GenerationOutcome:
+        del stop_event
+        return GenerationOutcome(None, "CandidateRejected", 1, 1)
+
+
+class _RejectingPipeline(_PrefetchPipeline):
+    def submit(
+        self,
+        database_ordinal: int,
+        reader_id: int,
+        operation: int,
+        *,
+        seed: int,
+    ) -> _RejectingTicket:
+        del database_ordinal, reader_id, operation, seed
+        return _RejectingTicket()
+
+
 class _PrefetchSession:
     def __init__(self, pipeline: _PrefetchPipeline, stop_event: Event) -> None:
         self._pipeline = pipeline
@@ -360,6 +380,42 @@ class _PrefetchFactory:
         yield _PrefetchSession(self._pipeline, self._stop_event)
 
     control_session = query_session
+
+
+def test_prewarm_rejection_limit_is_reported_in_chinese(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    schema = _schema("sf_f_rejected")
+    service = FuzzModeService(
+        config=FuzzConfig(
+            databases=1,
+            writer_threads_per_database=1,
+            reader_threads_per_database=3,
+            initial_tables=1,
+            initial_rows_per_table=100,
+            max_rows_per_database=1000,
+        ),
+        primary=NodeConfig(role=NodeRole.CUSTOM_ON, host="primary"),
+        replica=NodeConfig(
+            role=NodeRole.CUSTOM_ON,
+            host="replica",
+            port=3307,
+        ),
+        factory=_NoopFactory(),
+        records=JsonlWriter(tmp_path / "events.jsonl"),
+        query_generator=WeightedQueryGenerator((("test", _QueryGenerator(), 1),)),
+        materializer_factory=lambda: _Materializer([], Lock()),
+    )
+    service._query_pipeline = _RejectingPipeline()
+    request = RunRequest("run-fuzz-prewarm-rejected", "fuzz", 7, 1, None, 1)
+
+    with pytest.raises(
+        RuntimeError,
+        match="尝试 100 次后仍无法为读线程预生成查询",
+    ):
+        service._prewarm_generation(
+            request,
+            (_GenerationDatabase(0, schema.database, 7, schema),),
+            Event(),
+        )
 
 
 def test_ordinary_reader_sql_error_keeps_the_long_lived_session(tmp_path) -> None:  # type: ignore[no-untyped-def]

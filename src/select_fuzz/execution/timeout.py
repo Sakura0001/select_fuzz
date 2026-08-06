@@ -5,14 +5,65 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable
-from threading import Event, Lock, Thread
+from heapq import heappop, heappush
+from itertools import count
+from threading import Condition, Event, Lock, Thread
 
 from select_fuzz.config import NodeConfig
 from select_fuzz.execution.protocols import ControlConnectionFactory
 
 
+class _DeadlineScheduler:
+    """One lazy daemon schedules normal statement deadlines process-wide."""
+
+    def __init__(self) -> None:
+        self._condition = Condition()
+        self._deadlines: list[tuple[float, int, KillHandle]] = []
+        self._sequence = count()
+        self._thread: Thread | None = None
+
+    def schedule(self, handle: KillHandle, deadline: float) -> None:
+        with self._condition:
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = Thread(
+                    target=self._run,
+                    name="select-fuzz-deadline-scheduler",
+                    daemon=True,
+                )
+                self._thread.start()
+            heappush(self._deadlines, (deadline, next(self._sequence), handle))
+            self._condition.notify()
+
+    def notify(self) -> None:
+        with self._condition:
+            self._condition.notify()
+
+    def _run(self) -> None:
+        while True:
+            due: KillHandle | None = None
+            with self._condition:
+                while due is None:
+                    while self._deadlines and not self._deadlines[0][2]._is_waiting():
+                        heappop(self._deadlines)
+                    if not self._deadlines:
+                        self._condition.wait()
+                        continue
+                    deadline, _sequence, handle = self._deadlines[0]
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        self._condition.wait(remaining)
+                        continue
+                    heappop(self._deadlines)
+                    if handle._claim_timeout():
+                        due = handle
+            due._start_action()
+
+
+_DEADLINE_SCHEDULER = _DeadlineScheduler()
+
+
 class KillHandle:
-    """A single statement deadline whose worker is always joined before reuse."""
+    """One centrally scheduled deadline with action threads only when fired."""
 
     def __init__(
         self,
@@ -25,87 +76,102 @@ class KillHandle:
         fallback_abort: Callable[[], None] | None,
         statement_done: Event | None,
         kill_grace_s: float,
+        scheduler: _DeadlineScheduler,
     ) -> None:
         self._factory = factory
         self._node = node
         self._database = database
         self._connection_id = connection_id
-        self._timeout_s = timeout_s
         self._statement_token = statement_token
         self._fallback_abort = fallback_abort
         self._statement_done = statement_done
         self._kill_grace_s = kill_grace_s
-        self._wake = Event()
         self._lock = Lock()
         self._action = "waiting"
         self._timed_out = False
         self._fired = False
         self._kill_error_type: str | None = None
         self._kill_finished = Event()
-        self._thread = Thread(
-            target=self._worker,
-            name=f"select-fuzz-kill-{node.role.value}-{connection_id}",
-            daemon=True,
-        )
-        self._thread.start()
+        self._completed = Event()
+        self._scheduler = scheduler
+        scheduler.schedule(self, time.monotonic() + timeout_s)
 
     def _require_token(self, statement_token: object | None) -> None:
         if statement_token is not None and statement_token is not self._statement_token:
             raise ValueError("statement token does not own this watchdog handle")
 
-    def _worker(self) -> None:
-        woke = self._wake.wait(self._timeout_s)
+    def _is_waiting(self) -> bool:
         with self._lock:
-            if self._action == "cancelled":
-                return
-            if self._action == "manual_kill":
-                pass
-            elif not woke and self._action == "waiting":
-                self._action = "timeout_kill"
-                self._timed_out = True
-            else:  # pragma: no cover - defensive state invariant
-                return
+            return self._action == "waiting"
+
+    def _claim_timeout(self) -> bool:
+        with self._lock:
+            if self._action != "waiting":
+                return False
+            self._action = "timeout_kill"
+            self._timed_out = True
             self._fired = True
-            manual_kill = self._action == "manual_kill"
-        kill_thread = Thread(
-            target=self._kill_query,
-            name=f"select-fuzz-kill-control-{self._connection_id}",
+            return True
+
+    def _start_action(self) -> None:
+        thread = Thread(
+            target=self._perform_action,
+            name=f"select-fuzz-kill-{self._node.role.value}-{self._connection_id}",
             daemon=True,
         )
-        kill_thread.start()
-        if self._fallback_abort is not None:
-            should_abort = manual_kill
-            if not manual_kill:
-                deadline = time.monotonic() + self._kill_grace_s
-                while True:
-                    if (
-                        self._statement_done is not None
-                        and self._statement_done.is_set()
-                    ):
-                        break
-                    with self._lock:
-                        kill_failed = (
-                            self._kill_finished.is_set()
-                            and self._kill_error_type is not None
-                        )
-                    if kill_failed or time.monotonic() >= deadline:
-                        should_abort = True
-                        break
-                    if self._statement_done is None:
-                        self._kill_finished.wait(
-                            min(0.01, max(0.0, deadline - time.monotonic()))
-                        )
-                    else:
-                        self._statement_done.wait(
-                            min(0.01, max(0.0, deadline - time.monotonic()))
-                        )
-            if should_abort:
-                if not self._abort_connection():
-                    self._kill_connection()
-        # Do not permit connection reuse until an in-flight KILL has completed:
-        # a delayed KILL QUERY could otherwise target the next statement on the
-        # same connection ID.
-        kill_thread.join()
+        try:
+            thread.start()
+        except BaseException as error:
+            with self._lock:
+                self._kill_error_type = type(error).__name__
+            self._completed.set()
+            raise
+
+    def _perform_action(self) -> None:
+        try:
+            with self._lock:
+                manual_kill = self._action == "manual_kill"
+            kill_thread = Thread(
+                target=self._kill_query,
+                name=f"select-fuzz-kill-control-{self._connection_id}",
+                daemon=True,
+            )
+            kill_thread.start()
+            if self._fallback_abort is not None:
+                should_abort = manual_kill
+                if not manual_kill:
+                    deadline = time.monotonic() + self._kill_grace_s
+                    while True:
+                        if (
+                            self._statement_done is not None
+                            and self._statement_done.is_set()
+                        ):
+                            break
+                        with self._lock:
+                            kill_failed = (
+                                self._kill_finished.is_set()
+                                and self._kill_error_type is not None
+                            )
+                        if kill_failed or time.monotonic() >= deadline:
+                            should_abort = True
+                            break
+                        if self._statement_done is None:
+                            self._kill_finished.wait(
+                                min(0.01, max(0.0, deadline - time.monotonic()))
+                            )
+                        else:
+                            self._statement_done.wait(
+                                min(0.01, max(0.0, deadline - time.monotonic()))
+                            )
+                if should_abort:
+                    if not self._abort_connection():
+                        self._kill_connection()
+            # Do not permit connection reuse until an in-flight KILL has completed:
+            # a delayed KILL QUERY could otherwise target the next statement on the
+            # same connection ID.
+            kill_thread.join()
+        finally:
+            self._completed.set()
 
     def _kill_query(self) -> None:
         try:
@@ -146,24 +212,33 @@ class KillHandle:
                     self._kill_error_type = type(error).__name__
 
     def cancel(self, *, statement_token: object | None = None) -> None:
-        """Cancel the deadline and synchronously join any in-flight KILL."""
+        """Cancel the deadline and wait for any already-fired KILL."""
 
         self._require_token(statement_token)
+        cancelled = False
         with self._lock:
             if self._action == "waiting":
                 self._action = "cancelled"
-                self._wake.set()
-        self._thread.join()
+                self._completed.set()
+                cancelled = True
+        if cancelled:
+            self._scheduler.notify()
+        self._completed.wait()
 
     def trigger(self, *, statement_token: object | None = None) -> None:
         """Abort now for a non-timeout reason such as a result-size ceiling."""
 
         self._require_token(statement_token)
+        should_start = False
         with self._lock:
             if self._action == "waiting":
                 self._action = "manual_kill"
-                self._wake.set()
-        self._thread.join()
+                self._fired = True
+                should_start = True
+        if should_start:
+            self._scheduler.notify()
+            self._start_action()
+        self._completed.wait()
 
     @property
     def timed_out(self) -> bool:
@@ -182,7 +257,7 @@ class KillHandle:
 
     @property
     def thread_alive(self) -> bool:
-        return self._thread.is_alive()
+        return not self._completed.is_set()
 
 
 class KillQueryWatchdog:
@@ -241,6 +316,7 @@ class KillQueryWatchdog:
             fallback_abort,
             statement_done,
             self._kill_grace_s,
+            _DEADLINE_SCHEDULER,
         )
 
 

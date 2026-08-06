@@ -7,6 +7,7 @@ import time
 import pytest
 
 from select_fuzz.config import NodeConfig, NodeRole
+import select_fuzz.execution.timeout as timeout_module
 from select_fuzz.execution.timeout import KillQueryWatchdog
 
 
@@ -131,6 +132,30 @@ def test_watchdog_cancellation_joins_before_connection_can_be_reused(
 
     time.sleep(0.07)
     assert factory.killed == []
+
+
+def test_watchdog_reuses_scheduler_instead_of_starting_a_thread_per_statement(
+    node: NodeConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _ControlFactory()
+    watchdog = KillQueryWatchdog(factory)
+    warmup = watchdog.arm(node, "sf_case_1", 41, 10)
+    warmup.cancel()
+    real_thread = timeout_module.Thread
+    started: list[str | None] = []
+
+    def recording_thread(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        started.append(kwargs.get("name") if isinstance(kwargs.get("name"), str) else None)
+        return real_thread(*args, **kwargs)
+
+    monkeypatch.setattr(timeout_module, "Thread", recording_thread)
+
+    for _ in range(20):
+        handle = watchdog.arm(node, "sf_case_1", 41, 10)
+        handle.cancel()
+
+    assert started == []
 
 
 def test_fallback_abort_uses_absolute_grace_even_when_control_kill_blocks(

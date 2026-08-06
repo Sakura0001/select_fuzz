@@ -11,6 +11,7 @@ from threading import Lock
 import time
 from typing import Any, Protocol
 
+from select_fuzz.config.models import MAX_FUZZ_READER_WORKERS
 from select_fuzz.execution.protocols import StopEventLike
 from select_fuzz.generation.query import (
     GeneratedQuery,
@@ -28,7 +29,6 @@ from select_fuzz.generation.query_grammar import (
 
 
 _GENERATION_WORKER_SWITCH_INTERVAL_SECONDS = 0.001
-_MAX_DIRECT_READER_CHANNELS = 256
 
 
 def _configure_generation_worker_scheduling() -> None:
@@ -378,10 +378,10 @@ class ProcessQueryPipeline:
             raise ValueError("reader_keys must not be empty")
         if len(reader_keys) != len(set(reader_keys)):
             raise ValueError("reader_keys must be unique")
-        if len(reader_keys) > _MAX_DIRECT_READER_CHANNELS:
+        if len(reader_keys) > MAX_FUZZ_READER_WORKERS:
             raise ValueError(
                 "direct query generation supports at most "
-                f"{_MAX_DIRECT_READER_CHANNELS} readers"
+                f"{MAX_FUZZ_READER_WORKERS} readers"
             )
         if any(
             not isinstance(database_ordinal, int)

@@ -20,6 +20,11 @@ def test_fuzz_requires_reader_count_divisible_by_three() -> None:
         FuzzConfig(reader_threads_per_database=10)
 
 
+def test_fuzz_rejects_more_than_256_query_generation_reader_channels() -> None:
+    with pytest.raises(ValueError, match="at most 256 total reader workers"):
+        FuzzConfig(databases=3, reader_threads_per_database=87)
+
+
 def test_fuzz_requires_at_least_fifty_columns_per_table() -> None:
     with pytest.raises(ValueError, match="greater than or equal to 50"):
         FuzzConfig(min_columns_per_table=49)

@@ -36,6 +36,7 @@ class RunMode(StrEnum):
 
 
 MAX_STATEMENT_TIMEOUT_SECONDS = 300.0
+MAX_FUZZ_READER_WORKERS = 256
 
 
 class NodeRole(StrEnum):
@@ -307,6 +308,13 @@ class FuzzConfig(StrictModel):
     def validate_fuzz_bounds(self) -> Self:
         if self.reader_threads_per_database % 3 != 0:
             raise ValueError("reader_threads_per_database must be divisible by 3")
+        total_reader_workers = self.databases * self.reader_threads_per_database
+        if total_reader_workers > MAX_FUZZ_READER_WORKERS:
+            raise ValueError(
+                "fuzz supports at most "
+                f"{MAX_FUZZ_READER_WORKERS} total reader workers; "
+                f"configured {total_reader_workers}"
+            )
         if self.batch_rows_min > self.batch_rows_max:
             raise ValueError("batch_rows_min must not exceed batch_rows_max")
         if self.delete_batch_rows_min > self.delete_batch_rows_max:

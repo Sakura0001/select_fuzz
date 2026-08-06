@@ -748,12 +748,18 @@ def test_replica_timeout_keeps_legacy_machine_event_text(tmp_path) -> None:  # t
         )
 
     assert "等待备节点同步超时" in str(captured.value)
+    failure_details = captured.value.failures[0]  # type: ignore[attr-defined]
+    assert len(failure_details) == 4
+    _ordinal, display_database, error_type, display_error = failure_details
+    assert error_type == "TimeoutError"
+    assert "等待备节点同步超时" in display_error
     events = read_jsonl(tmp_path / "events.jsonl")
     event = next(
         item for item in events if item["type"] == "fuzz_generation_failed"
     )
     failure = event["failures"][0]
     assert failure["error_type"] == "TimeoutError"
+    assert failure["database"] == display_database
     assert failure["error"] == (
         "replica synchronization timeout after 0.001 seconds; "
         f"database={failure['database']}; replication marker not visible"

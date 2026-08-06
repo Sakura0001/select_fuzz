@@ -99,7 +99,11 @@ def resolve_query_generator_processes(
     """Resolve 0=auto across readers while keeping process growth bounded."""
 
     available = max(1, cpu_count if cpu_count is not None else (os.cpu_count() or 1))
-    requested = min(available, 32) if configured == 0 else configured
+    if configured == 0:
+        latency_processes = (reader_workers + 3) // 4
+        requested = min(max(available, latency_processes), 32)
+    else:
+        requested = configured
     return max(1, min(requested, reader_workers))
 
 

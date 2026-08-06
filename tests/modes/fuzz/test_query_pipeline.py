@@ -498,5 +498,7 @@ def test_process_pipeline_replaces_schema_without_restarting_children() -> None:
 
 def test_auto_process_count_is_bounded_by_readers_cpu_and_config() -> None:
     assert resolve_query_generator_processes(0, reader_workers=144, cpu_count=64) == 32
+    assert resolve_query_generator_processes(0, reader_workers=72, cpu_count=10) == 18
+    assert resolve_query_generator_processes(0, reader_workers=144, cpu_count=4) == 32
     assert resolve_query_generator_processes(3, reader_workers=144, cpu_count=8) == 3
     assert resolve_query_generator_processes(20, reader_workers=12, cpu_count=8) == 12

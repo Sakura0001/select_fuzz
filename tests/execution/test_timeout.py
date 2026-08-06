@@ -164,6 +164,7 @@ def test_scheduler_survives_one_action_thread_start_failure(
 ) -> None:
     factory = _ControlFactory()
     scheduler = timeout_module._DeadlineScheduler()
+    first_abort_seen = Event()
     first = timeout_module.KillHandle(
         factory,
         node,
@@ -171,7 +172,7 @@ def test_scheduler_survives_one_action_thread_start_failure(
         41,
         0.05,
         object(),
-        None,
+        first_abort_seen.set,
         None,
         0.01,
         scheduler,
@@ -206,8 +207,49 @@ def test_scheduler_survives_one_action_thread_start_failure(
     second.cancel()
 
     assert first.kill_error_type == "RuntimeError"
+    assert first_abort_seen.is_set()
     assert second.timed_out is True
     assert factory.killed == ["KILL QUERY 42"]
+
+
+def test_watchdog_aborts_when_control_kill_thread_cannot_start(
+    node: NodeConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _ControlFactory()
+    scheduler = timeout_module._DeadlineScheduler()
+    abort_seen = Event()
+    real_thread = timeout_module.Thread
+
+    class _FailStartThread:
+        def start(self) -> None:
+            raise RuntimeError("injected control kill thread start failure")
+
+    def thread_factory(*args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+        if kwargs.get("name") == "select-fuzz-kill-control-41":
+            return _FailStartThread()
+        return real_thread(*args, **kwargs)
+
+    monkeypatch.setattr(timeout_module, "Thread", thread_factory)
+    handle = timeout_module.KillHandle(
+        factory,
+        node,
+        "sf_case_1",
+        41,
+        0.01,
+        object(),
+        abort_seen.set,
+        None,
+        0.01,
+        scheduler,
+    )
+
+    assert abort_seen.wait(1)
+    handle.cancel()
+
+    assert handle.timed_out is True
+    assert handle.kill_error_type == "RuntimeError"
+    assert factory.killed == []
 
 
 def test_scheduler_compacts_cancelled_handles_behind_a_live_deadline(

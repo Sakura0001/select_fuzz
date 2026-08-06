@@ -144,19 +144,30 @@ class KillHandle:
         except BaseException as error:
             with self._lock:
                 self._kill_error_type = type(error).__name__
-            self._completed.set()
+            try:
+                if self._fallback_abort is not None:
+                    self._abort_connection()
+            finally:
+                self._completed.set()
             raise
 
     def _perform_action(self) -> None:
         try:
             with self._lock:
                 manual_kill = self._action == "manual_kill"
-            kill_thread = Thread(
-                target=self._kill_query,
-                name=f"select-fuzz-kill-control-{self._connection_id}",
-                daemon=True,
-            )
-            kill_thread.start()
+            kill_thread: Thread | None = None
+            try:
+                candidate = Thread(
+                    target=self._kill_query,
+                    name=f"select-fuzz-kill-control-{self._connection_id}",
+                    daemon=True,
+                )
+                candidate.start()
+                kill_thread = candidate
+            except BaseException as error:
+                with self._lock:
+                    self._kill_error_type = type(error).__name__
+                self._kill_finished.set()
             if self._fallback_abort is not None:
                 should_abort = manual_kill
                 if not manual_kill:
@@ -189,7 +200,8 @@ class KillHandle:
             # Do not permit connection reuse until an in-flight KILL has completed:
             # a delayed KILL QUERY could otherwise target the next statement on the
             # same connection ID.
-            kill_thread.join()
+            if kill_thread is not None:
+                kill_thread.join()
         finally:
             self._completed.set()
 

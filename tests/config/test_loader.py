@@ -159,6 +159,20 @@ def test_fuzz_schema_refresh_interval_can_be_disabled_but_not_negative() -> None
         FuzzConfig(schema_refresh_interval_seconds=-1)
 
 
+def test_fuzz_initial_rows_accepts_twenty_but_rejects_nineteen() -> None:
+    assert FuzzConfig(
+        initial_tables=1,
+        initial_rows_per_table=20,
+        max_rows_per_database=100,
+    ).initial_rows_per_table == 20
+    with pytest.raises(ValidationError):
+        FuzzConfig(
+            initial_tables=1,
+            initial_rows_per_table=19,
+            max_rows_per_database=100,
+        )
+
+
 def test_fuzz_rejects_multiple_coordinator_workers(tmp_path: Path) -> None:
     with pytest.raises(ConfigLoadError, match="one coordinator"):
         load_config(_write_config(tmp_path, _config_data()), cli={"mode": "fuzz", "workers": 2})

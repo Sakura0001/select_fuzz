@@ -274,7 +274,7 @@ class FuzzConfig(StrictModel):
     reader_threads_per_database: int = Field(default=6, ge=3, le=192)
     max_total_connections: int = Field(default=1024, ge=1, le=4096)
     initial_tables: int = Field(default=4, ge=1, le=16)
-    initial_rows_per_table: int = Field(default=10_000, ge=100)
+    initial_rows_per_table: int = Field(default=10_000, ge=20)
     max_rows_per_database: int = Field(default=10_000_000, ge=100)
     min_columns_per_table: int = Field(default=200, ge=50, le=500)
     max_columns_per_table: int = Field(default=500, ge=50, le=500)

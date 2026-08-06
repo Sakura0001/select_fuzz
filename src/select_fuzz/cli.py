@@ -180,7 +180,11 @@ def run_command(
             timer.start()
         summary = factory(loaded, artifacts).run(request, stop_event)
     except Exception as error:
-        typer.echo(f"run failed: {type(error).__name__}: {error}", err=True)
+        if selected_mode is RunMode.FUZZ:
+            message = f"运行失败：{type(error).__name__}：{error}"
+        else:
+            message = f"run failed: {type(error).__name__}: {error}"
+        typer.echo(message, err=True)
         raise typer.Exit(code=1) from None
     finally:
         if timer is not None:

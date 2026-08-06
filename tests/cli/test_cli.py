@@ -171,6 +171,43 @@ def test_run_cli_prints_runner_failure_without_traceback(
     assert "Traceback" not in result.output
 
 
+def test_fuzz_run_cli_prints_runner_failure_in_chinese(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    class FailingRunner:
+        def run(self, request: RunRequest, stop_event: Event) -> RunSummary:
+            raise RuntimeError("must-not-leak-database-error-detail")
+
+    monkeypatch.setitem(
+        MODE_RUNNERS,
+        "fuzz",
+        lambda config, root: FailingRunner(),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "--mode",
+            "fuzz",
+            "--config",
+            str(PROJECT_ROOT / "config" / "example.yaml"),
+            "--rounds",
+            "1",
+            "--artifacts",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert (
+        "运行失败：RuntimeError：must-not-leak-database-error-detail"
+        in result.output
+    )
+    assert "Traceback" not in result.output
+
+
 def test_cli_rejects_unknown_mode_without_exposing_traceback(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,

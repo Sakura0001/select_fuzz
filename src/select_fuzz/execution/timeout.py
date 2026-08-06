@@ -5,12 +5,15 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable
-from heapq import heappop, heappush
+from heapq import heapify, heappop, heappush
 from itertools import count
 from threading import Condition, Event, Lock, Thread
 
 from select_fuzz.config import NodeConfig
 from select_fuzz.execution.protocols import ControlConnectionFactory
+
+
+_DEADLINE_COMPACT_INTERVAL = 256
 
 
 class _DeadlineScheduler:
@@ -21,6 +24,7 @@ class _DeadlineScheduler:
         self._deadlines: list[tuple[float, int, KillHandle]] = []
         self._sequence = count()
         self._thread: Thread | None = None
+        self._stale_notifications = 0
 
     def schedule(self, handle: KillHandle, deadline: float) -> None:
         with self._condition:
@@ -36,6 +40,13 @@ class _DeadlineScheduler:
 
     def notify(self) -> None:
         with self._condition:
+            self._stale_notifications += 1
+            if self._stale_notifications >= _DEADLINE_COMPACT_INTERVAL:
+                self._deadlines = [
+                    item for item in self._deadlines if item[2]._is_waiting()
+                ]
+                heapify(self._deadlines)
+                self._stale_notifications = 0
             self._condition.notify()
 
     def _run(self) -> None:
@@ -56,7 +67,13 @@ class _DeadlineScheduler:
                     heappop(self._deadlines)
                     if handle._claim_timeout():
                         due = handle
-            due._start_action()
+            try:
+                due._start_action()
+            except BaseException:
+                # One action thread failing to start must not disable deadlines
+                # for every other statement in this process. The handle records
+                # its own diagnostic and completion state in _start_action().
+                continue
 
 
 _DEADLINE_SCHEDULER = _DeadlineScheduler()
@@ -114,12 +131,15 @@ class KillHandle:
             return True
 
     def _start_action(self) -> None:
-        thread = Thread(
-            target=self._perform_action,
-            name=f"select-fuzz-kill-{self._node.role.value}-{self._connection_id}",
-            daemon=True,
-        )
         try:
+            thread = Thread(
+                target=self._perform_action,
+                name=(
+                    f"select-fuzz-kill-{self._node.role.value}-"
+                    f"{self._connection_id}"
+                ),
+                daemon=True,
+            )
             thread.start()
         except BaseException as error:
             with self._lock:

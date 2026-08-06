@@ -17,7 +17,67 @@ from select_fuzz.generation.query_grammar import (
 )
 from select_fuzz.modes.fuzz.materialization import FuzzDatabaseSchema, fuzz_database_name
 from select_fuzz.modes.fuzz.query_pipeline import GenerationOutcome, InlineQueryPipeline
-from select_fuzz.modes.fuzz.service import FuzzModeService, _tag_worker_session
+from select_fuzz.modes.fuzz.service import (
+    FuzzModeService,
+    _fair_worker_thread_scheduling,
+    _tag_worker_session,
+)
+
+
+def test_fair_worker_scheduling_is_safe_for_non_lifo_overlap(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    current = [0.005]
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.service.sys.getswitchinterval",
+        lambda: current[0],
+    )
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.service.sys.setswitchinterval",
+        lambda value: current.__setitem__(0, value),
+    )
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.service._fair_scheduling_users",
+        0,
+    )
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.service._fair_scheduling_baseline",
+        None,
+    )
+    first = _fair_worker_thread_scheduling()
+    second = _fair_worker_thread_scheduling()
+
+    first.__enter__()
+    second.__enter__()
+    first.__exit__(None, None, None)
+    assert current[0] == 0.001
+    second.__exit__(None, None, None)
+
+    assert current[0] == 0.005
+
+
+def test_fair_worker_scheduling_restores_after_exception(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    current = [0.005]
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.service.sys.getswitchinterval",
+        lambda: current[0],
+    )
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.service.sys.setswitchinterval",
+        lambda value: current.__setitem__(0, value),
+    )
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.service._fair_scheduling_users",
+        0,
+    )
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.service._fair_scheduling_baseline",
+        None,
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with _fair_worker_thread_scheduling():
+            raise RuntimeError("boom")
+
+    assert current[0] == 0.005
 
 
 def _schema(database: str) -> FuzzDatabaseSchema:

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import random
+import sys
 from threading import Event, Lock, Thread
 import time
-from typing import Callable
+from typing import Callable, Iterator
 
 from select_fuzz.artifacts import JsonlWriter
 from select_fuzz.config import FuzzConfig, NodeConfig
@@ -35,6 +37,35 @@ from select_fuzz.modes.fuzz.query_pipeline import (
 from select_fuzz.modes.fuzz.sql_log import FuzzSqlRecorder
 from select_fuzz.modes.fuzz.telemetry import FuzzStageTelemetry
 from select_fuzz.service import RunSummary
+
+
+_FUZZ_THREAD_SWITCH_INTERVAL_SECONDS = 0.001
+_fair_scheduling_lock = Lock()
+_fair_scheduling_users = 0
+_fair_scheduling_baseline: float | None = None
+
+
+@contextmanager
+def _fair_worker_thread_scheduling() -> Iterator[None]:
+    global _fair_scheduling_baseline, _fair_scheduling_users
+    with _fair_scheduling_lock:
+        if _fair_scheduling_users == 0:
+            baseline = sys.getswitchinterval()
+            sys.setswitchinterval(
+                min(baseline, _FUZZ_THREAD_SWITCH_INTERVAL_SECONDS)
+            )
+            _fair_scheduling_baseline = baseline
+        _fair_scheduling_users += 1
+    try:
+        yield
+    finally:
+        with _fair_scheduling_lock:
+            _fair_scheduling_users -= 1
+            if _fair_scheduling_users == 0:
+                restore_interval = _fair_scheduling_baseline
+                _fair_scheduling_baseline = None
+                if restore_interval is not None:
+                    sys.setswitchinterval(restore_interval)
 
 
 def _now() -> str:
@@ -440,7 +471,7 @@ class FuzzModeService:
         generation: int,
     ) -> tuple[_GenerationDatabase, ...]:
         futures: list[tuple[int, str, int, Future[FuzzDatabaseSchema]]] = []
-        with ThreadPoolExecutor(
+        with _fair_worker_thread_scheduling(), ThreadPoolExecutor(
             max_workers=self._config.databases,
             thread_name_prefix=f"sf-fuzz-build-g{generation}",
         ) as pool:

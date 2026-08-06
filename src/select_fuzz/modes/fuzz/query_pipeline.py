@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import multiprocessing
 import os
 from queue import Empty
+import sys
 from threading import Lock
 import time
 from typing import Any, Protocol
@@ -24,6 +25,17 @@ from select_fuzz.generation.query_grammar import (
     GrammarQueryGenerator,
     GrammarSchema,
 )
+
+
+_GENERATION_WORKER_SWITCH_INTERVAL_SECONDS = 0.001
+_MAX_DIRECT_READER_CHANNELS = 256
+
+
+def _configure_generation_worker_scheduling() -> None:
+    current = sys.getswitchinterval()
+    sys.setswitchinterval(
+        min(current, _GENERATION_WORKER_SWITCH_INTERVAL_SECONDS)
+    )
 
 
 class QueryGenerationStopped(RuntimeError):
@@ -263,6 +275,7 @@ def _generation_worker(
     stop_event: Any,
     max_tables_per_query_block: int,
 ) -> None:
+    _configure_generation_worker_scheduling()
     generator = _production_query_generator(max_tables_per_query_block)
     contexts: dict[int, QueryGenerationContext] = {}
     while not stop_event.is_set():
@@ -365,6 +378,11 @@ class ProcessQueryPipeline:
             raise ValueError("reader_keys must not be empty")
         if len(reader_keys) != len(set(reader_keys)):
             raise ValueError("reader_keys must be unique")
+        if len(reader_keys) > _MAX_DIRECT_READER_CHANNELS:
+            raise ValueError(
+                "direct query generation supports at most "
+                f"{_MAX_DIRECT_READER_CHANNELS} readers"
+            )
         if any(
             not isinstance(database_ordinal, int)
             or isinstance(database_ordinal, bool)
@@ -393,10 +411,15 @@ class ProcessQueryPipeline:
         self._registered: set[int] = set()
         self._next_job_id = 1
         self._lock = Lock()
+        self._lifecycle_lock = Lock()
         self._started = False
         self._closed = False
 
     def start(self) -> None:
+        with self._lifecycle_lock:
+            self._start()
+
+    def _start(self) -> None:
         with self._lock:
             if self._closed:
                 raise RuntimeError("query generation pipeline is closed")
@@ -404,11 +427,11 @@ class ProcessQueryPipeline:
                 return
         try:
             self._stop_event = self._context.Event()
-            self._response_queues = {
-                key: self._context.Queue() for key in self._reader_keys
-            }
+            for key in self._reader_keys:
+                self._response_queues[key] = self._context.Queue()
             for ordinal in range(self._process_count):
                 request_queue = self._context.Queue()
+                self._request_queues.append(request_queue)
                 worker_response_queues = {
                     key: self._response_queues[key]
                     for key, process_index in self._reader_process_indices.items()
@@ -425,13 +448,7 @@ class ProcessQueryPipeline:
                     name=f"sf-query-generator-{ordinal}",
                     daemon=True,
                 )
-                try:
-                    process.start()
-                except BaseException:
-                    request_queue.close()
-                    request_queue.join_thread()
-                    raise
-                self._request_queues.append(request_queue)
+                process.start()
                 self._processes.append(process)
         except BaseException:
             self._rollback_start()
@@ -462,6 +479,7 @@ class ProcessQueryPipeline:
         self._request_queues.clear()
         self._response_queues.clear()
         self._processes.clear()
+        self._stop_event = None
 
     def register_database(
         self,
@@ -555,12 +573,17 @@ class ProcessQueryPipeline:
         return sum(process.is_alive() for process in self._processes)
 
     def close(self) -> None:
+        with self._lifecycle_lock:
+            self._close()
+
+    def _close(self) -> None:
         with self._lock:
             if self._closed:
                 return
             self._closed = True
             stop_event = self._stop_event
             queues = tuple(self._request_queues)
+            response_queues = tuple(self._response_queues.values())
             processes = tuple(self._processes)
         if stop_event is not None:
             stop_event.set()
@@ -584,12 +607,19 @@ class ProcessQueryPipeline:
                 request_queue.join_thread()
             except Exception:
                 pass
-        for response_queue in self._response_queues.values():
+        for response_queue in response_queues:
             try:
                 response_queue.close()
                 response_queue.join_thread()
             except Exception:
                 pass
+        with self._lock:
+            self._request_queues.clear()
+            self._response_queues.clear()
+            self._processes.clear()
+            self._registered.clear()
+            self._stop_event = None
+            self._started = False
 
 
 __all__ = [

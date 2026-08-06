@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Event, Thread
 
 import pytest
 
@@ -20,10 +20,27 @@ from select_fuzz.generation.query_grammar import (
     GrammarTable,
 )
 from select_fuzz.modes.fuzz.query_pipeline import (
+    _configure_generation_worker_scheduling,
     InlineQueryPipeline,
     ProcessQueryPipeline,
     resolve_query_generator_processes,
 )
+
+
+def test_generation_worker_uses_fair_gil_switch_interval(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    applied: list[float] = []
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.query_pipeline.sys.getswitchinterval",
+        lambda: 0.005,
+    )
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.query_pipeline.sys.setswitchinterval",
+        applied.append,
+    )
+
+    _configure_generation_worker_scheduling()
+
+    assert applied == [0.001]
 
 
 def _schema() -> GrammarSchema:
@@ -143,6 +160,37 @@ class _FailingSpawnContext:
         return process
 
 
+class _FailingQueueContext(_FailingSpawnContext):
+    def __init__(self, *, fail_at: int) -> None:
+        super().__init__()
+        self._fail_at = fail_at
+        self._queue_attempts = 0
+
+    def Queue(self) -> _RollbackQueue:  # noqa: N802
+        self._queue_attempts += 1
+        if self._queue_attempts == self._fail_at:
+            raise RuntimeError("injected queue construction failure")
+        return super().Queue()
+
+
+class _FailingProcessConstructionContext(_FailingSpawnContext):
+    def Process(self, **kwargs: object) -> _RollbackProcess:  # noqa: N802
+        del kwargs
+        raise RuntimeError("injected process construction failure")
+
+
+class _BlockingStartContext(_FailingSpawnContext):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_entered = Event()
+        self.allow_start = Event()
+
+    def Event(self) -> _RollbackEvent:  # noqa: N802
+        self.start_entered.set()
+        assert self.allow_start.wait(2)
+        return _RollbackEvent()
+
+
 def _production_generator() -> WeightedQueryGenerator:
     return WeightedQueryGenerator(
         (
@@ -235,6 +283,10 @@ def test_process_results_use_one_direct_response_queue_per_reader() -> None:
     finally:
         pipeline.close()
 
+    assert pipeline._request_queues == []  # type: ignore[attr-defined]
+    assert pipeline._response_queues == {}  # type: ignore[attr-defined]
+    assert pipeline._processes == []  # type: ignore[attr-defined]
+
 
 def test_process_pipeline_rolls_back_partial_start_failure() -> None:
     context = _FailingSpawnContext()
@@ -252,6 +304,76 @@ def test_process_pipeline_rolls_back_partial_start_failure() -> None:
     assert context.processes[0].joined
     assert all(queue.closed and queue.joined for queue in context.queues)
     assert pipeline.alive_processes == 0
+
+
+def test_process_pipeline_rolls_back_partial_response_queue_construction() -> None:
+    context = _FailingQueueContext(fail_at=2)
+    pipeline = ProcessQueryPipeline(
+        process_count=1,
+        max_tables_per_query_block=1,
+        reader_keys=((0, 0), (0, 1)),
+    )
+    pipeline._context = context  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="injected queue construction failure"):
+        pipeline.start()
+
+    assert len(context.queues) == 1
+    assert context.queues[0].closed and context.queues[0].joined
+
+
+def test_process_pipeline_closes_request_queue_if_process_construction_fails() -> None:
+    context = _FailingProcessConstructionContext()
+    pipeline = ProcessQueryPipeline(
+        process_count=1,
+        max_tables_per_query_block=1,
+        reader_keys=((0, 0),),
+    )
+    pipeline._context = context  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="injected process construction failure"):
+        pipeline.start()
+
+    assert len(context.queues) == 2
+    assert all(queue.closed and queue.joined for queue in context.queues)
+
+
+def test_process_pipeline_serializes_start_and_close() -> None:
+    context = _BlockingStartContext()
+    pipeline = ProcessQueryPipeline(
+        process_count=1,
+        max_tables_per_query_block=1,
+        reader_keys=((0, 0),),
+    )
+    pipeline._context = context  # type: ignore[attr-defined]
+    close_done = Event()
+
+    start_thread = Thread(target=pipeline.start)
+    close_thread = Thread(target=lambda: (pipeline.close(), close_done.set()))
+    start_thread.start()
+    assert context.start_entered.wait(2)
+    close_thread.start()
+
+    close_was_blocked = not close_done.wait(0.05)
+    context.allow_start.set()
+    start_thread.join(2)
+    close_thread.join(2)
+
+    assert close_was_blocked
+    assert not start_thread.is_alive()
+    assert not close_thread.is_alive()
+    assert close_done.is_set()
+    assert all(process.terminated and process.joined for process in context.processes)
+    assert all(queue.closed and queue.joined for queue in context.queues)
+
+
+def test_process_pipeline_rejects_unbounded_direct_reader_channels() -> None:
+    with pytest.raises(ValueError, match="at most 256"):
+        ProcessQueryPipeline(
+            process_count=1,
+            max_tables_per_query_block=1,
+            reader_keys=tuple((0, reader_id) for reader_id in range(257)),
+        )
 
 
 def test_process_pipeline_broadcasts_schema_and_balances_one_database_readers() -> None:

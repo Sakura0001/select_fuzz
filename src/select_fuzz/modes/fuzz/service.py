@@ -471,7 +471,7 @@ class FuzzModeService:
         generation: int,
     ) -> tuple[_GenerationDatabase, ...]:
         futures: list[tuple[int, str, int, Future[FuzzDatabaseSchema]]] = []
-        with _fair_worker_thread_scheduling(), ThreadPoolExecutor(
+        with ThreadPoolExecutor(
             max_workers=self._config.databases,
             thread_name_prefix=f"sf-fuzz-build-g{generation}",
         ) as pool:
@@ -648,7 +648,7 @@ class FuzzModeService:
             + self._config.reader_threads_per_database
         )
         worker_futures: list[Future[None]] = []
-        with ThreadPoolExecutor(
+        with _fair_worker_thread_scheduling(), ThreadPoolExecutor(
             max_workers=workers_per_database * len(schemas),
             thread_name_prefix=f"sf-fuzz-g{generation}",
         ) as pool:

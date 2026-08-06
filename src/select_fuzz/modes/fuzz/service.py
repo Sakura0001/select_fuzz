@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -33,6 +34,7 @@ from select_fuzz.modes.fuzz.query_pipeline import (
     QueryGenerationPipeline,
     QueryGenerationProcessDied,
     QueryGenerationStopped,
+    READER_QUERY_PREFETCH_DEPTH,
 )
 from select_fuzz.modes.fuzz.sql_log import FuzzSqlRecorder
 from select_fuzz.modes.fuzz.telemetry import FuzzStageTelemetry
@@ -866,15 +868,19 @@ class FuzzModeService:
                 query_seed,
             )
 
-        current_ticket: GenerationTicket | None
+        pending_tickets: deque[tuple[GenerationTicket, int]] = deque()
         current_query: GeneratedQuery | None
         if prepared is None:
-            current_ticket, current_seed = submit_next()
             current_query = None
         else:
-            current_ticket = None
             current_seed = prepared.seed
             current_query = prepared.query
+
+        def refill_prefetch() -> None:
+            while len(pending_tickets) < READER_QUERY_PREFETCH_DEPTH:
+                pending_tickets.append(submit_next())
+
+        refill_prefetch()
         while not stop_event.is_set():
             try:
                 self._telemetry.set_stage(worker_key, "connecting")
@@ -896,9 +902,8 @@ class FuzzModeService:
                             "waiting_for_generated_sql",
                         )
                         if current_query is None:
-                            assert current_ticket is not None
+                            current_ticket, current_seed = pending_tickets.popleft()
                             outcome = current_ticket.result(stop_event)
-                            current_ticket = None
                             self._telemetry.observe(
                                 "generation_compute_ns",
                                 outcome.compute_ns,
@@ -918,13 +923,13 @@ class FuzzModeService:
                                     None,
                                     outcome.error_type or CandidateRejected.__name__,
                                 )
-                                current_ticket, current_seed = submit_next()
+                                refill_prefetch()
                                 continue
                             query = outcome.query
                         else:
                             query = current_query
                             current_query = None
-                        next_ticket, next_seed = submit_next()
+                        refill_prefetch()
                         self._record_query_sql(
                             schema.database,
                             f"reader-{endpoint}",
@@ -951,7 +956,6 @@ class FuzzModeService:
                             result.fetch_elapsed_ns,
                         )
                         self._telemetry.observe("read_total_ns", result.elapsed_ns)
-                        current_ticket, current_seed = next_ticket, next_seed
                         if result.stopped:
                             break
                         if result.success:

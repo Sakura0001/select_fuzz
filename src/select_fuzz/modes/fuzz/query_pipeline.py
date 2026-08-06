@@ -29,6 +29,7 @@ from select_fuzz.generation.query_grammar import (
 
 
 _GENERATION_WORKER_SWITCH_INTERVAL_SECONDS = 0.001
+READER_QUERY_PREFETCH_DEPTH = 2
 
 
 def _configure_generation_worker_scheduling() -> None:
@@ -137,7 +138,7 @@ class InlineQueryPipeline:
     def __init__(self, generator: QueryGenerator) -> None:
         self._generator = generator
         self._schemas: dict[int, QueryGenerationContext] = {}
-        self._pending: set[tuple[int, int]] = set()
+        self._pending: dict[tuple[int, int], int] = {}
         self._lock = Lock()
         self._closed = False
 
@@ -188,9 +189,10 @@ class InlineQueryPipeline:
             context = self._schemas.get(database_ordinal)
             if context is None:
                 raise KeyError(f"database ordinal is not registered: {database_ordinal}")
-            if key in self._pending:
-                raise RuntimeError("reader already has an outstanding generation request")
-            self._pending.add(key)
+            pending = self._pending.get(key, 0)
+            if pending >= READER_QUERY_PREFETCH_DEPTH:
+                raise RuntimeError("reader has too many outstanding generation requests")
+            self._pending[key] = pending + 1
         started_ns = time.monotonic_ns()
         try:
             query = self._generator.generate(context, seed=seed)
@@ -214,10 +216,15 @@ class InlineQueryPipeline:
 
     def _release(self, key: tuple[int, int]) -> None:
         with self._lock:
-            self._pending.discard(key)
+            pending = self._pending.get(key, 0)
+            if pending <= 1:
+                self._pending.pop(key, None)
+            else:
+                self._pending[key] = pending - 1
 
     def cancel_reader(self, database_ordinal: int, reader_id: int) -> None:
-        self._release((database_ordinal, reader_id))
+        with self._lock:
+            self._pending.pop((database_ordinal, reader_id), None)
 
     def close(self) -> None:
         with self._lock:
@@ -407,7 +414,7 @@ class ProcessQueryPipeline:
         self._response_queues: dict[tuple[int, int], Any] = {}
         self._processes: list[Any] = []
         self._stop_event: Any | None = None
-        self._pending_readers: set[tuple[int, int]] = set()
+        self._pending_readers: dict[tuple[int, int], int] = {}
         self._registered: set[int] = set()
         self._next_job_id = 1
         self._lock = Lock()
@@ -528,11 +535,12 @@ class ProcessQueryPipeline:
                 raise KeyError(f"database ordinal is not registered: {database_ordinal}")
             if key not in self._reader_process_indices:
                 raise KeyError(f"reader is not configured: {key}")
-            if key in self._pending_readers:
-                raise RuntimeError("reader already has an outstanding generation request")
+            pending = self._pending_readers.get(key, 0)
+            if pending >= READER_QUERY_PREFETCH_DEPTH:
+                raise RuntimeError("reader has too many outstanding generation requests")
             job_id = self._next_job_id
             self._next_job_id += 1
-            self._pending_readers.add(key)
+            self._pending_readers[key] = pending + 1
             queue_index = self._reader_process_indices[key]
             response_queue = self._response_queues[key]
         self._request_queues[queue_index].put(
@@ -563,10 +571,15 @@ class ProcessQueryPipeline:
 
     def release_reader(self, key: tuple[int, int]) -> None:
         with self._lock:
-            self._pending_readers.discard(key)
+            pending = self._pending_readers.get(key, 0)
+            if pending <= 1:
+                self._pending_readers.pop(key, None)
+            else:
+                self._pending_readers[key] = pending - 1
 
     def cancel_reader(self, database_ordinal: int, reader_id: int) -> None:
-        self.release_reader((database_ordinal, reader_id))
+        with self._lock:
+            self._pending_readers.pop((database_ordinal, reader_id), None)
 
     @property
     def alive_processes(self) -> int:
@@ -630,5 +643,6 @@ __all__ = [
     "QueryGenerationPipeline",
     "QueryGenerationProcessDied",
     "QueryGenerationStopped",
+    "READER_QUERY_PREFETCH_DEPTH",
     "resolve_query_generator_processes",
 ]

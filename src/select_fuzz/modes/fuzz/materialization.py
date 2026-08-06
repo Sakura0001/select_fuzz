@@ -119,11 +119,18 @@ class FuzzMaterializer:
                         cursor.close()
                 if rows == ((0,),):
                     return
+                last_error = None
             except Exception as error:
                 last_error = error
             self._sleeper(0.1)
-        error_name = "unknown" if last_error is None else type(last_error).__name__
-        raise TimeoutError(f"replica did not observe initial fuzz marker: {error_name}")
+        detail = "replication marker not visible"
+        if last_error is not None:
+            detail = f"last probe error={type(last_error).__name__}: {last_error}"
+        raise TimeoutError(
+            "replica synchronization timeout after "
+            f"{self._replica_sync_timeout_seconds:g} seconds; "
+            f"database={database}; {detail}"
+        )
 
 
 def fuzz_database_name(run_id: str, ordinal: int, *, generation: int = 0) -> str:

@@ -151,11 +151,12 @@ _GenerationFailure = tuple[int, str, str, str]
 class _GenerationBuildError(RuntimeError):
     def __init__(self, failures: tuple[_GenerationFailure, ...]) -> None:
         self.failures = failures
-        rendered = ", ".join(
-            f"database[{ordinal}]={database} {error_type}: {error_message}"
+        rendered = "；".join(
+            f"数据库[{ordinal}]={database}，异常类型={error_type}，"
+            f"原始错误={error_message}"
             for ordinal, database, error_type, error_message in failures
         )
-        super().__init__(f"fuzz generation build failed: {rendered}")
+        super().__init__(f"fuzz 批次创建失败：{rendered}")
 
 
 class _GenerationStop:

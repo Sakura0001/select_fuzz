@@ -29,7 +29,7 @@ from select_fuzz.generation.query_grammar import (
 
 
 _GENERATION_WORKER_SWITCH_INTERVAL_SECONDS = 0.001
-READER_QUERY_PREFETCH_DEPTH = 2
+READER_QUERY_PREFETCH_DEPTH = 3
 
 
 def _configure_generation_worker_scheduling() -> None:

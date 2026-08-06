@@ -410,7 +410,7 @@ def test_process_pipeline_broadcasts_schema_and_balances_one_database_readers() 
     assert [len(queue.messages) for queue in queues] == [1, 1, 1, 1]
 
 
-def test_pipeline_allows_two_bounded_prefetches_per_reader() -> None:
+def test_pipeline_allows_three_bounded_prefetches_per_reader() -> None:
     pipeline = ProcessQueryPipeline(
         process_count=1,
         max_tables_per_query_block=1,
@@ -421,16 +421,18 @@ def test_pipeline_allows_two_bounded_prefetches_per_reader() -> None:
     pipeline.register_database(0, "sf_f_case", _schema())
     first = pipeline.submit(0, 2, 0, seed=1)
     second = pipeline.submit(0, 2, 1, seed=2)
+    third = pipeline.submit(0, 2, 2, seed=3)
 
     try:
-        pipeline.submit(0, 2, 2, seed=3)
+        pipeline.submit(0, 2, 3, seed=4)
     except RuntimeError as error:
         assert "outstanding" in str(error)
     else:  # pragma: no cover - assertion branch
-        raise AssertionError("third outstanding generation request was accepted")
+        raise AssertionError("fourth outstanding generation request was accepted")
 
     first.result(Event())
     second.result(Event())
+    third.result(Event())
     pipeline.close()
 
 

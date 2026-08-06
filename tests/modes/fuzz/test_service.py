@@ -447,7 +447,7 @@ def test_each_database_starts_its_own_1_to_2_reader_pool(tmp_path) -> None:  # t
     assert sum(endpoint == "primary-write" for endpoint, _ in worker_calls) == 4
 
 
-def test_reader_prefetches_two_queries_before_executing_current(
+def test_reader_prefetches_three_queries_before_executing_current(
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     stop_event = Event()
@@ -490,8 +490,16 @@ def test_reader_prefetches_two_queries_before_executing_current(
     first_result = pipeline.events.index(("result", 0, 0))
     next_submit = pipeline.events.index(("submit", 0, 0, 1))
     second_next_submit = pipeline.events.index(("submit", 0, 0, 2))
+    third_next_submit = pipeline.events.index(("submit", 0, 0, 3))
     execute = pipeline.events.index(("execute", "SELECT value FROM fuzz_t0"))
-    assert first_submit < next_submit < first_result < second_next_submit < execute
+    assert (
+        first_submit
+        < next_submit
+        < second_next_submit
+        < first_result
+        < third_next_submit
+        < execute
+    )
 
 
 def test_schema_refresh_stops_old_workers_before_building_the_next_batch(

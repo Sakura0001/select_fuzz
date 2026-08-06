@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import random
+import sys
 from threading import Event, Lock, Thread
 import time
-from typing import Callable
+from typing import Callable, Iterator
 
 from select_fuzz.artifacts import JsonlWriter
 from select_fuzz.config import FuzzConfig, NodeConfig
@@ -35,6 +37,20 @@ from select_fuzz.modes.fuzz.query_pipeline import (
 from select_fuzz.modes.fuzz.sql_log import FuzzSqlRecorder
 from select_fuzz.modes.fuzz.telemetry import FuzzStageTelemetry
 from select_fuzz.service import RunSummary
+
+
+_FUZZ_THREAD_SWITCH_INTERVAL_SECONDS = 0.001
+
+
+@contextmanager
+def _fair_worker_thread_scheduling() -> Iterator[None]:
+    previous = sys.getswitchinterval()
+    target = min(previous, _FUZZ_THREAD_SWITCH_INTERVAL_SECONDS)
+    sys.setswitchinterval(target)
+    try:
+        yield
+    finally:
+        sys.setswitchinterval(previous)
 
 
 def _now() -> str:
@@ -617,7 +633,7 @@ class FuzzModeService:
             + self._config.reader_threads_per_database
         )
         worker_futures: list[Future[None]] = []
-        with ThreadPoolExecutor(
+        with _fair_worker_thread_scheduling(), ThreadPoolExecutor(
             max_workers=workers_per_database * len(schemas),
             thread_name_prefix=f"sf-fuzz-g{generation}",
         ) as pool:

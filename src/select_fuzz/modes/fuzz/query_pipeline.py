@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import multiprocessing
 import os
 from queue import Empty
-from threading import Lock
+from threading import Event, Lock, Thread
 import time
 from typing import Any, Protocol
 
@@ -306,23 +306,25 @@ class _ProcessTicket:
         broker: ProcessQueryPipeline,
         future: Future[_GenerationResponse],
         key: tuple[int, int],
-        queue_index: int,
     ) -> None:
         self._broker = broker
         self._future = future
         self._key = key
-        self._queue_index = queue_index
         self._released = False
         self._lock = Lock()
 
     def result(self, stop_event: StopEventLike) -> GenerationOutcome:
         wait_started_ns = time.monotonic_ns()
         try:
-            response = self._broker._wait_for_response(
-                self._future,
-                stop_event,
-                queue_index=self._queue_index,
-            )
+            while True:
+                if stop_event.is_set():
+                    raise QueryGenerationStopped("query generation stopped")
+                self._broker.assert_healthy()
+                try:
+                    response = self._future.result(timeout=0.1)
+                    break
+                except FutureTimeoutError:
+                    continue
             return GenerationOutcome(
                 response.query,
                 response.error_type,
@@ -360,6 +362,8 @@ class ProcessQueryPipeline:
         self._response_queues: list[Any] = []
         self._processes: list[Any] = []
         self._stop_event: Any | None = None
+        self._collector_stop = Event()
+        self._collectors: list[Thread] = []
         self._futures: dict[int, Future[_GenerationResponse]] = {}
         self._pending_readers: set[tuple[int, int]] = set()
         self._registered: set[int] = set()
@@ -393,6 +397,15 @@ class ProcessQueryPipeline:
                 self._request_queues.append(request_queue)
                 self._response_queues.append(response_queue)
                 self._processes.append(process)
+            for ordinal, response_queue in enumerate(self._response_queues):
+                collector = Thread(
+                    target=self._collect_responses,
+                    args=(response_queue,),
+                    name=f"sf-query-generator-results-{ordinal}",
+                    daemon=True,
+                )
+                collector.start()
+                self._collectors.append(collector)
             self._started = True
 
     def register_database(
@@ -451,7 +464,7 @@ class ProcessQueryPipeline:
         self._request_queues[queue_index].put(
             _Generate(job_id, database_ordinal, seed)
         )
-        return _ProcessTicket(self, future, key, queue_index)
+        return _ProcessTicket(self, future, key)
 
     def _require_started(self) -> None:
         with self._lock:
@@ -460,34 +473,11 @@ class ProcessQueryPipeline:
             if self._closed:
                 raise RuntimeError("query generation pipeline is closed")
 
-    def _wait_for_response(
-        self,
-        future: Future[_GenerationResponse],
-        stop_event: StopEventLike,
-        *,
-        queue_index: int,
-    ) -> _GenerationResponse:
-        try:
-            response_queue = self._response_queues[queue_index]
-        except IndexError as error:  # pragma: no cover - start invariant
-            raise RuntimeError("query generation response queue is unavailable") from error
-        while True:
-            if stop_event.is_set():
-                raise QueryGenerationStopped("query generation stopped")
-            if future.done():
-                return future.result()
+    def _collect_responses(self, response_queue: Any) -> None:
+        while not self._collector_stop.is_set():
             try:
-                # multiprocessing.Queue serializes consumers behind one read lock.
-                # One response queue per generator keeps that lock sharded, while
-                # nonblocking reads avoid holding it while a queue is temporarily
-                # empty. A dispatched result wakes its owning reader immediately.
-                response = response_queue.get_nowait()
+                response = response_queue.get(timeout=0.1)
             except Empty:
-                try:
-                    return future.result(timeout=0.005)
-                except FutureTimeoutError:
-                    pass
-                self.assert_healthy()
                 continue
             if not isinstance(response, _GenerationResponse):
                 continue
@@ -543,6 +533,9 @@ class ProcessQueryPipeline:
             if process.is_alive():
                 process.terminate()
                 process.join()
+        self._collector_stop.set()
+        for collector in self._collectors:
+            collector.join(timeout=self._shutdown_timeout_seconds)
         with self._lock:
             futures = tuple(self._futures.values())
             self._futures.clear()

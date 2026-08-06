@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Event
+from threading import enumerate as enumerate_threads
 
 from select_fuzz.generation.query import (
     GeneratedQuery,
@@ -17,6 +19,7 @@ from select_fuzz.generation.query_grammar import (
     GrammarTable,
 )
 from select_fuzz.modes.fuzz.query_pipeline import (
+    _GenerationResponse,
     InlineQueryPipeline,
     ProcessQueryPipeline,
     resolve_query_generator_processes,
@@ -69,6 +72,18 @@ class _RecordingQueue:
 
     def put(self, message: object) -> None:
         self.messages.append(message)
+
+
+class _NonblockingResponseQueue:
+    def __init__(self, response: _GenerationResponse) -> None:
+        self._response = response
+
+    def get_nowait(self) -> _GenerationResponse:
+        return self._response
+
+    def get(self, *, timeout: float) -> object:
+        del timeout
+        raise AssertionError("response queue read must not block while holding its lock")
 
 
 def _production_generator() -> WeightedQueryGenerator:
@@ -134,6 +149,56 @@ def test_process_pipeline_matches_inline_production_sql_and_stops_children() -> 
     assert actual == expected
     pipeline.close()
     assert pipeline.alive_processes == 0
+
+
+def test_waiting_readers_collect_process_results_without_central_collector() -> None:
+    pipeline = ProcessQueryPipeline(
+        process_count=4,
+        max_tables_per_query_block=1,
+        shutdown_timeout_seconds=2,
+    )
+    pipeline.start()
+    pipeline.register_database(0, "sf_f_case", _schema())
+    tickets = [
+        pipeline.submit(0, reader_id, 0, seed=reader_id + 100)
+        for reader_id in range(16)
+    ]
+
+    try:
+        response_queues = pipeline._response_queues  # type: ignore[attr-defined]
+        assert len(response_queues) == 4
+        assert len({id(queue) for queue in response_queues}) == 4
+        assert not any(
+            thread.name == "sf-query-generator-results"
+            for thread in enumerate_threads()
+        )
+        with ThreadPoolExecutor(max_workers=len(tickets)) as pool:
+            outcomes = tuple(
+                pool.map(lambda ticket: ticket.result(Event()), tickets)
+            )
+        assert all(outcome.query is not None for outcome in outcomes)
+    finally:
+        pipeline.close()
+
+
+def test_waiting_reader_does_not_hold_response_queue_lock_while_idle() -> None:
+    query = GeneratedQuery("SELECT 1", 101, "test")
+    response = _GenerationResponse(1, query, None, 7)
+    pipeline = ProcessQueryPipeline(
+        process_count=1,
+        max_tables_per_query_block=1,
+    )
+    pipeline._response_queues = [_NonblockingResponseQueue(response)]  # type: ignore[attr-defined]
+    future: Future[_GenerationResponse] = Future()
+    pipeline._futures[1] = future  # type: ignore[attr-defined]
+
+    actual = pipeline._wait_for_response(  # type: ignore[attr-defined]
+        future,
+        Event(),
+        queue_index=0,
+    )
+
+    assert actual is response
 
 
 def test_process_pipeline_broadcasts_schema_and_balances_one_database_readers() -> None:

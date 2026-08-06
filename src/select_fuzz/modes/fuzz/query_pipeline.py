@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import multiprocessing
 import os
 from queue import Empty
-from threading import Event, Lock, Thread
+from threading import Lock
 import time
 from typing import Any, Protocol
 
@@ -306,25 +306,23 @@ class _ProcessTicket:
         broker: ProcessQueryPipeline,
         future: Future[_GenerationResponse],
         key: tuple[int, int],
+        queue_index: int,
     ) -> None:
         self._broker = broker
         self._future = future
         self._key = key
+        self._queue_index = queue_index
         self._released = False
         self._lock = Lock()
 
     def result(self, stop_event: StopEventLike) -> GenerationOutcome:
         wait_started_ns = time.monotonic_ns()
         try:
-            while True:
-                if stop_event.is_set():
-                    raise QueryGenerationStopped("query generation stopped")
-                self._broker.assert_healthy()
-                try:
-                    response = self._future.result(timeout=0.1)
-                    break
-                except FutureTimeoutError:
-                    continue
+            response = self._broker._wait_for_response(
+                self._future,
+                stop_event,
+                queue_index=self._queue_index,
+            )
             return GenerationOutcome(
                 response.query,
                 response.error_type,
@@ -339,7 +337,7 @@ class _ProcessTicket:
 
 
 class ProcessQueryPipeline:
-    """Sharded spawn-process generator with one outstanding ticket per reader."""
+    """Sharded generators whose waiting readers dispatch their process results."""
 
     def __init__(
         self,
@@ -359,11 +357,9 @@ class ProcessQueryPipeline:
         self._shutdown_timeout_seconds = float(shutdown_timeout_seconds)
         self._context = multiprocessing.get_context("spawn")
         self._request_queues: list[Any] = []
-        self._response_queue: Any | None = None
+        self._response_queues: list[Any] = []
         self._processes: list[Any] = []
         self._stop_event: Any | None = None
-        self._collector_stop = Event()
-        self._collector: Thread | None = None
         self._futures: dict[int, Future[_GenerationResponse]] = {}
         self._pending_readers: set[tuple[int, int]] = set()
         self._registered: set[int] = set()
@@ -378,15 +374,15 @@ class ProcessQueryPipeline:
                 raise RuntimeError("query generation pipeline is closed")
             if self._started:
                 return
-            self._response_queue = self._context.Queue()
             self._stop_event = self._context.Event()
             for ordinal in range(self._process_count):
                 request_queue = self._context.Queue()
+                response_queue = self._context.Queue()
                 process = self._context.Process(
                     target=_generation_worker,
                     args=(
                         request_queue,
-                        self._response_queue,
+                        response_queue,
                         self._stop_event,
                         self._max_tables_per_query_block,
                     ),
@@ -395,13 +391,8 @@ class ProcessQueryPipeline:
                 )
                 process.start()
                 self._request_queues.append(request_queue)
+                self._response_queues.append(response_queue)
                 self._processes.append(process)
-            self._collector = Thread(
-                target=self._collect_responses,
-                name="sf-query-generator-results",
-                daemon=True,
-            )
-            self._collector.start()
             self._started = True
 
     def register_database(
@@ -460,7 +451,7 @@ class ProcessQueryPipeline:
         self._request_queues[queue_index].put(
             _Generate(job_id, database_ordinal, seed)
         )
-        return _ProcessTicket(self, future, key)
+        return _ProcessTicket(self, future, key, queue_index)
 
     def _require_started(self) -> None:
         with self._lock:
@@ -469,21 +460,41 @@ class ProcessQueryPipeline:
             if self._closed:
                 raise RuntimeError("query generation pipeline is closed")
 
-    def _collect_responses(self) -> None:
-        response_queue = self._response_queue
-        if response_queue is None:  # pragma: no cover - start invariant
-            return
-        while not self._collector_stop.is_set():
+    def _wait_for_response(
+        self,
+        future: Future[_GenerationResponse],
+        stop_event: StopEventLike,
+        *,
+        queue_index: int,
+    ) -> _GenerationResponse:
+        try:
+            response_queue = self._response_queues[queue_index]
+        except IndexError as error:  # pragma: no cover - start invariant
+            raise RuntimeError("query generation response queue is unavailable") from error
+        while True:
+            if stop_event.is_set():
+                raise QueryGenerationStopped("query generation stopped")
+            if future.done():
+                return future.result()
             try:
-                response = response_queue.get(timeout=0.1)
+                # multiprocessing.Queue serializes consumers behind one read lock.
+                # One response queue per generator keeps that lock sharded, while
+                # nonblocking reads avoid holding it while a queue is temporarily
+                # empty. A dispatched result wakes its owning reader immediately.
+                response = response_queue.get_nowait()
             except Empty:
+                try:
+                    return future.result(timeout=0.005)
+                except FutureTimeoutError:
+                    pass
+                self.assert_healthy()
                 continue
             if not isinstance(response, _GenerationResponse):
                 continue
             with self._lock:
-                future = self._futures.pop(response.job_id, None)
-            if future is not None and not future.done():
-                future.set_result(response)
+                response_future = self._futures.pop(response.job_id, None)
+            if response_future is not None and not response_future.done():
+                response_future.set_result(response)
 
     def assert_healthy(self) -> None:
         with self._lock:
@@ -532,10 +543,6 @@ class ProcessQueryPipeline:
             if process.is_alive():
                 process.terminate()
                 process.join()
-        self._collector_stop.set()
-        collector = self._collector
-        if collector is not None:
-            collector.join(timeout=self._shutdown_timeout_seconds)
         with self._lock:
             futures = tuple(self._futures.values())
             self._futures.clear()
@@ -549,10 +556,10 @@ class ProcessQueryPipeline:
                 request_queue.join_thread()
             except Exception:
                 pass
-        if self._response_queue is not None:
+        for response_queue in self._response_queues:
             try:
-                self._response_queue.close()
-                self._response_queue.join_thread()
+                response_queue.close()
+                response_queue.join_thread()
             except Exception:
                 pass
 

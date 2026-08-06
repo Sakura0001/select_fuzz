@@ -15,7 +15,11 @@ from select_fuzz.generation.query_grammar import (
     GrammarSchema,
     GrammarTable,
 )
-from select_fuzz.modes.fuzz.materialization import FuzzDatabaseSchema, fuzz_database_name
+from select_fuzz.modes.fuzz.materialization import (
+    FuzzDatabaseSchema,
+    FuzzMaterializer,
+    fuzz_database_name,
+)
 from select_fuzz.modes.fuzz.query_pipeline import GenerationOutcome, InlineQueryPipeline
 from select_fuzz.modes.fuzz.service import (
     FuzzModeService,
@@ -225,6 +229,39 @@ class _RecordingSession:
     def execute(self, sql: str) -> _EmptyCursor:
         self.sql.append(sql)
         return _EmptyCursor()
+
+
+class _ReplicaProbeFactory:
+    def query_session(self, node, database):  # type: ignore[no-untyped-def]
+        del node, database
+        raise AssertionError("query session is not used by replica probes")
+
+    @contextmanager
+    def control_session(self, node, database):  # type: ignore[no-untyped-def]
+        del node, database
+        yield _RecordingSession()
+
+
+class _ReplicaTimeoutMaterializer:
+    def __init__(self) -> None:
+        node = NodeConfig(role=NodeRole.CUSTOM_ON, host="replica")
+        self._delegate = FuzzMaterializer(
+            _ReplicaProbeFactory(),  # type: ignore[arg-type]
+            node,
+            node,
+            FuzzConfig(
+                initial_tables=1,
+                initial_rows_per_table=20,
+                max_rows_per_database=100,
+            ),
+            replica_sync_timeout_seconds=0.001,
+            sleeper=lambda seconds: None,
+        )
+
+    def materialize(self, database: str, *, seed: int) -> FuzzDatabaseSchema:
+        del seed
+        self._delegate._wait_for_replica(database)
+        raise AssertionError("replica timeout did not fire")
 
 
 def test_worker_sessions_receive_observable_route_tags() -> None:
@@ -684,6 +721,43 @@ def test_generation_build_waits_for_all_failures_and_never_starts_workers(
     for item in failure["failures"]:
         assert item["error_type"] == "RuntimeError"
         assert item["error"] == "simulated kernel setup failure"
+
+
+def test_replica_timeout_keeps_legacy_machine_event_text(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    service = FuzzModeService(
+        config=FuzzConfig(
+            databases=1,
+            writer_threads_per_database=1,
+            reader_threads_per_database=3,
+            initial_tables=1,
+            initial_rows_per_table=20,
+            max_rows_per_database=100,
+        ),
+        primary=NodeConfig(role=NodeRole.CUSTOM_ON, host="primary"),
+        replica=NodeConfig(role=NodeRole.CUSTOM_ON, host="replica", port=3307),
+        factory=_NoopFactory(),
+        records=JsonlWriter(tmp_path / "events.jsonl"),
+        query_generator=WeightedQueryGenerator((("test", _QueryGenerator(), 1),)),
+        materializer_factory=_ReplicaTimeoutMaterializer,
+    )
+
+    with pytest.raises(RuntimeError) as captured:
+        service.run(
+            RunRequest("run-fuzz-replica-timeout", "fuzz", 3, 1, None, 1),
+            Event(),
+        )
+
+    assert "等待备节点同步超时" in str(captured.value)
+    events = read_jsonl(tmp_path / "events.jsonl")
+    event = next(
+        item for item in events if item["type"] == "fuzz_generation_failed"
+    )
+    failure = event["failures"][0]
+    assert failure["error_type"] == "TimeoutError"
+    assert failure["error"] == (
+        "replica synchronization timeout after 0.001 seconds; "
+        f"database={failure['database']}; replication marker not visible"
+    )
 
 
 def test_failed_replacement_batch_does_not_fall_back_to_old_workers(

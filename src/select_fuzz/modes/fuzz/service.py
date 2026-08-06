@@ -23,6 +23,7 @@ from select_fuzz.generation.query_grammar import CandidateRejected
 from select_fuzz.modes.fuzz.dml import FuzzDmlGenerator
 from select_fuzz.modes.fuzz.execution import StreamingQueryExecutor
 from select_fuzz.modes.fuzz.materialization import (
+    _event_error_message,
     FuzzDatabaseSchema,
     FuzzMaterializer,
     fuzz_database_name,
@@ -145,7 +146,7 @@ class _PreparedReaderQuery:
     next_operation: int
 
 
-_GenerationFailure = tuple[int, str, str, str]
+_GenerationFailure = tuple[int, str, str, str, str]
 
 
 class _GenerationBuildError(RuntimeError):
@@ -153,8 +154,14 @@ class _GenerationBuildError(RuntimeError):
         self.failures = failures
         rendered = "；".join(
             f"数据库[{ordinal}]={database}，异常类型={error_type}，"
-            f"原始错误={error_message}"
-            for ordinal, database, error_type, error_message in failures
+            f"原始错误={display_error_message}"
+            for (
+                ordinal,
+                database,
+                error_type,
+                display_error_message,
+                _machine_error_message,
+            ) in failures
         )
         super().__init__(f"fuzz 批次创建失败：{rendered}")
 
@@ -513,6 +520,7 @@ class FuzzModeService:
                         database,
                         type(error).__name__,
                         str(error),
+                        _event_error_message(error),
                     )
                 )
                 continue
@@ -533,9 +541,15 @@ class FuzzModeService:
                             "database_ordinal": ordinal,
                             "database": database,
                             "error_type": error_type,
-                            "error": error_message,
+                            "error": event_error_message,
                         }
-                        for ordinal, database, error_type, error_message in failures
+                        for (
+                            ordinal,
+                            database,
+                            error_type,
+                            _display_error_message,
+                            event_error_message,
+                        ) in failures
                     ],
                 }
             )

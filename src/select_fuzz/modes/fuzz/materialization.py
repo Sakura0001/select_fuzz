@@ -17,6 +17,14 @@ from select_fuzz.modes.fuzz.schema import build_table_specs, initial_insert_sql
 from select_fuzz.modes.fuzz.sql_log import FuzzSqlRecorder
 
 
+_EVENT_ERROR_MESSAGE_ATTRIBUTE = "_select_fuzz_event_error_message"
+
+
+def _event_error_message(error: Exception) -> str:
+    message = getattr(error, _EVENT_ERROR_MESSAGE_ATTRIBUTE, None)
+    return message if isinstance(message, str) else str(error)
+
+
 def _execute(session: QuerySession, sql: str) -> None:
     cursor = session.execute(sql)
     try:
@@ -124,13 +132,24 @@ class FuzzMaterializer:
                 last_error = error
             self._sleeper(0.1)
         detail = "主节点同步标记在备节点尚不可见"
+        event_detail = "replication marker not visible"
         if last_error is not None:
             detail = f"最后一次探测异常={type(last_error).__name__}：{last_error}"
-        raise TimeoutError(
+            event_detail = (
+                f"last probe error={type(last_error).__name__}: {last_error}"
+            )
+        timeout_error = TimeoutError(
             "等待备节点同步超时：已等待 "
             f"{self._replica_sync_timeout_seconds:g} 秒；"
             f"数据库={database}；{detail}"
         )
+        event_message = (
+            "replica synchronization timeout after "
+            f"{self._replica_sync_timeout_seconds:g} seconds; "
+            f"database={database}; {event_detail}"
+        )
+        setattr(timeout_error, _EVENT_ERROR_MESSAGE_ATTRIBUTE, event_message)
+        raise timeout_error
 
 
 def fuzz_database_name(run_id: str, ordinal: int, *, generation: int = 0) -> str:

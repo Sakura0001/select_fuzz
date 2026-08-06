@@ -112,12 +112,15 @@ class _PreparedReaderQuery:
     next_operation: int
 
 
+_GenerationFailure = tuple[int, str, str, str]
+
+
 class _GenerationBuildError(RuntimeError):
-    def __init__(self, failures: tuple[tuple[int, str], ...]) -> None:
+    def __init__(self, failures: tuple[_GenerationFailure, ...]) -> None:
         self.failures = failures
         rendered = ", ".join(
-            f"database[{ordinal}]={error_type}"
-            for ordinal, error_type in failures
+            f"database[{ordinal}]={database} {error_type}: {error_message}"
+            for ordinal, database, error_type, error_message in failures
         )
         super().__init__(f"fuzz generation build failed: {rendered}")
 
@@ -464,13 +467,20 @@ class FuzzModeService:
                         ),
                     )
                 )
-        failures: list[tuple[int, str]] = []
+        failures: list[_GenerationFailure] = []
         schemas: list[_GenerationDatabase] = []
         for database_ordinal, database, seed, future in futures:
             try:
                 schema = future.result()
             except Exception as error:
-                failures.append((database_ordinal, type(error).__name__))
+                failures.append(
+                    (
+                        database_ordinal,
+                        database,
+                        type(error).__name__,
+                        str(error),
+                    )
+                )
                 continue
             schemas.append(
                 _GenerationDatabase(database_ordinal, database, seed, schema)
@@ -487,9 +497,11 @@ class FuzzModeService:
                     "failures": [
                         {
                             "database_ordinal": ordinal,
+                            "database": database,
                             "error_type": error_type,
+                            "error": error_message,
                         }
-                        for ordinal, error_type in failures
+                        for ordinal, database, error_type, error_message in failures
                     ],
                 }
             )

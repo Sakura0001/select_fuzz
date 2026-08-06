@@ -532,7 +532,7 @@ def test_generation_build_waits_for_all_failures_and_never_starts_workers(
         worker_calls=worker_calls,
     )
 
-    with pytest.raises(RuntimeError, match="generation build failed"):
+    with pytest.raises(RuntimeError) as captured:
         service.run(
             RunRequest("run-fuzz-build-failure", "fuzz", 3, 1, None, 1),
             Event(),
@@ -540,14 +540,19 @@ def test_generation_build_waits_for_all_failures_and_never_starts_workers(
 
     assert len(calls) == 2
     assert worker_calls == []
+    message = str(captured.value)
+    assert "database[0]=sf_f_" in message
+    assert "database[1]=sf_f_" in message
+    assert message.count("RuntimeError: simulated kernel setup failure") == 2
     events = read_jsonl(tmp_path / "events.jsonl")
     failure = next(
         event for event in events if event["type"] == "fuzz_generation_failed"
     )
     assert len(failure["failures"]) == 2
-    assert all(
-        item["error_type"] == "RuntimeError" for item in failure["failures"]
-    )
+    assert {item["database"] for item in failure["failures"]} == set(calls)
+    for item in failure["failures"]:
+        assert item["error_type"] == "RuntimeError"
+        assert item["error"] == "simulated kernel setup failure"
 
 
 def test_failed_replacement_batch_does_not_fall_back_to_old_workers(

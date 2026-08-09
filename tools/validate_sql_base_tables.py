@@ -5,17 +5,24 @@ from __future__ import annotations
 
 import re
 import argparse
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from select_fuzz.metadata.ddl_parser import parse_create_table
+
 SQL_DIR = ROOT / "sql_base_tables"
 EXECUTION_DOC = SQL_DIR / "执行顺序说明.md"
 TOP_PARTITION_VALUES = list(range(1, 9))
 SUBPARTITION_VALUES = list(range(1, 9))
 TARGET_TOTAL_INDEX_COUNT = 61
-MIN_SEED_ROWS = 1000
-MAX_SEED_ROWS = 2000
+MIN_SEED_ROWS = 10
+MAX_SEED_ROWS = 100
+MIN_TABLE_COLUMNS = 200
+MAX_TABLE_COLUMNS = 500
 SEED_NUMBER_TABLE = "_select_fuzz_seed_numbers"
 FIRST_PARTITION_START = 7
 FIRST_PARTITION_COUNT = 8
@@ -159,6 +166,7 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
 
     type_counts = {"normal": 0, "temporary": 0, "partition": 0, "subpartition": 0}
     all_sql_parts: list[str] = []
+    column_counts: list[int] = []
     first_partition_types: set[str] = set()
     subpartition_pairs: set[tuple[str, str]] = set()
     for index in range(TOTAL_TABLE_COUNT):
@@ -166,6 +174,13 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
         if not sql:
             continue
         all_sql_parts.append(sql)
+        table_metadata = parse_create_table(sql)
+        column_count = len(table_metadata.columns)
+        column_counts.append(column_count)
+        if not MIN_TABLE_COLUMNS <= column_count <= MAX_TABLE_COLUMNS:
+            fail(f"t{index}.sql 列数应在 {MIN_TABLE_COLUMNS} 到 {MAX_TABLE_COLUMNS} 之间，实际 {column_count}", errors)
+        if f"`extra_t{index}_000`" not in sql:
+            fail(f"t{index}.sql 缺少随机扩展列", errors)
         create_pattern = rf"^CREATE\s+(?:TEMPORARY\s+)?TABLE\s+`t{index}`"
         if len(re.findall(create_pattern, sql, flags=re.I | re.M)) != 1:
             fail(f"t{index}.sql 没有且仅有一个匹配表名的 CREATE TABLE", errors)
@@ -253,6 +268,23 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
     assert_no_unsupported_geometry(all_sql, "基表目录", errors)
     if re.search(r"\bFULLTEXT\b", all_sql, re.I):
         fail("基表目录不应包含 FULLTEXT 索引", errors)
+    if column_counts:
+        if min(column_counts) != MIN_TABLE_COLUMNS or max(column_counts) != MAX_TABLE_COLUMNS:
+            fail(f"基表列数应覆盖 {MIN_TABLE_COLUMNS} 到 {MAX_TABLE_COLUMNS}，实际 {min(column_counts)} 到 {max(column_counts)}", errors)
+        if len(set(column_counts)) < 20:
+            fail("基表列数随机性不足，不同列数少于 20 种", errors)
+    char_lengths = [int(value) for value in re.findall(r"`char_col`\s+char\((\d+)\)", all_sql, flags=re.I)]
+    varchar_lengths = [int(value) for value in re.findall(r"`varchar_col`\s+varchar\((\d+)\)", all_sql, flags=re.I)]
+    if len(char_lengths) != TOTAL_TABLE_COUNT or min(char_lengths) != 1 or max(char_lengths) != 255:
+        fail("char_col 应按表随机覆盖 char(1) 到 char(255)", errors)
+    if len(varchar_lengths) != TOTAL_TABLE_COUNT or min(varchar_lengths) != 1 or max(varchar_lengths) != 255:
+        fail("varchar_col 应按表随机覆盖 varchar(1) 到 varchar(255)", errors)
+    for index in range(TOTAL_TABLE_COUNT):
+        sql = read_table(sql_dir, index, errors)
+        varchar_match = re.search(r"`varchar_col`\s+varchar\((\d+)\)", sql, flags=re.I)
+        prefix_match = re.search(r"`idx_t\d+_varchar_prefix`\s+\(`varchar_col`\((\d+)\)\)", sql, flags=re.I)
+        if varchar_match and prefix_match and int(prefix_match.group(1)) > int(varchar_match.group(1)):
+            fail(f"t{index}.sql varchar 前缀索引长度超过列长度", errors)
     required_fragments = [
         "INVISIBLE",
         " DESC",
@@ -260,7 +292,6 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
         "year(`datetime_col`)",
         "`unsigned_int_col` + `smallint_col`",
         "json_extract(`json_col`",
-        "`varchar_col`(64)",
         "`blob_col`(32)",
         "ON DELETE CASCADE",
         "ON DELETE SET NULL",
@@ -306,7 +337,7 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
         for name in ["t0.sql", "t1.sql", *[f"t{index}.sql" for index in range(2, TOTAL_TABLE_COUNT)], "zz_seed_fk_data.sql"]:
             if name not in doc:
                 fail(f"执行顺序说明缺少 {name}", errors)
-        doc_fragments = ["READ-COMMITTED", "1000", "2000", "UNIQUE KEY"]
+        doc_fragments = ["READ-COMMITTED", "10", "100", "200", "500", "UNIQUE KEY"]
         for fragment in doc_fragments:
             if fragment not in doc:
                 fail(f"执行顺序说明缺少约束说明：{fragment}", errors)
@@ -320,7 +351,7 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
     if errors:
         print("\n".join(errors))
         return 1
-    print(f"结构验证通过：{TOTAL_TABLE_COUNT} 张基表、8 种一级分区、64 种二级分区组合、分区种子数据、无向量约束、外键、索引类型和执行顺序文档均满足要求。")
+    print(f"结构验证通过：{TOTAL_TABLE_COUNT} 张基表、每表 200 到 500 列、8 种一级分区、64 种二级分区组合、随机列类型、分区种子数据、无向量约束、外键、索引类型和执行顺序文档均满足要求。")
     return 0
 
 

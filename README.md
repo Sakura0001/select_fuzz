@@ -54,7 +54,7 @@ npm run dev -- --port 5173
 
 项目默认使用 `sql_base_tables/`。每个任务启动时，程序会读取配置中的 `base_sql_dir`，按文件名排序读取所有 `.sql` 文件，并在目标数据库上全部执行。启动阶段会执行 `DROP DATABASE IF EXISTS test`、`CREATE DATABASE test`、`USE test`，随后创建基表和插入种子数据，并对每张解析到的表执行 `SELECT COUNT(*)` 校验，发现 0 行会直接失败。
 
-`sql_base_tables/` 包含 79 张基表：2 张普通表、5 张临时表、8 张一级分区表和 64 张二级分区表，不包含向量类型、向量索引或向量函数。默认二级分区表面向内网扩展 MySQL 内核，覆盖 `RANGE`、`RANGE COLUMNS`、`LIST`、`LIST COLUMNS`、`HASH`、`LINEAR HASH`、`KEY`、`LINEAR KEY` 的 8 x 8 组合；`RANGE/LIST` 子分区使用显式 `SUBPARTITION ... VALUES LESS THAN/IN (...)` 定义。种子数据由固定随机种子生成，每张表插入 1000 到 2000 行合法数据，分区表使用 `tenant_id` 1 到 8、二级分区表使用 `subpart_id` 1 到 8 保证路由覆盖，并尽量把可安全唯一化的索引生成为 `UNIQUE KEY`；二级分区表会保守处理唯一索引，避免违反唯一键必须包含全部分区列和子分区列的限制。由于临时表是 session 级对象，多线程任务会在每个 worker 连接中单独创建临时表并插入临时表种子数据。lost connection 恢复后也只重建临时表并重新插入临时表数据，不重建永久表。
+`sql_base_tables/` 包含 79 张基表：2 张普通表、5 张临时表、8 张一级分区表和 64 张二级分区表，不包含向量类型、向量索引或向量函数。默认二级分区表面向内网扩展 MySQL 内核，覆盖 `RANGE`、`RANGE COLUMNS`、`LIST`、`LIST COLUMNS`、`HASH`、`LINEAR HASH`、`KEY`、`LINEAR KEY` 的 8 x 8 组合；`RANGE/LIST` 子分区使用显式 `SUBPARTITION ... VALUES LESS THAN/IN (...)` 定义。每张基表保留分区键、父表引用和常用索引核心列后，会按固定随机种子补齐到 200 到 500 列，扩展列随机覆盖整数、浮点、DECIMAL、日期时间、字符串、二进制、ENUM、SET、BIT 和 JSON 等类型；列类型参数也会随机，例如 `char_col` 和 `varchar_col` 会覆盖 `1` 到 `255` 的长度范围，相关索引前缀和种子值会同步适配列长度。种子数据由固定随机种子生成，每张表插入 10 到 100 行合法数据，分区表使用 `tenant_id` 1 到 8、二级分区表使用 `subpart_id` 1 到 8 保证路由覆盖，并尽量把可安全唯一化的索引生成为 `UNIQUE KEY`；二级分区表会保守处理唯一索引，避免违反唯一键必须包含全部分区列和子分区列的限制。由于临时表是 session 级对象，多线程任务会在每个 worker 连接中单独创建临时表并插入临时表种子数据。lost connection 恢复后也只重建临时表并重新插入临时表数据，不重建永久表。
 
 可以生成不含二级分区的本地 MySQL 兼容目录，用于普通 MySQL 建表和插入验证：
 

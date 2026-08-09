@@ -70,7 +70,10 @@ def test_完整基表目录能解析全部表_列族和分区() -> None:
 
     assert [table.name for table in tables] == [f"t{index}" for index in range(79)]
     assert {table.name for table in tables if table.is_temporary} == {f"t{index}" for index in range(2, 7)}
-    assert {table.name: len(table.columns) for table in tables} == {f"t{index}": 42 for index in range(79)}
+    column_counts = [len(table.columns) for table in tables]
+    assert min(column_counts) == 200
+    assert max(column_counts) == 500
+    assert all(200 <= count <= 500 for count in column_counts)
     families = {column.type_family for table in tables for column in table.columns.values()}
     assert {
         ColumnTypeFamily.INTEGER,

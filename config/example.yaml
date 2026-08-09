@@ -242,6 +242,8 @@ fuzz:
   # doctor 为 setup、超时 KILL QUERY 和诊断连接保留的 endpoint 连接数；
   # fuzz 运行时的并发控制连接也以此为上限。
   control_connection_reserve: 8
+  # 默认开启中文实时诊断；输出到 stderr，不影响 stdout 的最终 JSON。
+  diagnostics_interval_seconds: 5
   # KILL QUERY 后等待语句结束的宽限秒数；超出后安全断开该服务端会话。
   query_kill_grace_seconds: 1
   # 连接失效后的指数退避重连范围；普通 SQL 错误会复用当前长连接。

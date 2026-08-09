@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Event, Lock
+import time
 
 import pytest
 
@@ -276,6 +277,198 @@ def test_worker_sessions_receive_observable_route_tags() -> None:
         "SET @select_fuzz_worker = 'primary_reader'",
         "SET @select_fuzz_worker = 'replica_reader'",
     ]
+
+
+def test_stage_snapshot_adds_live_diagnostics_and_emits_chinese_status(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    emitted: list[str] = []
+    records = JsonlWriter(tmp_path / "events.jsonl")
+    service = FuzzModeService(
+        config=FuzzConfig(
+            databases=1,
+            writer_threads_per_database=1,
+            reader_threads_per_database=3,
+            initial_tables=1,
+            initial_rows_per_table=20,
+            max_rows_per_database=100,
+        ),
+        primary=NodeConfig(role=NodeRole.CUSTOM_ON, host="primary"),
+        replica=NodeConfig(role=NodeRole.CUSTOM_ON, host="replica", port=3307),
+        factory=_NoopFactory(),
+        records=records,
+        query_generator=WeightedQueryGenerator((("test", _QueryGenerator(), 1),)),
+        materializer_factory=lambda: _Materializer([], Lock()),
+        progress_sink=emitted.append,
+    )
+    pipeline = InlineQueryPipeline(_QueryGenerator())
+    pipeline.start()
+    pipeline.register_database(0, "sf_f_case", _schema("sf_f_case").grammar_schema)
+    service._query_pipeline = pipeline  # type: ignore[attr-defined]
+    service._runtime.set_phase("running", generation=0)  # type: ignore[attr-defined]
+    service._telemetry.set_stage(  # type: ignore[attr-defined]
+        "db0:reader-primary:0",
+        "waiting_for_generated_sql",
+    )
+
+    service._append_stage_snapshot(  # type: ignore[attr-defined]
+        RunRequest("run-fuzz-diagnostics", "fuzz", 1, 1, None, 1),
+        final=False,
+    )
+
+    event = read_jsonl(tmp_path / "events.jsonl")[0]
+    assert event["type"] == "fuzz_stage_snapshot"
+    assert event["stages"] == {"waiting_for_generated_sql": 1}
+    assert "durations" in event
+    assert "stage_details" in event
+    assert "worker_groups" in event
+    assert event["counters"]["timeouts"] == 0
+    assert event["pipeline"]["registered_databases"] == 1
+    assert event["runtime"]["phase"] == "running"
+    assert event["connections"] == {
+        "total": 0,
+        "groups": {},
+        "registered": [],
+        "truncated": 0,
+    }
+    assert event["processlist"]["endpoints"]["primary"]["visible"] == 0
+    assert emitted and emitted[0].startswith("[fuzz状态]")
+    assert "判断=" in emitted[0]
+    pipeline.close()
+
+
+def test_stage_snapshot_bounds_persisted_connection_details(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    records = JsonlWriter(tmp_path / "events.jsonl")
+    service = FuzzModeService(
+        config=FuzzConfig(
+            databases=1,
+            writer_threads_per_database=1,
+            reader_threads_per_database=3,
+            initial_tables=1,
+            initial_rows_per_table=20,
+            max_rows_per_database=100,
+        ),
+        primary=NodeConfig(role=NodeRole.CUSTOM_ON, host="primary"),
+        replica=NodeConfig(role=NodeRole.CUSTOM_ON, host="replica", port=3307),
+        factory=_NoopFactory(),
+        records=records,
+        query_generator=WeightedQueryGenerator((("test", _QueryGenerator(), 1),)),
+        materializer_factory=lambda: _Materializer([], Lock()),
+    )
+    for ordinal in range(5):
+        service._runtime.register_connection(  # type: ignore[attr-defined]
+            worker=f"db0:reader-replica:{ordinal}",
+            endpoint="replica",
+            worker_kind="reader",
+            database="sf_f_case",
+            connection_id=100 + ordinal,
+        )
+
+    service._append_stage_snapshot(  # type: ignore[attr-defined]
+        RunRequest("run-fuzz-bounded-connections", "fuzz", 1, 1, None, 1),
+        final=False,
+    )
+
+    event = read_jsonl(tmp_path / "events.jsonl")[-1]
+    assert event["connections"]["total"] == 5
+    assert event["connections"]["groups"] == {"replica_reader": 5}
+    assert event["runtime"]["connections"] == 5
+    assert event["runtime"]["connection_groups"] == event["connections"]["groups"]
+    assert len(event["connections"]["registered"]) == 3
+    assert event["connections"]["truncated"] == 2
+
+
+def test_worker_connection_tracking_uses_exact_connection_id(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    service = FuzzModeService(
+        config=FuzzConfig(
+            databases=1,
+            writer_threads_per_database=1,
+            reader_threads_per_database=3,
+            initial_tables=1,
+            initial_rows_per_table=20,
+            max_rows_per_database=100,
+        ),
+        primary=NodeConfig(role=NodeRole.CUSTOM_ON, host="primary"),
+        replica=NodeConfig(role=NodeRole.CUSTOM_ON, host="replica", port=3307),
+        factory=_NoopFactory(),
+        records=JsonlWriter(tmp_path / "events.jsonl"),
+        query_generator=WeightedQueryGenerator((("test", _QueryGenerator(), 1),)),
+        materializer_factory=lambda: _Materializer([], Lock()),
+    )
+    session = _ErrorSession(Event())
+
+    with service._track_worker_connection(  # type: ignore[attr-defined]
+        session,
+        worker="db0:reader-replica:0",
+        endpoint="replica",
+        worker_kind="reader",
+        database="sf_f_case",
+    ):
+        connections = service._runtime.connections()  # type: ignore[attr-defined]
+        assert len(connections) == 1
+        assert connections[0].connection_id == 71
+        service._append_stage_snapshot(  # type: ignore[attr-defined]
+            RunRequest("run-fuzz-connection-snapshot", "fuzz", 1, 1, None, 1),
+            final=False,
+        )
+        event = read_jsonl(tmp_path / "events.jsonl")[-1]
+        registered = event["connections"]["registered"]
+        assert registered[0]["worker"] == "db0:reader-replica:0"
+        assert registered[0]["endpoint"] == "replica"
+        assert registered[0]["connection_id"] == 71
+
+    assert service._runtime.connections() == ()  # type: ignore[attr-defined]
+
+
+class _BlockingProcesslistCollector:
+    def __init__(self) -> None:
+        self.entered = Event()
+        self.release = Event()
+
+    def collect(self) -> dict[str, object]:
+        self.entered.set()
+        self.release.wait(2)
+        return {
+            "sampled_at_ns": time.monotonic_ns(),
+            "endpoints": {
+                "primary": {},
+                "replica": {},
+            },
+        }
+
+
+def test_blocked_processlist_diagnostics_do_not_delay_run_shutdown(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    calls: list[str] = []
+    worker_calls: list[tuple[str, int]] = []
+    collector = _BlockingProcesslistCollector()
+    service = _RecordingService(
+        config=FuzzConfig(
+            databases=1,
+            writer_threads_per_database=1,
+            reader_threads_per_database=3,
+            initial_tables=1,
+            initial_rows_per_table=20,
+            max_rows_per_database=100,
+        ),
+        primary=NodeConfig(role=NodeRole.CUSTOM_ON, host="primary"),
+        replica=NodeConfig(role=NodeRole.CUSTOM_ON, host="replica", port=3307),
+        factory=_NoopFactory(),
+        records=JsonlWriter(tmp_path / "events.jsonl"),
+        query_generator=WeightedQueryGenerator((("test", _QueryGenerator(), 1),)),
+        materializer_factory=lambda: _Materializer(calls, Lock()),
+        progress_sink=lambda message: None,
+        worker_calls=worker_calls,
+    )
+    service._processlist_collector = collector  # type: ignore[attr-defined]
+    started = time.monotonic()
+    try:
+        service.run(
+            RunRequest("run-fuzz-blocked-diagnostics", "fuzz", 1, 1, None, 1),
+            Event(),
+        )
+        elapsed = time.monotonic() - started
+        assert collector.entered.is_set()
+        assert elapsed < 0.8
+    finally:
+        collector.release.set()
 
 
 class _SqlError(Exception):

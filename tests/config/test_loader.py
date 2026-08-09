@@ -151,12 +151,22 @@ def test_fuzz_mode_loads_concurrency_and_cli_compatibility_overrides(tmp_path: P
     assert config.fuzz.connector_implementation == "auto"
     assert config.fuzz.control_connection_reserve == 8
     assert config.fuzz.query_kill_grace_seconds == 1.0
+    assert config.fuzz.diagnostics_interval_seconds == 5.0
 
 
 def test_fuzz_schema_refresh_interval_can_be_disabled_but_not_negative() -> None:
     assert FuzzConfig(schema_refresh_interval_seconds=0).schema_refresh_interval_seconds == 0
     with pytest.raises(ValidationError):
         FuzzConfig(schema_refresh_interval_seconds=-1)
+
+
+def test_fuzz_diagnostics_interval_is_enabled_and_bounded() -> None:
+    assert FuzzConfig().diagnostics_interval_seconds == 5.0
+    assert FuzzConfig(diagnostics_interval_seconds=0.5).diagnostics_interval_seconds == 0.5
+    with pytest.raises(ValidationError):
+        FuzzConfig(diagnostics_interval_seconds=0)
+    with pytest.raises(ValidationError):
+        FuzzConfig(diagnostics_interval_seconds=61)
 
 
 def test_fuzz_initial_rows_accepts_twenty_but_rejects_nineteen() -> None:

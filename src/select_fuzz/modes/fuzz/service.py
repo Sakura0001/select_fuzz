@@ -5,7 +5,7 @@ from __future__ import annotations
 from concurrent.futures import FIRST_EXCEPTION, Future, ThreadPoolExecutor, wait
 from collections import deque
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import random
 import sys
@@ -21,6 +21,11 @@ from select_fuzz.execution.timeout import KillQueryWatchdog
 from select_fuzz.generation.query import GeneratedQuery, WeightedQueryGenerator
 from select_fuzz.generation.query_grammar import CandidateRejected
 from select_fuzz.modes.fuzz.dml import FuzzDmlGenerator
+from select_fuzz.modes.fuzz.diagnostics import (
+    FuzzProcesslistCollector,
+    FuzzProgressReporter,
+    FuzzRuntimeDiagnostics,
+)
 from select_fuzz.modes.fuzz.execution import StreamingQueryExecutor
 from select_fuzz.modes.fuzz.materialization import (
     _event_error_message,
@@ -107,6 +112,8 @@ class FuzzCounterSnapshot:
     reads: int
     writes: int
     errors: int
+    timeouts: int
+    connection_losses: int
     reconnects: int
 
 
@@ -119,6 +126,8 @@ class FuzzCounters:
             "reads": 0,
             "writes": 0,
             "errors": 0,
+            "timeouts": 0,
+            "connection_losses": 0,
             "reconnects": 0,
         }
 
@@ -202,6 +211,7 @@ class FuzzModeService:
         query_pipeline_factory: Callable[[], QueryGenerationPipeline] | None = None,
         sql_recorder: FuzzSqlRecorder | None = None,
         connector_implementation: str = "python",
+        progress_sink: Callable[[str], None] | None = None,
     ) -> None:
         self._config = config
         self._primary = primary
@@ -225,10 +235,68 @@ class FuzzModeService:
         self._counters = FuzzCounters()
         self._connector_implementation = connector_implementation
         self._telemetry = FuzzStageTelemetry()
+        self._runtime = FuzzRuntimeDiagnostics()
+        self._progress_sink = progress_sink
+        expected_primary_readers = (
+            config.databases * config.reader_threads_per_database // 3
+        )
+        expected_groups = {
+            "primary_writer": config.databases * config.writer_threads_per_database,
+            "primary_reader": expected_primary_readers,
+            "replica_reader": (
+                config.databases * config.reader_threads_per_database
+                - expected_primary_readers
+            ),
+        }
+        self._progress_reporter = (
+            None
+            if progress_sink is None
+            else FuzzProgressReporter(
+                diagnostics_interval_seconds=config.diagnostics_interval_seconds,
+                expected_connection_groups=expected_groups,
+                expected_databases=config.databases,
+            )
+        )
+        self._processlist_collector = (
+            None
+            if progress_sink is None
+            else FuzzProcesslistCollector(factory, primary, replica, self._runtime)
+        )
+        self._processlist_lock = Lock()
+        self._latest_processlist: dict[str, object] = {
+            "sampled_at_ns": time.monotonic_ns(),
+            "endpoints": {
+                "primary": FuzzProcesslistCollector._empty_endpoint(0),
+                "replica": FuzzProcesslistCollector._empty_endpoint(0),
+            },
+        }
         self._prepared_reader_queries: dict[
             tuple[str, int], _PreparedReaderQuery
         ] = {}
         self._prepared_reader_queries_lock = Lock()
+
+    @contextmanager
+    def _track_worker_connection(
+        self,
+        session: QuerySession,
+        *,
+        worker: str,
+        endpoint: str,
+        worker_kind: str,
+        database: str,
+    ) -> Iterator[None]:
+        connection_id = session.connection_id()
+        self._runtime.register_connection(
+            worker=worker,
+            endpoint=endpoint,
+            worker_kind=worker_kind,
+            database=database,
+            connection_id=connection_id,
+        )
+        try:
+            yield
+        finally:
+            self._runtime.unregister_connection(worker, connection_id)
 
     def run(self, request: RunRequest, stop_event: Event) -> RunSummary:
         if request.mode != "fuzz":
@@ -236,6 +304,7 @@ class FuzzModeService:
         pipeline = self._query_pipeline_factory()
         pipeline.start()
         self._query_pipeline = pipeline
+        self._runtime.set_phase("starting")
         monitor_done = Event()
         stop_monitor = Thread(
             target=self._monitor_stop,
@@ -252,6 +321,16 @@ class FuzzModeService:
             daemon=True,
         )
         telemetry_monitor.start()
+        processlist_done = Event()
+        processlist_monitor: Thread | None = None
+        if self._processlist_collector is not None:
+            processlist_monitor = Thread(
+                target=self._monitor_processlist,
+                args=(processlist_done,),
+                name="sf-fuzz-processlist",
+                daemon=True,
+            )
+            processlist_monitor.start()
         try:
             self._records.append(
                 {
@@ -269,6 +348,9 @@ class FuzzModeService:
                     "schema_refresh_interval_seconds": (
                         self._config.schema_refresh_interval_seconds
                     ),
+                    "diagnostics_interval_seconds": (
+                        self._config.diagnostics_interval_seconds
+                    ),
                     "connector_implementation": self._connector_implementation,
                     "seed": request.seed,
                 }
@@ -277,6 +359,17 @@ class FuzzModeService:
             try:
                 while not stop_event.is_set():
                     generation_started = time.monotonic()
+                    refresh_deadline_ns = None
+                    if self._config.schema_refresh_interval_seconds > 0:
+                        refresh_deadline_ns = time.monotonic_ns() + int(
+                            self._config.schema_refresh_interval_seconds
+                            * 1_000_000_000
+                        )
+                    self._runtime.set_phase(
+                        "materializing",
+                        generation=generation,
+                        refresh_deadline_ns=refresh_deadline_ns,
+                    )
                     self._records.append(
                         {
                             "type": "fuzz_generation_started",
@@ -305,6 +398,7 @@ class FuzzModeService:
                         )
                         break
                     try:
+                        self._runtime.set_phase("prewarming")
                         self._register_generation(generation, schemas)
                         prewarmed = self._prewarm_generation(
                             request,
@@ -351,6 +445,7 @@ class FuzzModeService:
                                 "seed": built.seed,
                             }
                         )
+                    self._runtime.set_databases_ready(len(schemas))
                     self._counters.increment("generations_ready")
                     build_elapsed_seconds = max(
                         0.0,
@@ -387,6 +482,7 @@ class FuzzModeService:
                                     ),
                                 }
                             )
+                    self._runtime.set_phase("running")
                     reason = self._run_generation_workers(
                         request,
                         generation,
@@ -398,6 +494,7 @@ class FuzzModeService:
                         break
                     generation += 1
             except Exception as error:
+                self._runtime.set_phase("failed")
                 self._records.append(
                     {
                         "type": "fuzz_run_failed",
@@ -419,6 +516,7 @@ class FuzzModeService:
                 over_budget=0,
                 stopped=stop_event.is_set(),
             )
+            self._runtime.set_phase("finished")
             self._append_stage_snapshot(request, final=True)
             self._records.append(
                 {
@@ -431,6 +529,8 @@ class FuzzModeService:
                     "reads": counters.reads,
                     "writes": counters.writes,
                     "errors": counters.errors,
+                    "timeouts": counters.timeouts,
+                    "connection_losses": counters.connection_losses,
                     "reconnects": counters.reconnects,
                     "stopped": summary.stopped,
                 }
@@ -443,6 +543,9 @@ class FuzzModeService:
             stop_monitor.join()
             telemetry_done.set()
             telemetry_monitor.join()
+            processlist_done.set()
+            if processlist_monitor is not None:
+                processlist_monitor.join(timeout=0.1)
             pipeline.close()
             self._query_pipeline = None
 
@@ -453,21 +556,83 @@ class FuzzModeService:
                 return
 
     def _monitor_telemetry(self, request: RunRequest, done: Event) -> None:
-        while not done.wait(5.0):
+        while not done.wait(self._config.diagnostics_interval_seconds):
             self._append_stage_snapshot(request, final=False)
+
+    def _monitor_processlist(self, done: Event) -> None:
+        collector = self._processlist_collector
+        if collector is None:
+            return
+        while not done.is_set():
+            try:
+                snapshot = collector.collect()
+            except Exception as error:  # pragma: no cover - defensive collector boundary
+                snapshot = {
+                    "sampled_at_ns": time.monotonic_ns(),
+                    "collector_error_type": type(error).__name__,
+                    "collector_error": str(error),
+                    "endpoints": {
+                        "primary": FuzzProcesslistCollector._empty_endpoint(0),
+                        "replica": FuzzProcesslistCollector._empty_endpoint(0),
+                    },
+                }
+            with self._processlist_lock:
+                self._latest_processlist = snapshot
+            if done.wait(self._config.diagnostics_interval_seconds):
+                return
 
     def _append_stage_snapshot(self, request: RunRequest, *, final: bool) -> None:
         snapshot = self._telemetry.snapshot()
-        self._records.append(
+        counters = asdict(self._counters.snapshot())
+        pipeline = self._query_pipeline
+        pipeline_snapshot = (
             {
-                "type": "fuzz_stage_snapshot",
-                "run_id": request.run_id,
-                "mode": "fuzz",
-                "occurred_at": _now(),
-                "final": final,
-                **snapshot,
+                "processes_total": 0,
+                "processes_alive": 0,
+                "registered_databases": 0,
+                "pending_requests": 0,
+                "pending_readers": 0,
+                "oldest_pending_ns": 0,
+                "max_pending_per_reader": 0,
             }
+            if pipeline is None
+            else asdict(pipeline.snapshot())
         )
+        with self._processlist_lock:
+            processlist = self._latest_processlist
+        runtime_snapshot, runtime_connections = self._runtime.snapshot_with_connections()
+        registered_connections = tuple(
+            asdict(connection) for connection in runtime_connections
+        )
+        connection_groups = runtime_snapshot.get("connection_groups", {})
+        document = {
+            "type": "fuzz_stage_snapshot",
+            "run_id": request.run_id,
+            "mode": "fuzz",
+            "occurred_at": _now(),
+            "final": final,
+            **snapshot,
+            "counters": counters,
+            "pipeline": pipeline_snapshot,
+            "runtime": runtime_snapshot,
+            "connections": {
+                "total": len(registered_connections),
+                "groups": connection_groups,
+                "registered": registered_connections[:3],
+                "truncated": max(0, len(registered_connections) - 3),
+            },
+            "processlist": processlist,
+        }
+        self._records.append(document)
+        reporter = self._progress_reporter
+        sink = self._progress_sink
+        if reporter is None or sink is None:
+            return
+        try:
+            for line in reporter.render(document):
+                sink(line)
+        except Exception:
+            return
 
     def _materialize_generation(
         self,
@@ -736,6 +901,7 @@ class FuzzModeService:
                     "reason": reason,
                 }
             )
+            self._runtime.set_phase("stopping")
             generation_stop.set()
             if failures:
                 self._streaming.stop_active()
@@ -893,7 +1059,16 @@ class FuzzModeService:
         while not stop_event.is_set():
             try:
                 self._telemetry.set_stage(worker_key, "connecting")
-                with self._factory.query_session(node, schema.database) as session:
+                with (
+                    self._factory.query_session(node, schema.database) as session,
+                    self._track_worker_connection(
+                        session,
+                        worker=worker_key,
+                        endpoint=endpoint,
+                        worker_kind="reader",
+                        database=schema.database,
+                    ),
+                ):
                     _tag_worker_session(
                         session,
                         worker_kind="reader",
@@ -970,6 +1145,10 @@ class FuzzModeService:
                         if result.success:
                             self._counters.increment("reads")
                             continue
+                        if result.timed_out:
+                            self._counters.increment("timeouts")
+                        if result.connection_lost:
+                            self._counters.increment("connection_losses")
                         self._record_error(
                             request,
                             schema.database,
@@ -1040,10 +1219,19 @@ class FuzzModeService:
         while not stop_event.is_set():
             try:
                 self._telemetry.set_stage(worker_key, "connecting")
-                with self._factory.query_session(
-                    self._primary,
-                    schema.database,
-                ) as session:
+                with (
+                    self._factory.query_session(
+                        self._primary,
+                        schema.database,
+                    ) as session,
+                    self._track_worker_connection(
+                        session,
+                        worker=worker_key,
+                        endpoint="primary",
+                        worker_kind="writer",
+                        database=schema.database,
+                    ),
+                ):
                     _tag_worker_session(
                         session,
                         worker_kind="writer",
@@ -1130,6 +1318,10 @@ class FuzzModeService:
                                     transaction_connection_lost = result.connection_lost
                                     if result.stopped:
                                         break
+                                    if result.timed_out:
+                                        self._counters.increment("timeouts")
+                                    if result.connection_lost:
+                                        self._counters.increment("connection_losses")
                                     self._record_error(
                                         request,
                                         schema.database,
@@ -1225,6 +1417,12 @@ class FuzzModeService:
         if sql is not None:
             record["sql"] = sql
         self._records.append(record)
+        self._runtime.record_issue(
+            worker=f"{database}:{worker_kind}-{endpoint}:{worker_id}",
+            endpoint=endpoint,
+            error=error,
+            sql=sql,
+        )
 
     def _record_reconnect(
         self,
@@ -1236,6 +1434,11 @@ class FuzzModeService:
         error: Exception,
         delay: float,
     ) -> None:
+        self._runtime.record_issue(
+            worker=f"{database}:{worker_kind}-{endpoint}:{worker_id}",
+            endpoint=endpoint,
+            error=f"{type(error).__name__}: {error}",
+        )
         self._records.append(
             {
                 "type": "fuzz_worker_reconnect",

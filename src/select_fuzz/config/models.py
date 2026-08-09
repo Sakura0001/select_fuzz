@@ -300,6 +300,7 @@ class FuzzConfig(StrictModel):
     schema_refresh_interval_seconds: float = Field(default=1800.0, ge=0)
     connector_implementation: Literal["auto", "c", "python"] = "auto"
     control_connection_reserve: int = Field(default=8, ge=1, le=128)
+    diagnostics_interval_seconds: float = Field(default=5.0, gt=0, le=60)
     query_kill_grace_seconds: float = Field(default=1.0, gt=0, le=10)
     reconnect_initial_delay_seconds: float = Field(default=0.25, gt=0, le=30)
     reconnect_max_delay_seconds: float = Field(default=10.0, gt=0, le=60)

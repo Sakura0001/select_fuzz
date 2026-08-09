@@ -72,3 +72,11 @@ def test_c_workers_use_a_separate_pure_python_setup_factory(
     assert service._factory is factories[0]  # type: ignore[attr-defined]
     assert materializer._factory is factories[1]  # type: ignore[attr-defined]
     assert all(factory.control_use_pure is True for factory in factories)
+
+
+def test_production_fuzz_progress_is_flushed_to_stderr_only(capsys) -> None:  # type: ignore[no-untyped-def]
+    entrypoint._stderr_progress("[fuzz状态] 判断=负载正常推进")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "[fuzz状态] 判断=负载正常推进\n"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import mysql.connector
 
@@ -21,6 +22,10 @@ from select_fuzz.modes.fuzz.query_pipeline import (
 )
 from select_fuzz.modes.fuzz.service import FuzzModeService
 from select_fuzz.modes.fuzz.sql_log import FuzzSqlRecorder
+
+
+def _stderr_progress(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
 
 
 def build_fuzz_runner(config: AppConfig, artifact_root: Path) -> FuzzModeService:
@@ -90,6 +95,7 @@ def build_fuzz_runner(config: AppConfig, artifact_root: Path) -> FuzzModeService
             ),
         ),
         sql_recorder=sql_recorder,
+        progress_sink=_stderr_progress,
         connector_implementation=actual_connector,
         materializer_factory=lambda: FuzzMaterializer(
             setup_factory,

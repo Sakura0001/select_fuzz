@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 import multiprocessing
 import os
@@ -55,6 +56,17 @@ class GenerationOutcome:
     wait_ns: int
 
 
+@dataclass(frozen=True, slots=True)
+class QueryPipelineSnapshot:
+    processes_total: int
+    processes_alive: int
+    registered_databases: int
+    pending_requests: int
+    pending_readers: int
+    oldest_pending_ns: int
+    max_pending_per_reader: int
+
+
 class GenerationTicket(Protocol):
     def result(self, stop_event: StopEventLike) -> GenerationOutcome: ...
 
@@ -86,6 +98,8 @@ class QueryGenerationPipeline(Protocol):
     ) -> GenerationTicket: ...
 
     def cancel_reader(self, database_ordinal: int, reader_id: int) -> None: ...
+
+    def snapshot(self) -> QueryPipelineSnapshot: ...
 
     def close(self) -> None: ...
 
@@ -142,7 +156,7 @@ class InlineQueryPipeline:
     def __init__(self, generator: QueryGenerator) -> None:
         self._generator = generator
         self._schemas: dict[int, QueryGenerationContext] = {}
-        self._pending: dict[tuple[int, int], int] = {}
+        self._pending: dict[tuple[int, int], deque[int]] = {}
         self._lock = Lock()
         self._closed = False
 
@@ -193,10 +207,10 @@ class InlineQueryPipeline:
             context = self._schemas.get(database_ordinal)
             if context is None:
                 raise KeyError(f"database ordinal is not registered: {database_ordinal}")
-            pending = self._pending.get(key, 0)
-            if pending >= READER_QUERY_PREFETCH_DEPTH:
+            pending = self._pending.setdefault(key, deque())
+            if len(pending) >= READER_QUERY_PREFETCH_DEPTH:
                 raise RuntimeError("reader has too many outstanding generation requests")
-            self._pending[key] = pending + 1
+            pending.append(time.monotonic_ns())
         started_ns = time.monotonic_ns()
         try:
             query = self._generator.generate(context, seed=seed)
@@ -220,15 +234,37 @@ class InlineQueryPipeline:
 
     def _release(self, key: tuple[int, int]) -> None:
         with self._lock:
-            pending = self._pending.get(key, 0)
-            if pending <= 1:
+            pending = self._pending.get(key)
+            if pending is None:
+                return
+            if pending:
+                pending.popleft()
+            if not pending:
                 self._pending.pop(key, None)
-            else:
-                self._pending[key] = pending - 1
 
     def cancel_reader(self, database_ordinal: int, reader_id: int) -> None:
         with self._lock:
             self._pending.pop((database_ordinal, reader_id), None)
+
+    def snapshot(self) -> QueryPipelineSnapshot:
+        now_ns = time.monotonic_ns()
+        with self._lock:
+            pending_sizes = tuple(len(pending) for pending in self._pending.values())
+            oldest_started_ns = min(
+                (pending[0] for pending in self._pending.values() if pending),
+                default=now_ns,
+            )
+            return QueryPipelineSnapshot(
+                processes_total=0,
+                processes_alive=0,
+                registered_databases=len(self._schemas),
+                pending_requests=sum(pending_sizes),
+                pending_readers=len(pending_sizes),
+                oldest_pending_ns=(
+                    max(0, now_ns - oldest_started_ns) if pending_sizes else 0
+                ),
+                max_pending_per_reader=max(pending_sizes, default=0),
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -418,7 +454,7 @@ class ProcessQueryPipeline:
         self._response_queues: dict[tuple[int, int], Any] = {}
         self._processes: list[Any] = []
         self._stop_event: Any | None = None
-        self._pending_readers: dict[tuple[int, int], int] = {}
+        self._pending_readers: dict[tuple[int, int], deque[int]] = {}
         self._registered: set[int] = set()
         self._next_job_id = 1
         self._lock = Lock()
@@ -539,17 +575,26 @@ class ProcessQueryPipeline:
                 raise KeyError(f"database ordinal is not registered: {database_ordinal}")
             if key not in self._reader_process_indices:
                 raise KeyError(f"reader is not configured: {key}")
-            pending = self._pending_readers.get(key, 0)
-            if pending >= READER_QUERY_PREFETCH_DEPTH:
+            pending = self._pending_readers.setdefault(key, deque())
+            if len(pending) >= READER_QUERY_PREFETCH_DEPTH:
                 raise RuntimeError("reader has too many outstanding generation requests")
             job_id = self._next_job_id
             self._next_job_id += 1
-            self._pending_readers[key] = pending + 1
+            pending.append(time.monotonic_ns())
             queue_index = self._reader_process_indices[key]
             response_queue = self._response_queues[key]
-        self._request_queues[queue_index].put(
-            _Generate(job_id, database_ordinal, reader_id, seed)
-        )
+        try:
+            self._request_queues[queue_index].put(
+                _Generate(job_id, database_ordinal, reader_id, seed)
+            )
+        except BaseException:
+            with self._lock:
+                rollback_pending = self._pending_readers.get(key)
+                if rollback_pending:
+                    rollback_pending.pop()
+                    if not rollback_pending:
+                        self._pending_readers.pop(key, None)
+            raise
         return _ProcessTicket(self, response_queue, job_id, key)
 
     def _require_started(self) -> None:
@@ -575,15 +620,41 @@ class ProcessQueryPipeline:
 
     def release_reader(self, key: tuple[int, int]) -> None:
         with self._lock:
-            pending = self._pending_readers.get(key, 0)
-            if pending <= 1:
+            pending = self._pending_readers.get(key)
+            if pending is None:
+                return
+            if pending:
+                pending.popleft()
+            if not pending:
                 self._pending_readers.pop(key, None)
-            else:
-                self._pending_readers[key] = pending - 1
 
     def cancel_reader(self, database_ordinal: int, reader_id: int) -> None:
         with self._lock:
             self._pending_readers.pop((database_ordinal, reader_id), None)
+
+    def snapshot(self) -> QueryPipelineSnapshot:
+        now_ns = time.monotonic_ns()
+        with self._lock:
+            processes = tuple(self._processes)
+            pending_sizes = tuple(
+                len(pending) for pending in self._pending_readers.values()
+            )
+            oldest_started_ns = min(
+                (pending[0] for pending in self._pending_readers.values() if pending),
+                default=now_ns,
+            )
+            registered_databases = len(self._registered)
+        return QueryPipelineSnapshot(
+            processes_total=self._process_count,
+            processes_alive=sum(process.is_alive() for process in processes),
+            registered_databases=registered_databases,
+            pending_requests=sum(pending_sizes),
+            pending_readers=len(pending_sizes),
+            oldest_pending_ns=(
+                max(0, now_ns - oldest_started_ns) if pending_sizes else 0
+            ),
+            max_pending_per_reader=max(pending_sizes, default=0),
+        )
 
     @property
     def alive_processes(self) -> int:
@@ -644,6 +715,7 @@ __all__ = [
     "GenerationTicket",
     "InlineQueryPipeline",
     "ProcessQueryPipeline",
+    "QueryPipelineSnapshot",
     "QueryGenerationPipeline",
     "QueryGenerationProcessDied",
     "QueryGenerationStopped",

@@ -92,6 +92,17 @@ class _RecordingQueue:
         self.messages.append(message)
 
 
+class _ToggleFailQueue(_RecordingQueue):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail = False
+
+    def put(self, message: object) -> None:
+        if self.fail:
+            raise RuntimeError("injected submit queue failure")
+        super().put(message)
+
+
 class _RollbackQueue(_RecordingQueue):
     def __init__(self) -> None:
         super().__init__()
@@ -244,6 +255,30 @@ def test_inline_pipeline_preserves_seed_and_query_identity() -> None:
     assert generator.seeds == [991]
     assert outcome.compute_ns >= 0
     assert outcome.wait_ns >= 0
+    pipeline.close()
+
+
+def test_inline_pipeline_snapshot_tracks_and_releases_pending_ticket() -> None:
+    pipeline = InlineQueryPipeline(_RecordingGenerator())
+    pipeline.start()
+    pipeline.register_database(0, "sf_f_case", _schema())
+
+    ticket = pipeline.submit(0, 1, 0, seed=991)
+    pending = pipeline.snapshot()
+
+    assert pending.processes_total == 0
+    assert pending.processes_alive == 0
+    assert pending.registered_databases == 1
+    assert pending.pending_requests == 1
+    assert pending.pending_readers == 1
+    assert pending.max_pending_per_reader == 1
+    assert pending.oldest_pending_ns >= 0
+
+    ticket.result(Event())
+    drained = pipeline.snapshot()
+    assert drained.pending_requests == 0
+    assert drained.pending_readers == 0
+    assert drained.oldest_pending_ns == 0
     pipeline.close()
 
 
@@ -442,6 +477,15 @@ def test_pipeline_allows_three_bounded_prefetches_per_reader() -> None:
     second = pipeline.submit(0, 2, 1, seed=2)
     third = pipeline.submit(0, 2, 2, seed=3)
 
+    pending = pipeline.snapshot()
+    assert pending.processes_total == 1
+    assert pending.processes_alive == 1
+    assert pending.registered_databases == 1
+    assert pending.pending_requests == 3
+    assert pending.pending_readers == 1
+    assert pending.max_pending_per_reader == 3
+    assert pending.oldest_pending_ns >= 0
+
     try:
         pipeline.submit(0, 2, 3, seed=4)
     except RuntimeError as error:
@@ -453,6 +497,49 @@ def test_pipeline_allows_three_bounded_prefetches_per_reader() -> None:
     second.result(Event())
     third.result(Event())
     pipeline.close()
+
+
+def test_pipeline_cancel_clears_pending_diagnostics() -> None:
+    pipeline = ProcessQueryPipeline(
+        process_count=1,
+        max_tables_per_query_block=1,
+        reader_keys=((0, 0),),
+        shutdown_timeout_seconds=2,
+    )
+    pipeline.start()
+    pipeline.register_database(0, "sf_f_case", _schema())
+    pipeline.submit(0, 0, 0, seed=101)
+
+    pipeline.cancel_reader(0, 0)
+
+    snapshot = pipeline.snapshot()
+    assert snapshot.pending_requests == 0
+    assert snapshot.pending_readers == 0
+    assert snapshot.max_pending_per_reader == 0
+    assert snapshot.oldest_pending_ns == 0
+    pipeline.close()
+
+
+def test_process_submit_failure_removes_only_the_failed_pending_timestamp() -> None:
+    pipeline = ProcessQueryPipeline(
+        process_count=1,
+        max_tables_per_query_block=1,
+        reader_keys=((0, 0),),
+    )
+    queue = _ToggleFailQueue()
+    pipeline._request_queues = [queue]  # type: ignore[attr-defined]
+    pipeline._response_queues = {(0, 0): _RecordingQueue()}  # type: ignore[attr-defined]
+    pipeline._started = True  # type: ignore[attr-defined]
+    pipeline.register_database(0, "sf_f_case", _schema())
+    pipeline.submit(0, 0, 0, seed=1)
+    pipeline.submit(0, 0, 1, seed=2)
+    before = tuple(pipeline._pending_readers[(0, 0)])  # type: ignore[attr-defined]
+    queue.fail = True
+
+    with pytest.raises(RuntimeError, match="injected submit queue failure"):
+        pipeline.submit(0, 0, 2, seed=3)
+
+    assert tuple(pipeline._pending_readers[(0, 0)]) == before  # type: ignore[attr-defined]
 
 
 def test_direct_reader_channel_discards_a_cancelled_job_response() -> None:

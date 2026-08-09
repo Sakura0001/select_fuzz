@@ -230,7 +230,7 @@ uv run select-fuzz run --mode fuzz --config config/local.yaml \
 - 每次读查询 50% 选择负载型查询，50% 选择完全随机 SQL grammar。负载型查询覆盖扫描、
   聚合、JOIN、GROUP BY、窗口函数和子查询；随机 grammar 覆盖 CTE、LATERAL、派生表、
   嵌套子查询、窗口、HAVING、Hints、类型转换和随机表达式。
-- reader 的下一条 SELECT 由有界多进程流水线提前生成，每个 reader 最多预取一条；
+- reader 的下一条 SELECT 由有界多进程流水线提前生成，每个 reader 最多预取三条；
   每代内 seed、SQL 顺序、长期连接和固定 endpoint 保持稳定，换代时使用新 schema seed
   并重建连接。writer 的 DML 仍在线程内按事务即时生成。
 - `schema_refresh_interval_seconds` 默认 1800 秒，并从本代开始创建数据库时计时。到点后
@@ -243,6 +243,14 @@ uv run select-fuzz run --mode fuzz --config config/local.yaml \
 - 每条 fuzz worker 会话设置只用于观测的 `@select_fuzz_worker` 标签：
   `primary_writer`、`primary_reader` 或 `replica_reader`。共享代理 endpoint 下也能通过
   `performance_schema.user_variables_by_thread` 核对逻辑主备连接分布。
+- `diagnostics_interval_seconds` 默认 `5`。运行期间终端每 5 秒向 `stderr` 输出一行中文
+  `[fuzz状态]`，联合展示读写增量、线程阶段及最长停留、SQL 生成进程和待处理请求、
+  主备登记连接以及这些连接在 `PROCESSLIST` 中的 Sleep/Query 数量。最终 `stdout` 仍只输出
+  汇总 JSON，现有脚本可以继续解析。
+- 连续 15 秒没有完成读查询时，程序额外输出 `[fuzz警告]` 和 `初步原因`。常见判断包括
+  SQL 生成速度不足、生成进程退出、查询仍在 MySQL 执行、客户端拉取结果、连接重试、
+  工作线程缺失，以及“程序标记执行但 MySQL 显示 Sleep”的状态矛盾。诊断采样失败只显示
+  原始错误，不会中断 fuzz。
 - 每张表默认随机生成 200～500 列，包含固定业务列和随机类型列；候选类型池包含整数、精确数值、
   浮点、BIT、日期时间、字符、二进制、TEXT/BLOB、ENUM、SET 等 56 个变体。每张表随机
   抽样，不保证单表一次运行出现全部 56 个变体。
@@ -259,14 +267,14 @@ uv run select-fuzz run --mode fuzz --config config/local.yaml \
 - `databases` 为 1～32；每个 database 的 writer 为 1～64，reader 为 3～192，reader
   数必须是 3 的倍数；总连接数受 `max_total_connections` 限制，默认上限为 1024，最大可配 4096。
 - 每个 database 默认 4 张表（允许 1～16 张）、每表 10000 行，累计行数受
-  `max_rows_per_database` 限制；初始行数配置下限为 100。
+  `max_rows_per_database` 限制；初始行数配置下限为 20。
 - 每表列数配置范围为 50～500，本地压力配置默认随机 200～500；索引数范围为 4～64，默认随机 4～12。
 - INSERT/UPDATE/UPSERT 批量默认 100～100000 行；DELETE 默认 10～100 行且有 `id=1`
   保护。DML 权重四项之和必须为 100，默认 INSERT/UPDATE/DELETE/UPSERT = 35/45/10/10。
 - 查询超时不超过 300 秒；连接重连退避初始值不超过 30 秒，最大值不超过 60 秒。
 - `query_generator_processes=0` 时按总 reader 数与 CPU 核数自动选择生成进程，自动模式
   最多 32 个；同一数据库的生成任务也会分散到全部进程，避免 reader 在单进程队列中
-  串行等待。每个 reader 的预取深度固定为 1。`connector_implementation=auto` 在 fuzz
+  串行等待。每个 reader 的预取深度固定为 3。`connector_implementation=auto` 在 fuzz
   模式优先使用 Connector C 扩展，不可用时回退 pure Python。
 - 周期换代不会叠加两代 worker 连接，也没有代数上限。旧批次数据库、失败批次中已经
   创建的数据库和半成品对象均不删除；新批次任一数据库初始化或主备同步失败都会使整个

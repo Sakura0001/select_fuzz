@@ -59,6 +59,8 @@ fuzz:
   schema_refresh_interval_seconds: 1800
   connector_implementation: auto
   control_connection_reserve: 8
+  # 默认开启终端实时诊断；每 5 秒输出线程、SQL 生成队列和主备 PROCESSLIST 判断。
+  diagnostics_interval_seconds: 5
   query_kill_grace_seconds: 1
   reconnect_initial_delay_seconds: 0.25
   reconnect_max_delay_seconds: 10

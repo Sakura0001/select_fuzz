@@ -140,6 +140,12 @@ class SQLGenerator:
                     "lateral_derived_table",
                     "context_functions",
                     "literal_extensions",
+                    "rand_expressions",
+                    "json_function_extensions",
+                    "string_function_extensions",
+                    "datetime_function_extensions",
+                    "math_function_extensions",
+                    "aggregate_window_extensions",
                 ]
             )
         if feature == "constant_select":
@@ -251,7 +257,161 @@ class SQLGenerator:
             self._hit("BIT_LITERAL")
             self._hit("BIT_COUNT")
             return "SELECT X'0F' AS hex_string, 0xFF AS hex_number, b'1010' AS bit_value, BIT_COUNT(b'1010') AS bit_count"
+        if feature == "rand_expressions":
+            self._hit("RAND")
+            self._hit("ORDER BY RAND")
+            seed = self.random_int(1, 999)
+            return f"SELECT RAND() AS r0, RAND({seed}) AS r1 WHERE RAND() < 0.95 ORDER BY RAND({seed})"
+        if feature == "json_function_extensions":
+            return self._json_function_extension_query()
+        if feature == "string_function_extensions":
+            return self._string_function_extension_query()
+        if feature == "datetime_function_extensions":
+            return self._datetime_function_extension_query()
+        if feature == "math_function_extensions":
+            return self._math_function_extension_query()
+        if feature == "aggregate_window_extensions":
+            return self._aggregate_window_extension_query(tables)
         return None
+
+    def _json_function_extension_query(self) -> str:
+        for name in [
+            "JSON_TYPE",
+            "JSON_VALID",
+            "JSON_UNQUOTE",
+            "JSON_QUOTE",
+            "JSON_SET",
+            "JSON_REMOVE",
+            "JSON_REPLACE",
+            "JSON_CONTAINS_PATH",
+            "JSON_OBJECT",
+        ]:
+            self._hit(name)
+        return (
+            "SELECT "
+            "JSON_TYPE(JSON_OBJECT('k', 'v')) AS jt, "
+            "JSON_VALID(JSON_OBJECT('k', 'v')) AS jv, "
+            "JSON_UNQUOTE(JSON_QUOTE('abc')) AS ju, "
+            "JSON_QUOTE('abc') AS jq, "
+            "JSON_SET(JSON_OBJECT('k', 'v'), '$.n', 1) AS js, "
+            "JSON_REMOVE(JSON_OBJECT('k', 'v', 'n', 1), '$.n') AS jr, "
+            "JSON_REPLACE(JSON_OBJECT('k', 'v'), '$.k', 'x') AS jrp, "
+            "JSON_CONTAINS_PATH(JSON_OBJECT('k', 'v'), 'one', '$.k') AS jcp"
+        )
+
+    def _string_function_extension_query(self) -> str:
+        for name in [
+            "CHAR_LENGTH",
+            "LEFT",
+            "RIGHT",
+            "TRIM",
+            "LTRIM",
+            "RTRIM",
+            "REPLACE",
+            "REVERSE",
+            "LOCATE",
+            "INSTR",
+            "REGEXP_LIKE",
+            "REGEXP_REPLACE",
+            "REGEXP_SUBSTR",
+        ]:
+            self._hit(name)
+        return (
+            "SELECT "
+            "CHAR_LENGTH('abc') AS cl, "
+            "LEFT('abcdef', 3) AS lft, "
+            "RIGHT('abcdef', 3) AS rgt, "
+            "TRIM('  abc  ') AS trm, "
+            "LTRIM('  abc') AS ltrm, "
+            "RTRIM('abc  ') AS rtrm, "
+            "REPLACE('abcabc', 'a', 'x') AS repl, "
+            "REVERSE('abc') AS rev, "
+            "LOCATE('b', 'abc') AS loc, "
+            "INSTR('abc', 'b') AS ins, "
+            "REGEXP_LIKE('abc123', '[0-9]+') AS regexp_like_v, "
+            "REGEXP_REPLACE('abc123', '[0-9]+', 'n') AS rrepl, "
+            "REGEXP_SUBSTR('abc123', '[0-9]+') AS rsub"
+        )
+
+    def _datetime_function_extension_query(self) -> str:
+        for name in [
+            "DATE_SUB",
+            "DATEDIFF",
+            "EXTRACT",
+            "HOUR",
+            "MINUTE",
+            "SECOND",
+            "TIME_TO_SEC",
+            "SEC_TO_TIME",
+            "TO_DAYS",
+            "TO_SECONDS",
+        ]:
+            self._hit(name)
+        return (
+            "SELECT "
+            "DATE_SUB(TIMESTAMP '2026-01-03 10:11:12', INTERVAL 1 DAY) AS ds, "
+            "DATEDIFF(DATE '2026-01-03', DATE '2026-01-01') AS dd, "
+            "EXTRACT(YEAR FROM TIMESTAMP '2026-01-03 10:11:12') AS ex, "
+            "HOUR(TIME '10:11:12') AS hr, "
+            "MINUTE(TIME '10:11:12') AS mi, "
+            "SECOND(TIME '10:11:12') AS se, "
+            "TIME_TO_SEC(TIME '10:11:12') AS tts, "
+            "SEC_TO_TIME(3661) AS stt, "
+            "TO_DAYS(DATE '2026-01-03') AS td, "
+            "TO_SECONDS(TIMESTAMP '2026-01-03 10:11:12') AS ts"
+        )
+
+    def _math_function_extension_query(self) -> str:
+        for name in ["LOG", "LOG2", "LOG10", "POW", "SQRT", "SIGN", "TRUNCATE", "SIN", "COS", "TAN"]:
+            self._hit(name)
+        return (
+            "SELECT "
+            "LOG(10) AS lg, "
+            "LOG2(8) AS lg2, "
+            "LOG10(100) AS lg10, "
+            "POW(2, 3) AS pw, "
+            "SQRT(9) AS sq, "
+            "SIGN(-7) AS sg, "
+            "TRUNCATE(12.345, 2) AS tr, "
+            "SIN(1) AS sn, "
+            "COS(1) AS cs, "
+            "TAN(1) AS tn"
+        )
+
+    def _aggregate_window_extension_query(self, tables: List[TableMetadata]) -> str:
+        choice = self.random.choice(["AGGREGATE_STATS", "JSON_OBJECTAGG", "WINDOW_DISTRIBUTION"])
+        if choice == "WINDOW_DISTRIBUTION":
+            for name in ["CUME_DIST", "PERCENT_RANK", "NTH_VALUE"]:
+                self._hit(name)
+            return (
+                "SELECT "
+                "v, "
+                "CUME_DIST() OVER w AS cd, "
+                "PERCENT_RANK() OVER w AS pr, "
+                "NTH_VALUE(v, 1) OVER w AS nv "
+                "FROM (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3) AS d "
+                "WINDOW w AS (ORDER BY v ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)"
+            )
+        if choice == "JSON_OBJECTAGG":
+            self._hit("JSON_OBJECTAGG")
+            return (
+                "SELECT JSON_OBJECTAGG(k, v) AS jo "
+                "FROM (SELECT 'a' AS k, 1 AS v UNION ALL SELECT 'b', 2) AS d"
+            )
+        for name in ["STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "VARIANCE"]:
+            self._hit(name)
+        table = self.random.choice(self._permanent_tables(tables))
+        column = self._first_column(table, ColumnTypeFamily.INTEGER) or self._joinable_column(table)
+        expr = f"d.{_q(column.name)}"
+        return (
+            "SELECT "
+            f"STDDEV_POP({expr}) AS sp, "
+            f"STDDEV_SAMP({expr}) AS ss, "
+            f"VAR_POP({expr}) AS vp, "
+            f"VAR_SAMP({expr}) AS vs, "
+            f"VARIANCE({expr}) AS va "
+            f"FROM (SELECT {_q(column.name)} FROM {_q(table.name)} LIMIT 20) AS d"
+        )
 
     def _select_block(
         self,
@@ -568,12 +728,13 @@ class SQLGenerator:
         return f"ORDER BY {expr} {direction}"
 
     def _order_extension_clause(self, refs: List[TableRef], direction: str) -> str:
-        choice = self.random.choice(["FIELD", "RAND", "POSITION"])
+        choice = self.random.choice(["FIELD", "RAND", "RAND_SEED", "POSITION"])
         self._hit(f"ORDER BY {direction}")
-        if choice == "RAND":
+        if choice in {"RAND", "RAND_SEED"}:
             self._hit("RAND")
             self._hit("ORDER BY RAND")
-            return f"ORDER BY RAND() {direction}"
+            argument = f"({self.random_int(1, 999)})" if choice == "RAND_SEED" else "()"
+            return f"ORDER BY RAND{argument} {direction}"
         if choice == "POSITION":
             self._hit("ORDER BY POSITION")
             return f"ORDER BY 1 {direction}"
@@ -892,6 +1053,8 @@ class SQLGenerator:
     def _numeric_expr(self, refs: List[TableRef], depth: int) -> Expr:
         if depth <= 0 or self.random.random() < 0.45:
             return self._column_or_literal(refs, {ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT, ColumnTypeFamily.BIT})
+        if self.random.random() < 0.18:
+            return self._numeric_function_expr(refs, depth)
         if self.random.random() < 0.08:
             self._hit("~")
             return Expr(f"(~{self._numeric_expr(refs, depth - 1).sql})", ColumnTypeFamily.INTEGER)
@@ -906,11 +1069,78 @@ class SQLGenerator:
             right = str(self.random_int(0, 3))
         return Expr(f"({left} {op} {right})", ColumnTypeFamily.DECIMAL if op == "/" else ColumnTypeFamily.INTEGER)
 
+    def _numeric_function_expr(self, refs: List[TableRef], depth: int) -> Expr:
+        choice = self.random.choice(["RAND", "LOG", "LOG2", "LOG10", "POW", "SQRT", "SIGN", "TRUNCATE", "SIN", "COS", "TAN"])
+        self._hit(choice)
+        if choice == "RAND":
+            if self.random.random() < 0.45:
+                return Expr(f"RAND({self.random_int(1, 999)})", ColumnTypeFamily.FLOAT)
+            return Expr("RAND()", ColumnTypeFamily.FLOAT)
+        value = self._numeric_expr(refs, max(0, depth - 1)).sql
+        if choice == "LOG":
+            return Expr(f"LOG(ABS({value}) + 1)", ColumnTypeFamily.FLOAT)
+        if choice == "LOG2":
+            return Expr(f"LOG2(ABS({value}) + 1)", ColumnTypeFamily.FLOAT)
+        if choice == "LOG10":
+            return Expr(f"LOG10(ABS({value}) + 1)", ColumnTypeFamily.FLOAT)
+        if choice == "POW":
+            return Expr(f"POW(ABS({value}) + 1, 2)", ColumnTypeFamily.FLOAT)
+        if choice == "SQRT":
+            return Expr(f"SQRT(ABS({value}))", ColumnTypeFamily.FLOAT)
+        if choice == "SIGN":
+            return Expr(f"SIGN({value})", ColumnTypeFamily.INTEGER)
+        if choice == "TRUNCATE":
+            return Expr(f"TRUNCATE({value}, 2)", ColumnTypeFamily.DECIMAL)
+        return Expr(f"{choice}({value})", ColumnTypeFamily.FLOAT)
+
     def _string_expr(self, refs: List[TableRef], depth: int) -> Expr:
         if depth <= 0 or self.random.random() < 0.42:
             return self._column_or_literal(refs, {ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET})
-        choice = self.random.choice(["CONCAT", "SUBSTRING", "LOWER", "CAST", "CASE WHEN", "IF", "IFNULL"])
+        choice = self.random.choice(
+            [
+                "CONCAT",
+                "SUBSTRING",
+                "LOWER",
+                "CAST",
+                "CASE WHEN",
+                "IF",
+                "IFNULL",
+                "CHAR_LENGTH",
+                "LEFT",
+                "RIGHT",
+                "TRIM",
+                "LTRIM",
+                "RTRIM",
+                "REPLACE",
+                "REVERSE",
+                "LOCATE",
+                "INSTR",
+                "REGEXP_LIKE",
+                "REGEXP_REPLACE",
+                "REGEXP_SUBSTR",
+            ]
+        )
         self._hit(choice)
+        if choice == "CHAR_LENGTH":
+            return Expr(f"CHAR_LENGTH({self._string_expr(refs, depth - 1).sql})", ColumnTypeFamily.INTEGER)
+        if choice == "LEFT":
+            return Expr(f"LEFT({self._string_expr(refs, depth - 1).sql}, {self.random_int(1, 8)})", ColumnTypeFamily.STRING)
+        if choice == "RIGHT":
+            return Expr(f"RIGHT({self._string_expr(refs, depth - 1).sql}, {self.random_int(1, 8)})", ColumnTypeFamily.STRING)
+        if choice in {"TRIM", "LTRIM", "RTRIM", "REVERSE"}:
+            return Expr(f"{choice}({self._string_expr(refs, depth - 1).sql})", ColumnTypeFamily.STRING)
+        if choice == "REPLACE":
+            return Expr(f"REPLACE({self._string_expr(refs, depth - 1).sql}, 'a', 'x')", ColumnTypeFamily.STRING)
+        if choice == "LOCATE":
+            return Expr(f"LOCATE('a', {self._string_expr(refs, depth - 1).sql})", ColumnTypeFamily.INTEGER)
+        if choice == "INSTR":
+            return Expr(f"INSTR({self._string_expr(refs, depth - 1).sql}, 'a')", ColumnTypeFamily.INTEGER)
+        if choice == "REGEXP_LIKE":
+            return Expr(f"REGEXP_LIKE({self._string_expr(refs, depth - 1).sql}, '[a-z0-9_]+')", ColumnTypeFamily.BOOLEAN)
+        if choice == "REGEXP_REPLACE":
+            return Expr(f"REGEXP_REPLACE({self._string_expr(refs, depth - 1).sql}, '[0-9]+', 'n')", ColumnTypeFamily.STRING)
+        if choice == "REGEXP_SUBSTR":
+            return Expr(f"REGEXP_SUBSTR({self._string_expr(refs, depth - 1).sql}, '[a-z0-9_]+')", ColumnTypeFamily.STRING)
         if choice == "CONCAT":
             return Expr(f"CONCAT({self._string_expr(refs, depth - 1).sql}, {self._string_literal()})", ColumnTypeFamily.STRING)
         if choice == "SUBSTRING":
@@ -932,8 +1162,25 @@ class SQLGenerator:
     def _datetime_expr(self, refs: List[TableRef], depth: int) -> Expr:
         column = self._column_or_literal(refs, {ColumnTypeFamily.DATETIME})
         if depth > 0 and self.random.random() < 0.45:
-            self._hit("DATE_ADD")
-            return Expr(f"DATE_ADD({column.sql}, INTERVAL {self.random_int(-10, 10)} DAY)", ColumnTypeFamily.DATETIME)
+            choice = self.random.choice(["DATE_ADD", "DATE_SUB", "DATEDIFF", "EXTRACT", "HOUR", "MINUTE", "SECOND", "TIME_TO_SEC", "SEC_TO_TIME", "TO_DAYS", "TO_SECONDS"])
+            self._hit(choice)
+            if choice == "DATE_ADD":
+                return Expr(f"DATE_ADD({column.sql}, INTERVAL {self.random_int(-10, 10)} DAY)", ColumnTypeFamily.DATETIME)
+            if choice == "DATE_SUB":
+                return Expr(f"DATE_SUB({column.sql}, INTERVAL {self.random_int(1, 10)} DAY)", ColumnTypeFamily.DATETIME)
+            if choice == "DATEDIFF":
+                return Expr(f"DATEDIFF({column.sql}, DATE '2026-01-01')", ColumnTypeFamily.INTEGER)
+            if choice == "EXTRACT":
+                return Expr(f"EXTRACT(YEAR FROM {column.sql})", ColumnTypeFamily.INTEGER)
+            if choice in {"HOUR", "MINUTE", "SECOND"}:
+                return Expr(f"{choice}({column.sql})", ColumnTypeFamily.INTEGER)
+            if choice == "TIME_TO_SEC":
+                return Expr(f"TIME_TO_SEC(TIME({column.sql}))", ColumnTypeFamily.INTEGER)
+            if choice == "SEC_TO_TIME":
+                return Expr(f"SEC_TO_TIME({self.random_int(0, 86399)})", ColumnTypeFamily.DATETIME)
+            if choice == "TO_DAYS":
+                return Expr(f"TO_DAYS({column.sql})", ColumnTypeFamily.INTEGER)
+            return Expr(f"TO_SECONDS({column.sql})", ColumnTypeFamily.INTEGER)
         if self.random.random() < 0.35:
             self._hit("YEAR")
             return Expr(f"YEAR({column.sql})", ColumnTypeFamily.INTEGER)
@@ -941,8 +1188,39 @@ class SQLGenerator:
 
     def _json_expr(self, refs: List[TableRef]) -> Expr:
         column = self._column_or_literal(refs, {ColumnTypeFamily.JSON})
-        choice = self.random.choice(["JSON_EXTRACT", "JSON_ARROW", "JSON_ARROW_UNQUOTE", "JSON_OBJECT"])
+        choice = self.random.choice(
+            [
+                "JSON_EXTRACT",
+                "JSON_ARROW",
+                "JSON_ARROW_UNQUOTE",
+                "JSON_OBJECT",
+                "JSON_TYPE",
+                "JSON_VALID",
+                "JSON_UNQUOTE",
+                "JSON_QUOTE",
+                "JSON_SET",
+                "JSON_REMOVE",
+                "JSON_REPLACE",
+                "JSON_CONTAINS_PATH",
+            ]
+        )
         self._hit(choice)
+        if choice == "JSON_TYPE":
+            return Expr(f"JSON_TYPE({column.sql})", ColumnTypeFamily.STRING)
+        if choice == "JSON_VALID":
+            return Expr(f"JSON_VALID({column.sql})", ColumnTypeFamily.INTEGER)
+        if choice == "JSON_UNQUOTE":
+            return Expr(f"JSON_UNQUOTE(JSON_EXTRACT({column.sql}, '$.k'))", ColumnTypeFamily.STRING)
+        if choice == "JSON_QUOTE":
+            return Expr(f"JSON_QUOTE({self._string_literal()})", ColumnTypeFamily.JSON)
+        if choice == "JSON_SET":
+            return Expr(f"JSON_SET(COALESCE({column.sql}, JSON_OBJECT()), '$.fuzz', {self.random_int(0, 99)})", ColumnTypeFamily.JSON)
+        if choice == "JSON_REMOVE":
+            return Expr(f"JSON_REMOVE(COALESCE({column.sql}, JSON_OBJECT()), '$.fuzz')", ColumnTypeFamily.JSON)
+        if choice == "JSON_REPLACE":
+            return Expr(f"JSON_REPLACE(COALESCE({column.sql}, JSON_OBJECT()), '$.k', {self._string_literal()})", ColumnTypeFamily.JSON)
+        if choice == "JSON_CONTAINS_PATH":
+            return Expr(f"JSON_CONTAINS_PATH(COALESCE({column.sql}, JSON_OBJECT()), 'one', '$.k')", ColumnTypeFamily.INTEGER)
         if choice == "JSON_ARROW" and column.sql.startswith("t"):
             return Expr(f"{column.sql}->'$.k'", ColumnTypeFamily.JSON)
         if choice == "JSON_ARROW_UNQUOTE" and column.sql.startswith("t"):
@@ -971,7 +1249,7 @@ class SQLGenerator:
 
     def _window_extension_expr(self, refs: List[TableRef]) -> str:
         column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT})
-        choice = self.random.choice(["LAG", "LEAD", "NTILE", "FIRST_VALUE", "LAST_VALUE"])
+        choice = self.random.choice(["LAG", "LEAD", "NTILE", "FIRST_VALUE", "LAST_VALUE", "CUME_DIST", "PERCENT_RANK", "NTH_VALUE"])
         self._hit(choice)
         if choice == "LAG":
             return f"LAG({column.sql}, 1, 0) OVER w"
@@ -981,6 +1259,12 @@ class SQLGenerator:
             return "NTILE(4) OVER w"
         if choice == "FIRST_VALUE":
             return f"FIRST_VALUE({column.sql}) OVER w"
+        if choice == "CUME_DIST":
+            return "CUME_DIST() OVER w"
+        if choice == "PERCENT_RANK":
+            return "PERCENT_RANK() OVER w"
+        if choice == "NTH_VALUE":
+            return f"NTH_VALUE({column.sql}, 1) OVER w"
         return f"LAST_VALUE({column.sql}) OVER w"
 
     def _window_frame_expr(self, refs: List[TableRef]) -> str:
@@ -1008,7 +1292,21 @@ class SQLGenerator:
         if self._active_options.require_feature == "aggregate_extensions" or self.random.random() < 0.28:
             return self._aggregate_extension_expr(refs)
         column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT})
-        function = self.random.choice(["COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT", "JSON_ARRAYAGG"])
+        function = self.random.choice([
+            "COUNT",
+            "SUM",
+            "AVG",
+            "MIN",
+            "MAX",
+            "GROUP_CONCAT",
+            "JSON_ARRAYAGG",
+            "JSON_OBJECTAGG",
+            "STDDEV_POP",
+            "STDDEV_SAMP",
+            "VAR_POP",
+            "VAR_SAMP",
+            "VARIANCE",
+        ])
         self._hit(function)
         if function == "COUNT":
             return "COUNT(*)"
@@ -1017,10 +1315,26 @@ class SQLGenerator:
             return f"GROUP_CONCAT({text})"
         if function == "JSON_ARRAYAGG":
             return f"JSON_ARRAYAGG({self._column_expr(refs).sql})"
+        if function == "JSON_OBJECTAGG":
+            key = self._column_expr(refs, preferred={ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET}).sql
+            value = self._column_expr(refs).sql
+            return f"JSON_OBJECTAGG(COALESCE(CAST({key} AS CHAR), 'k'), {value})"
         return f"{function}({column.sql})"
 
     def _aggregate_extension_expr(self, refs: List[TableRef]) -> str:
-        choice = self.random.choice(["COUNT DISTINCT", "BIT_AND", "BIT_OR", "BIT_XOR", "GROUP_CONCAT ORDER"])
+        choice = self.random.choice([
+            "COUNT DISTINCT",
+            "BIT_AND",
+            "BIT_OR",
+            "BIT_XOR",
+            "GROUP_CONCAT ORDER",
+            "STDDEV_POP",
+            "STDDEV_SAMP",
+            "VAR_POP",
+            "VAR_SAMP",
+            "VARIANCE",
+            "JSON_OBJECTAGG",
+        ])
         if choice == "COUNT DISTINCT":
             column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM}).sql
             self._hit("COUNT")
@@ -1030,6 +1344,15 @@ class SQLGenerator:
             column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.BIT}).sql
             self._hit(choice)
             return f"{choice}({column})"
+        if choice in {"STDDEV_POP", "STDDEV_SAMP", "VAR_POP", "VAR_SAMP", "VARIANCE"}:
+            column = self._column_expr(refs, preferred={ColumnTypeFamily.INTEGER, ColumnTypeFamily.DECIMAL, ColumnTypeFamily.FLOAT}).sql
+            self._hit(choice)
+            return f"{choice}({column})"
+        if choice == "JSON_OBJECTAGG":
+            key = self._column_expr(refs, preferred={ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET}).sql
+            value = self._column_expr(refs).sql
+            self._hit("JSON_OBJECTAGG")
+            return f"JSON_OBJECTAGG(COALESCE(CAST({key} AS CHAR), 'k'), {value})"
         text = self._column_expr(refs, preferred={ColumnTypeFamily.STRING, ColumnTypeFamily.ENUM, ColumnTypeFamily.SET}).sql
         self._hit("GROUP_CONCAT")
         self._hit("GROUP_CONCAT ORDER")

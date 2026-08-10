@@ -138,6 +138,7 @@ def test_mysql_8022_扩展覆盖矩阵只登记当前版本支持语法() -> Non
         "ORDER BY FIELD",
         "ORDER BY RAND",
         "ORDER BY POSITION",
+        "RAND",
         "USER",
         "CURRENT_USER",
         "DATABASE",
@@ -456,6 +457,12 @@ def test_mysql_8022_新增扩展不生成当前版本不支持语法() -> None:
         "order_expression_extensions",
         "context_functions",
         "literal_extensions",
+        "rand_expressions",
+        "json_function_extensions",
+        "string_function_extensions",
+        "datetime_function_extensions",
+        "math_function_extensions",
+        "aggregate_window_extensions",
     ]:
         generator = SQLGenerator(random_seed=810, max_sql_length=8000)
         for _ in range(80):
@@ -508,8 +515,96 @@ def test_mysql_8022_新增扩展语法会进入默认随机流量() -> None:
         "ORDER BY FIELD",
         "USER",
         "HEX_LITERAL",
+        "RAND",
+        "JSON_TYPE",
+        "JSON_VALID",
+        "JSON_SET",
+        "CHAR_LENGTH",
+        "REGEXP_REPLACE",
+        "DATE_SUB",
+        "DATEDIFF",
+        "LOG",
+        "POW",
+        "STDDEV_POP",
+        "CUME_DIST",
     ]:
         assert name in generator.coverage_counts
+
+
+def test_mysql_8022_rand和函数扩展能被强制覆盖() -> None:
+    tables = _base_tables()
+    feature_expectations = {
+        "rand_expressions": ["RAND", "ORDER BY RAND"],
+        "json_function_extensions": [
+            "JSON_TYPE",
+            "JSON_VALID",
+            "JSON_UNQUOTE",
+            "JSON_QUOTE",
+            "JSON_SET",
+            "JSON_REMOVE",
+            "JSON_REPLACE",
+            "JSON_CONTAINS_PATH",
+        ],
+        "string_function_extensions": [
+            "CHAR_LENGTH",
+            "LEFT",
+            "RIGHT",
+            "TRIM",
+            "LTRIM",
+            "RTRIM",
+            "REPLACE",
+            "REVERSE",
+            "LOCATE",
+            "INSTR",
+            "REGEXP_LIKE",
+            "REGEXP_REPLACE",
+            "REGEXP_SUBSTR",
+        ],
+        "datetime_function_extensions": [
+            "DATE_SUB",
+            "DATEDIFF",
+            "EXTRACT",
+            "HOUR",
+            "MINUTE",
+            "SECOND",
+            "TIME_TO_SEC",
+            "SEC_TO_TIME",
+            "TO_DAYS",
+            "TO_SECONDS",
+        ],
+        "math_function_extensions": ["LOG", "LOG2", "LOG10", "POW", "SQRT", "SIGN", "TRUNCATE", "SIN", "COS", "TAN"],
+        "aggregate_window_extensions": [
+            "STDDEV_POP",
+            "STDDEV_SAMP",
+            "VAR_POP",
+            "VAR_SAMP",
+            "VARIANCE",
+            "JSON_OBJECTAGG",
+            "CUME_DIST",
+            "PERCENT_RANK",
+            "NTH_VALUE",
+        ],
+    }
+
+    for feature, expected_hits in feature_expectations.items():
+        generator = SQLGenerator(random_seed=900, max_sql_length=8000)
+        for _ in range(320):
+            sql = generator.generate(
+                tables,
+                GenerationOptions(
+                    require_feature=feature,
+                    invalid_sql_ratio=0.0,
+                    null_compare_ratio=0.0,
+                    risky_expr_ratio=0.0,
+                ),
+            )
+            upper = sql.upper()
+            assert "MATCH " not in upper
+            assert " AGAINST" not in upper
+            assert re.search(r"\bST_[A-Z_]+\s*\(", upper) is None
+            assert " AS RLIKE" not in upper
+        for name in expected_hits:
+            assert name in generator.coverage_counts, f"{feature} 未覆盖 {name}"
 
 
 def test_生成_sql_只引用已知表并包含_cte_join() -> None:

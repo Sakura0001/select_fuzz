@@ -108,6 +108,27 @@ body {
   font-weight: 720;
 }
 
+.base-table-mode {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.base-table-mode .ant-typography,
+.base-table-mode-text,
+.base-table-reproduction,
+.base-table-seed {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .detail-card {
   min-height: 172px;
   background: rgba(2, 6, 23, 0.42) !important;

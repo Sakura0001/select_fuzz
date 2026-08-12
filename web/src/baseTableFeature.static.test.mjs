@@ -93,6 +93,9 @@ test("表单条件字段、任务卡片和准备进度文案完整呈现", () =>
   assert.match(app, /className="task-card-steps"/);
   assert.match(app, /className="base-table-reproduction-id"/);
   assert.match(styles, /\.task-card-steps[\s\S]*margin-top:/);
-  assert.match(styles, /\.base-table-mode\s+\.base-table-reproduction-id[\s\S]*white-space:\s*nowrap/);
+  assert.match(
+    styles,
+    /\.base-table-mode\s+\.base-table-seed,\s*\.base-table-mode\s+\.base-table-reproduction-id\s*\{[^}]*white-space:\s*nowrap/
+  );
   assert.doesNotMatch(styles, /\.base-table-mode\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
 });

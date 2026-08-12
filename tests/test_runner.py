@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from select_fuzz.base_tables import build_base_sql_bundle
 from select_fuzz.config import TargetNodeConfig
+from select_fuzz.metadata.models import BaseSqlFile
 from select_fuzz.monitor.logs import read_jsonl
 from select_fuzz.monitor.store import MetricStore
 from select_fuzz.runner.db import DatabaseClient, LostConnectionError
@@ -113,6 +117,240 @@ def _node() -> TargetNodeConfig:
         database="select_fuzz",
         jump_host="jump-prod",
     )
+
+
+def _in_memory_bundle(*, expanded: bool = False, seed: str | None = None):
+    return build_base_sql_bundle(
+        (
+            BaseSqlFile(
+                path=Path("t0.sql"),
+                sql="CREATE TABLE t0 (id BIGINT NOT NULL, PRIMARY KEY (id));\n",
+            ),
+            BaseSqlFile(
+                path=Path("t2.sql"),
+                sql="CREATE TEMPORARY TABLE t2 (id BIGINT NOT NULL, PRIMARY KEY (id));\n",
+            ),
+            BaseSqlFile(
+                path=Path("zz_seed_fk_data.sql"),
+                sql="INSERT INTO t0 (id) VALUES (1);\nINSERT INTO t2 (id) VALUES (2);\n",
+            ),
+        ),
+        expand_base_table_columns=expanded,
+        generator_version="v1" if expanded else None,
+        seed=seed if expanded else None,
+    )
+
+
+def test_无效基表目录在数据库连接前失败(tmp_path: Path) -> None:
+    directory = tmp_path / "invalid_base"
+    directory.mkdir()
+    (directory / "seed.sql").write_text("INSERT INTO missing VALUES (1);", encoding="utf-8")
+
+    class CountingDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_count = 0
+
+        def connect(self) -> None:
+            self.connect_count += 1
+            super().connect()
+
+    db = CountingDatabase()
+    task = FuzzTask(
+        task_id="task-invalid",
+        node=_node(),
+        base_sql_dir=directory,
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    try:
+        task.start()
+    except RuntimeError as exc:
+        assert "至少需要一张可解析的基表" in str(exc)
+    else:
+        raise AssertionError("无效基表必须在连接前失败")
+
+    assert db.connect_count == 0
+    assert db.executed == []
+    assert task.phase == "准备基表"
+
+
+def test_注入内存包时无需基表目录且所有_worker_使用同一对象(tmp_path: Path) -> None:
+    bundle = _in_memory_bundle(expanded=True, seed="12345")
+    databases = [FakeDatabase(), FakeDatabase(), FakeDatabase()]
+    database_iter = iter(databases[1:])
+    task = FuzzTask(
+        task_id="task-bundle",
+        node=_node(),
+        base_sql_bundle=bundle,
+        db=databases[0],
+        db_factory=lambda: next(database_iter),
+        thread_count=3,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    consumed_bundles = []
+    original_prepare = task._prepare_worker_session
+
+    def record_prepare(db: DatabaseClient, prepared_bundle) -> None:
+        consumed_bundles.append(prepared_bundle)
+        original_prepare(db, prepared_bundle)
+
+    task._prepare_worker_session = record_prepare
+
+    task.start()
+
+    assert task.base_sql_bundle is bundle
+    assert consumed_bundles == [bundle, bundle]
+    assert task.expand_base_table_columns is True
+    assert task.base_table_seed == "12345"
+    assert task.base_table_generator_version == "v1"
+
+
+def test_目录删除后恢复检测和_worker_重连仍复用启动时内存包(tmp_path: Path) -> None:
+    clock = FakeClock()
+    directory = _base_dir_with_temporary_table(tmp_path)
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-reuse",
+        node=_node(),
+        base_sql_dir=directory,
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    original_bundle = task.base_sql_bundle
+    assert original_bundle is not None
+    for path in directory.iterdir():
+        path.unlink()
+    directory.rmdir()
+    consumed_bundles = []
+    original_prepare = task._prepare_worker_session
+
+    def record_prepare(db_arg: DatabaseClient, prepared_bundle) -> None:
+        consumed_bundles.append(prepared_bundle)
+        original_prepare(db_arg, prepared_bundle)
+
+    task._prepare_worker_session = record_prepare
+
+    task._handle_lost_connection("SELECT 1", "Lost connection")
+    clock.advance(60)
+    task.probe_recovery()
+    task.record_worker_sql_start(0, "SELECT SLEEP(999)", clock())
+    clock.advance(31)
+    task.interrupt_stalled_workers(30)
+    assert task._ensure_worker_session(0, task._workers[0]) is True
+
+    assert task.status is TaskStatus.RUNNING
+    assert task.base_sql_bundle is original_bundle
+    assert consumed_bundles == [original_bundle, original_bundle]
+
+
+def test_目录删除后被动断连也使用原内存包重建临时会话(tmp_path: Path) -> None:
+    class PassiveDiagnosticDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_count = 0
+            self.close_count = 0
+
+        def connect(self) -> None:
+            self.connect_count += 1
+            super().connect()
+
+        def close(self) -> None:
+            self.close_count += 1
+            super().close()
+
+        def connection_diagnostics(self) -> dict:
+            return {
+                "connection_open": self.connected,
+                "connection_connect_count": self.connect_count,
+                "connection_close_count": self.close_count,
+            }
+
+    directory = _base_dir_with_temporary_table(tmp_path)
+    db = PassiveDiagnosticDatabase()
+    task = FuzzTask(
+        task_id="task-passive-reuse",
+        node=_node(),
+        base_sql_dir=directory,
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    original_bundle = task.base_sql_bundle
+    assert original_bundle is not None
+    for path in directory.iterdir():
+        path.unlink()
+    directory.rmdir()
+    prepared_bundles = []
+    original_prepare = task._prepare_worker_session
+
+    def record_prepare(db_arg: DatabaseClient, prepared_bundle) -> None:
+        prepared_bundles.append(prepared_bundle)
+        original_prepare(db_arg, prepared_bundle)
+
+    task._prepare_worker_session = record_prepare
+    db.connected = False
+    task.worker_states
+
+    assert task._ensure_worker_session(0, task._workers[0]) is True
+    assert db.connected is True
+    assert prepared_bundles == [original_bundle]
+    assert task.base_sql_bundle is original_bundle
+
+
+def test_暂停保留内存包而停止后释放_sql_引用(tmp_path: Path) -> None:
+    bundle = _in_memory_bundle()
+    task = FuzzTask(
+        task_id="task-release",
+        node=_node(),
+        base_sql_bundle=bundle,
+        db=FakeDatabase(),
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+
+    task.pause()
+    assert task.base_sql_bundle is bundle
+
+    task.stop()
+    assert task.base_sql_bundle is None
+    assert task.snapshot_counts()["base_table_seed"] is None
+
+
+def test_扩展任务_sql_jsonl_只记录复现元数据而不记录初始化_sql(tmp_path: Path) -> None:
+    bundle = _in_memory_bundle(expanded=True, seed="18446744073709551615")
+    task = FuzzTask(
+        task_id="task-expanded-log",
+        node=_node(),
+        base_sql_bundle=bundle,
+        db=FakeDatabase(),
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+        random_seed=7,
+    )
+
+    task.start()
+    task.step()
+
+    log_path = tmp_path / "logs" / "2026-06-04" / "task-expanded-log.sql.jsonl"
+    rows = read_jsonl(log_path)
+    assert rows[0]["expand_base_table_columns"] is True
+    assert rows[0]["base_table_seed"] == "18446744073709551615"
+    assert rows[0]["base_table_generator_version"] == "v1"
+    assert "CREATE TABLE t0" not in log_path.read_text(encoding="utf-8")
 
 
 def test_任务启动时按顺序执行基表目录全部_sql(tmp_path: Path) -> None:

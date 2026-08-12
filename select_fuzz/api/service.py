@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import itertools
+import secrets
 import threading
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from select_fuzz.base_tables import (
+    CURRENT_BASE_TABLE_GENERATOR_VERSION,
+    BaseSqlBundle,
+    generate_base_sql_bundle,
+    generate_core_base_sql_bundle,
+    load_base_sql_bundle,
+)
 from select_fuzz.config import JumpHostConfig, TargetNodeConfig
 from select_fuzz.monitor.logs import read_jsonl
 from select_fuzz.monitor.store import MetricStore
@@ -36,6 +44,9 @@ class TaskSnapshot:
     lost_connection_total: int = 0
     sql_rate: float = 0
     worker_states: list[dict] = field(default_factory=list)
+    expand_base_table_columns: bool = False
+    base_table_seed: Optional[str] = None
+    base_table_generator_version: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -48,6 +59,7 @@ class RuntimeService:
         log_dir: Path | str,
         failed_sql_dir: Path | str | None = None,
         base_sql_dir: Path | str | None = None,
+        use_builtin_base_tables: bool = False,
         db_factory: Optional[Callable[[TargetNodeConfig], DatabaseClient]] = None,
         run_background: bool = True,
         query_interval_seconds: float = 0.05,
@@ -57,6 +69,7 @@ class RuntimeService:
         self.log_dir = Path(log_dir)
         self.failed_sql_dir = Path(failed_sql_dir) if failed_sql_dir is not None else self.log_dir / "failed_sql"
         self.base_sql_dir = Path(base_sql_dir) if base_sql_dir is not None else None
+        self.use_builtin_base_tables = use_builtin_base_tables
         self.db_factory = db_factory
         self.run_background = run_background
         self.query_interval_seconds = query_interval_seconds
@@ -70,6 +83,13 @@ class RuntimeService:
         self._counter = itertools.count(1)
 
     def create_task(self, request: TaskCreateRequest) -> TaskSnapshot:
+        expand_base_table_columns = request.expand_base_table_columns
+        base_table_seed = request.base_table_seed
+        base_table_generator_version = request.base_table_generator_version
+        if expand_base_table_columns:
+            base_table_generator_version = base_table_generator_version or CURRENT_BASE_TABLE_GENERATOR_VERSION
+            base_table_seed = base_table_seed or str(secrets.randbits(64))
+
         task_id = f"task-{next(self._counter)}"
         snapshot = TaskSnapshot(
             task_id=task_id,
@@ -80,9 +100,25 @@ class RuntimeService:
             database=request.database or "test",
             jump_host=request.jump_host,
             thread_count=request.thread_count,
+            expand_base_table_columns=expand_base_table_columns,
+            base_table_seed=base_table_seed,
+            base_table_generator_version=base_table_generator_version,
         )
         self._tasks[task_id] = snapshot
-        if self.base_sql_dir is not None and self.db_factory is not None:
+        runtime_enabled = self.db_factory is not None and (
+            self.base_sql_dir is not None or self.use_builtin_base_tables
+        )
+        if runtime_enabled:
+            try:
+                base_sql_bundle = self._prepare_base_sql_bundle(
+                    expand_base_table_columns=expand_base_table_columns,
+                    generator_version=base_table_generator_version,
+                    seed=base_table_seed,
+                )
+            except Exception as exc:
+                self._mark_snapshot_failed(snapshot, exc, TaskStatus.SEEDING)
+                return snapshot
+
             node = TargetNodeConfig(
                 name=request.node_name,
                 host=request.host,
@@ -109,6 +145,7 @@ class RuntimeService:
                     task_id=task_id,
                     node=node,
                     base_sql_dir=self.base_sql_dir,
+                    base_sql_bundle=base_sql_bundle,
                     db=self.db_factory(db_node),
                     db_factory=lambda: self.db_factory(db_node),
                     metric_store=self.metric_store,
@@ -116,6 +153,9 @@ class RuntimeService:
                     failed_sql_dir=self.failed_sql_dir,
                     clock=lambda: datetime.now(timezone.utc),
                     thread_count=request.thread_count,
+                    expand_base_table_columns=expand_base_table_columns,
+                    base_table_seed=base_table_seed,
+                    base_table_generator_version=base_table_generator_version,
                 )
             except Exception as exc:
                 self._stop_jump_tunnel(task_id)
@@ -137,6 +177,31 @@ class RuntimeService:
             snapshot.phase = TaskStatus.RUNNING.value
             self.metric_store.upsert_task_metric(task_id, request.node_name, snapshot.status, 0, 0)
         return snapshot
+
+    def _prepare_base_sql_bundle(
+        self,
+        *,
+        expand_base_table_columns: bool,
+        generator_version: str | None,
+        seed: str | None,
+    ) -> BaseSqlBundle:
+        if expand_base_table_columns:
+            if not self.use_builtin_base_tables:
+                raise RuntimeError("自定义基表目录不支持扩展列")
+            if generator_version is None or seed is None:
+                raise RuntimeError("扩展基表列缺少生成器版本或种子")
+            return generate_base_sql_bundle(generator_version, seed)
+        if self.use_builtin_base_tables:
+            return generate_core_base_sql_bundle()
+        if self.base_sql_dir is None:
+            raise RuntimeError("未配置基表目录")
+        return load_base_sql_bundle(self.base_sql_dir)
+
+    def _mark_snapshot_failed(self, snapshot: TaskSnapshot, exc: Exception, phase: TaskStatus) -> None:
+        snapshot.status = TaskStatus.FAILED.value
+        snapshot.phase = phase.value
+        snapshot.last_error = f"{phase.value}失败: {exc}"
+        self.metric_store.upsert_task_metric(snapshot.task_id, snapshot.node_name, snapshot.status, 0, 0)
 
     def stop_task(self, task_id: str) -> TaskSnapshot:
         task = self._tasks[task_id]
@@ -270,6 +335,14 @@ class RuntimeService:
         except Exception as exc:
             task.fail(exc, phase=task.phase or TaskStatus.RUNNING.value)
         self._sync_snapshot_from_task(task)
+        if task.is_terminal:
+            self._finalize_terminal_task(task.task_id)
+
+    def _finalize_terminal_task(self, task_id: str) -> None:
+        stop_event = self._background_stop_events.get(task_id)
+        if stop_event is not None:
+            stop_event.set()
+        self._stop_jump_tunnel(task_id)
 
     def _sync_snapshot_from_task(self, task: FuzzTask) -> None:
         snapshot = self._tasks[task.task_id]
@@ -283,6 +356,9 @@ class RuntimeService:
         snapshot.ordinary_error_total = state["ordinary_error_total"]
         snapshot.lost_connection_total = state["lost_connection_total"]
         snapshot.worker_states = self._worker_states_with_thread_diagnostics(task.task_id, state["worker_states"])
+        snapshot.expand_base_table_columns = state["expand_base_table_columns"]
+        snapshot.base_table_seed = state["base_table_seed"]
+        snapshot.base_table_generator_version = state["base_table_generator_version"]
 
     def _worker_states_with_thread_diagnostics(self, task_id: str, worker_states: list[dict]) -> list[dict]:
         threads = self._background_worker_threads.get(task_id, {})

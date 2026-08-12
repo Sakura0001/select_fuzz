@@ -1,10 +1,16 @@
+from __future__ import annotations
+
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from select_fuzz.api.app import create_app, create_default_app
 from select_fuzz.api.service import RuntimeService
+from select_fuzz.base_tables import build_base_sql_bundle
+from select_fuzz.metadata.models import BaseSqlFile
 from select_fuzz.monitor.events import LostConnectionEvent
 from select_fuzz.monitor.logs import SqlLogRecord, append_jsonl
 from select_fuzz.monitor.store import MetricStore
@@ -15,9 +21,10 @@ class ApiFakeDatabase(DatabaseClient):
     def __init__(self) -> None:
         self.executed: list[str] = []
         self.scalar_queries: list[str] = []
+        self.connect_count = 0
 
     def connect(self) -> None:
-        return None
+        self.connect_count += 1
 
     def execute(self, sql: str) -> None:
         self.executed.append(sql)
@@ -56,6 +63,277 @@ def _client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(service))
 
 
+def _task_payload(**overrides) -> dict:
+    payload = {
+        "node_name": "node-a",
+        "host": "172.18.4.12",
+        "port": 3306,
+        "username": "fuzz",
+        "password": "secret",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _small_bundle(*, expanded: bool = False, seed: str | None = None):
+    return build_base_sql_bundle(
+        (
+            BaseSqlFile(
+                path=Path("t0.sql"),
+                sql="CREATE TABLE t0 (id BIGINT NOT NULL, PRIMARY KEY (id));\n",
+            ),
+        ),
+        expand_base_table_columns=expanded,
+        generator_version="v1" if expanded else None,
+        seed=seed if expanded else None,
+    )
+
+
+def test_创建任务默认关闭扩列并返回空复现参数(tmp_path: Path) -> None:
+    response = _client(tmp_path).post("/api/tasks", json=_task_payload())
+
+    assert response.status_code == 200
+    assert response.json()["expand_base_table_columns"] is False
+    assert response.json()["base_table_seed"] is None
+    assert response.json()["base_table_generator_version"] is None
+
+
+@pytest.mark.parametrize("value", [0, 1, "true", "false"])
+def test_扩列开关只接受_json_布尔值(tmp_path: Path, value: object) -> None:
+    response = _client(tmp_path).post(
+        "/api/tasks",
+        json=_task_payload(expand_base_table_columns=value),
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "extra_fields",
+    [
+        {"base_table_seed": "1"},
+        {"base_table_generator_version": "v1"},
+        {"base_table_seed": "", "base_table_generator_version": ""},
+    ],
+)
+def test_关闭扩列时拒绝非空复现参数但接受空字符串(tmp_path: Path, extra_fields: dict) -> None:
+    response = _client(tmp_path).post("/api/tasks", json=_task_payload(**extra_fields))
+
+    if all(value == "" for value in extra_fields.values()):
+        assert response.status_code == 200
+        assert response.json()["base_table_seed"] is None
+        assert response.json()["base_table_generator_version"] is None
+    else:
+        assert response.status_code == 422
+        assert "关闭扩展基表列" in response.text
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [1, True, "-1", "+1", " 1", "1 ", "01", "1.0", "١", str(2**64)],
+)
+def test_开启扩列时拒绝非规范或非字符串种子(tmp_path: Path, seed: object) -> None:
+    response = _client(tmp_path).post(
+        "/api/tasks",
+        json=_task_payload(expand_base_table_columns=True, base_table_seed=seed),
+    )
+
+    assert response.status_code == 422
+    assert "基表种子" in response.text
+
+
+def test_开启扩列时拒绝未知生成器版本(tmp_path: Path) -> None:
+    response = _client(tmp_path).post(
+        "/api/tasks",
+        json=_task_payload(
+            expand_base_table_columns=True,
+            base_table_seed="1",
+            base_table_generator_version="v999",
+        ),
+    )
+
+    assert response.status_code == 422
+    assert "未知基表生成器版本" in response.text
+
+
+@pytest.mark.parametrize("seed", ["0", str(2**64 - 1)])
+def test_开启扩列时保留手动边界种子并补全版本(tmp_path: Path, seed: str) -> None:
+    response = _client(tmp_path).post(
+        "/api/tasks",
+        json=_task_payload(expand_base_table_columns=True, base_table_seed=seed),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["expand_base_table_columns"] is True
+    assert response.json()["base_table_seed"] == seed
+    assert response.json()["base_table_generator_version"] == "v1"
+
+
+def test_开启扩列留空种子时使用_uint64_随机种子(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("select_fuzz.api.service.secrets.randbits", lambda bits: 2**64 - 1 if bits == 64 else 0)
+
+    response = _client(tmp_path).post(
+        "/api/tasks",
+        json=_task_payload(
+            expand_base_table_columns=True,
+            base_table_seed="",
+            base_table_generator_version="",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["base_table_seed"] == str(2**64 - 1)
+    assert response.json()["base_table_generator_version"] == "v1"
+
+
+def test_自定义基表目录请求扩列在连接前返回失败快照(tmp_path: Path) -> None:
+    base_dir = tmp_path / "custom_base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    database = ApiFakeDatabase()
+    factory_calls = 0
+
+    def factory(_node):
+        nonlocal factory_calls
+        factory_calls += 1
+        return database
+
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=factory,
+        run_background=False,
+    )
+
+    response = TestClient(create_app(service)).post(
+        "/api/tasks",
+        json=_task_payload(expand_base_table_columns=True, base_table_seed="12345"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "失败"
+    assert response.json()["phase"] == "准备基表"
+    assert "自定义基表目录不支持扩展列" in response.json()["last_error"]
+    assert response.json()["base_table_seed"] == "12345"
+    assert response.json()["base_table_generator_version"] == "v1"
+    assert factory_calls == 0
+    assert database.connect_count == 0
+    assert database.executed == []
+
+
+def test_扩展基表生成失败发生在任何数据库资源之前(tmp_path: Path, monkeypatch) -> None:
+    factory_calls = 0
+
+    def fail_generation(_version: str, _seed: str):
+        raise RuntimeError("模拟扩展基表生成失败")
+
+    def factory(_node):
+        nonlocal factory_calls
+        factory_calls += 1
+        return ApiFakeDatabase()
+
+    monkeypatch.setattr("select_fuzz.api.service.generate_base_sql_bundle", fail_generation)
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=tmp_path / "unused_builtin",
+        db_factory=factory,
+        run_background=False,
+        use_builtin_base_tables=True,
+    )
+
+    response = TestClient(create_app(service)).post(
+        "/api/tasks",
+        json=_task_payload(expand_base_table_columns=True, base_table_seed="7"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "失败"
+    assert response.json()["phase"] == "准备基表"
+    assert "模拟扩展基表生成失败" in response.json()["last_error"]
+    assert response.json()["base_table_seed"] == "7"
+    assert factory_calls == 0
+
+
+def test_内置基表包在_db_factory_和连接前准备(tmp_path: Path, monkeypatch) -> None:
+    events: list[str] = []
+    database = ApiFakeDatabase()
+    original_connect = database.connect
+
+    def generate(_version: str, seed: str):
+        events.append(f"generate:{seed}")
+        return _small_bundle(expanded=True, seed=seed)
+
+    def connect() -> None:
+        events.append("connect")
+        original_connect()
+
+    def factory(_node):
+        events.append("factory")
+        return database
+
+    database.connect = connect
+    monkeypatch.setattr("select_fuzz.api.service.generate_base_sql_bundle", generate)
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=tmp_path / "builtin",
+        db_factory=factory,
+        run_background=False,
+        use_builtin_base_tables=True,
+    )
+
+    response = TestClient(create_app(service)).post(
+        "/api/tasks",
+        json=_task_payload(expand_base_table_columns=True, base_table_seed="9"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "执行 SQL"
+    assert events[:3] == ["generate:9", "factory", "connect"]
+    task = service._real_tasks[response.json()["task_id"]]
+    assert task.base_sql_bundle is not None
+    assert task.base_sql_bundle.seed == "9"
+    assert not list((tmp_path / "logs").rglob("*.sql"))
+
+
+def test_后台任务进入终态会通知所有循环并关闭跳板机(tmp_path: Path) -> None:
+    class RecordingTunnel:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: ApiFakeDatabase(),
+        run_background=False,
+    )
+    response = TestClient(create_app(service)).post("/api/tasks", json=_task_payload())
+    task_id = response.json()["task_id"]
+    task = service._real_tasks[task_id]
+    stop_event = threading.Event()
+    tunnel = RecordingTunnel()
+    service._background_stop_events[task_id] = stop_event
+    service._task_tunnels[task_id] = tunnel
+    task.tables.clear()
+
+    service._run_task_step(task, 0)
+
+    assert task.is_terminal
+    assert stop_event.is_set()
+    assert tunnel.stopped is True
+    assert task_id not in service._task_tunnels
+    assert task.base_sql_bundle is None
+
+
 def test_health_返回中文状态(tmp_path: Path) -> None:
     client = _client(tmp_path)
 
@@ -63,6 +341,15 @@ def test_health_返回中文状态(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.json()["状态"] == "正常"
+
+
+def test_openapi_任务响应声明基表复现字段(tmp_path: Path) -> None:
+    schema = _client(tmp_path).get("/openapi.json").json()
+    properties = schema["components"]["schemas"]["TaskResponse"]["properties"]
+
+    assert properties["expand_base_table_columns"]["type"] == "boolean"
+    assert "base_table_seed" in properties
+    assert "base_table_generator_version" in properties
 
 
 def test_创建停止任务并查询任务列表(tmp_path: Path) -> None:

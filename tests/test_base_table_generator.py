@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
@@ -24,9 +25,10 @@ from select_fuzz.base_tables import (
 )
 from select_fuzz.base_tables.deterministic import derive_range, derive_uint64, pick
 from select_fuzz.base_tables.models import BaseSqlBundle
+from select_fuzz.base_tables import registry as base_table_registry
 from select_fuzz.base_tables import v1
 from select_fuzz.metadata.ddl_parser import parse_create_table
-from select_fuzz.metadata.models import BaseSqlFile
+from select_fuzz.metadata.models import BaseSqlFile, TableMetadata
 from tools import generate_sql_base_tables as generator
 from tools import validate_sql_base_tables as validator
 
@@ -42,6 +44,32 @@ PARTITION_TYPES = {
     "LINEAR KEY",
 }
 GOLDEN_MANIFEST = Path(__file__).parent / "golden" / "base_table_v1_seed_12345.json"
+
+
+def _replace_bundle_table(
+    bundle: BaseSqlBundle,
+    index: int,
+    table: TableMetadata,
+) -> BaseSqlBundle:
+    tables = list(bundle.tables)
+    tables[index] = table
+    return replace(bundle, tables=tuple(tables))
+
+
+def _replace_seed_sql(bundle: BaseSqlBundle, sql: str) -> BaseSqlBundle:
+    files = list(bundle.files)
+    files[-1] = replace(files[-1], sql=sql)
+    return replace(bundle, files=tuple(files))
+
+
+def _assert_v1_registry_rejects_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+    bundle: BaseSqlBundle,
+    message: str,
+) -> None:
+    monkeypatch.setitem(base_table_registry._GENERATORS, "v1", lambda seed: bundle)
+    with pytest.raises(RuntimeError, match=message):
+        generate_base_sql_bundle("v1", "12345")
 
 
 def _partition_type(sql: str) -> str:
@@ -193,6 +221,111 @@ def test_v1_扩展包覆盖列数边界且_insert_列值等长同序() -> None:
         assert insert_columns == tuple(table.columns)
         assert len(insert_values) == len(table.columns)
         assert f"extra_t{index}_000" in table.columns
+
+
+def test_v1_注册入口独立拒绝生成器返回的各种非法完整结构(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = v1.generate_base_sql_bundle("12345", expand_base_table_columns=True)
+
+    files = list(bundle.files)
+    files[0], files[1] = files[1], files[0]
+    _assert_v1_registry_rejects_bundle(
+        monkeypatch,
+        replace(bundle, files=tuple(files)),
+        "文件名顺序",
+    )
+
+    for invalid_files in (bundle.files[:-1], (*bundle.files, bundle.files[-1])):
+        _assert_v1_registry_rejects_bundle(
+            monkeypatch,
+            replace(bundle, files=tuple(invalid_files)),
+            "文件名顺序",
+        )
+
+    for bundle_changes, message in (
+        ({"expand_base_table_columns": False, "generator_version": None, "seed": None}, "扩展模式标记"),
+        ({"generator_version": "v0"}, "生成器版本"),
+        ({"seed": "67890"}, "基表种子"),
+    ):
+        _assert_v1_registry_rejects_bundle(
+            monkeypatch,
+            replace(bundle, **bundle_changes),
+            message,
+        )
+
+    tables = list(bundle.tables)
+    tables[0], tables[1] = tables[1], tables[0]
+    _assert_v1_registry_rejects_bundle(
+        monkeypatch,
+        replace(bundle, tables=tuple(tables)),
+        "表名顺序",
+    )
+
+    for table_index, target_count in ((0, 199), (1, 501)):
+        table = bundle.tables[table_index]
+        column_items = list(table.columns.items())[:target_count]
+        if target_count > len(column_items):
+            source_column = column_items[-1][1]
+            for offset in range(len(column_items) - 42, target_count - 42):
+                name = f"extra_t{table_index}_{offset:03d}"
+                column_items.append((name, replace(source_column, name=name)))
+        invalid_table = replace(table, columns=dict(column_items))
+        _assert_v1_registry_rejects_bundle(
+            monkeypatch,
+            _replace_bundle_table(bundle, table_index, invalid_table),
+            f"t{table_index} 列数",
+        )
+
+    table = bundle.tables[0]
+    column_items = list(table.columns.items())
+    column_items[0], column_items[1] = column_items[1], column_items[0]
+    invalid_table = replace(table, columns=dict(column_items))
+    _assert_v1_registry_rejects_bundle(
+        monkeypatch,
+        _replace_bundle_table(bundle, 0, invalid_table),
+        "t0 核心列顺序",
+    )
+
+    table = bundle.tables[2]
+    column_items = list(table.columns.items())
+    _, first_extra = column_items[42]
+    column_items[42] = ("extra_t2_999", replace(first_extra, name="extra_t2_999"))
+    invalid_table = replace(table, columns=dict(column_items))
+    _assert_v1_registry_rejects_bundle(
+        monkeypatch,
+        _replace_bundle_table(bundle, 2, invalid_table),
+        "t2 扩展列顺序",
+    )
+
+    seed_sql = bundle.files[-1].sql
+    invalid_seed_sql = seed_sql.replace(
+        "INSERT INTO `t0` (`id_col`,`tenant_id`,",
+        "INSERT INTO `t0` (`tenant_id`,`id_col`,",
+        1,
+    )
+    assert invalid_seed_sql != seed_sql
+    _assert_v1_registry_rejects_bundle(
+        monkeypatch,
+        _replace_seed_sql(bundle, invalid_seed_sql),
+        "t0 种子 INSERT 列顺序",
+    )
+
+    match = re.search(
+        r"INSERT INTO `t0` \(.*?\)\nSELECT\n  (?P<values>.*?)\nFROM `_select_fuzz_seed_numbers`",
+        seed_sql,
+        flags=re.S,
+    )
+    assert match is not None
+    values = _split_top_level_csv(match.group("values"))
+    invalid_values = ",\n  ".join(values[:-1])
+    invalid_seed_sql = seed_sql[: match.start("values")] + invalid_values + seed_sql[match.end("values") :]
+
+    _assert_v1_registry_rejects_bundle(
+        monkeypatch,
+        _replace_seed_sql(bundle, invalid_seed_sql),
+        "t0 种子 INSERT 列和值数量",
+    )
 
 
 def test_v1_decimal_扩展列种子值不超出声明精度() -> None:

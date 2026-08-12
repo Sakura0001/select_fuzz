@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from select_fuzz.base_tables import build_base_sql_bundle
 from select_fuzz.config import TargetNodeConfig
 from select_fuzz.metadata.models import BaseSqlFile
 from select_fuzz.monitor.logs import read_jsonl
 from select_fuzz.monitor.store import MetricStore
-from select_fuzz.runner.db import DatabaseClient, LostConnectionError
+from select_fuzz.runner.db import DatabaseClient, LostConnectionError, PyMySQLClient
 from select_fuzz.runner.task import FuzzTask, TaskStatus
 
 
@@ -627,6 +630,232 @@ def test_每次执行查询前设置_session_最大执行时间为_5_秒(tmp_pat
 
     assert db.executed[startup_sql_count] == "SET SESSION max_execution_time = 5000"
     assert _is_query_expression(db.executed[startup_sql_count + 1])
+
+
+@pytest.mark.parametrize("method_name", ("execute", "query_scalar"))
+def test_pymysql_未显式连接时不会由_sql_操作隐式重连(method_name: str) -> None:
+    client = PyMySQLClient(_node())
+    connect_calls = 0
+
+    def unexpected_connect() -> None:
+        nonlocal connect_calls
+        connect_calls += 1
+        raise AssertionError("SQL 操作不应隐式调用 connect")
+
+    client.connect = unexpected_connect  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="数据库连接尚未显式建立"):
+        getattr(client, method_name)("SELECT 1")
+
+    assert connect_calls == 0
+
+
+def test_step_在记录_sql_后被停止不再发送_set_或查询(tmp_path: Path) -> None:
+    class FixedGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+
+        def generate(self, *_args, **_kwargs) -> str:
+            return "SELECT 1"
+
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    task._workers[0].generator = FixedGenerator()
+    startup_sql_count = len(db.executed)
+    sql_recorded = threading.Event()
+    allow_dispatch = threading.Event()
+    original_record = task.record_worker_sql_start
+
+    def blocking_record(*args, **kwargs) -> None:
+        original_record(*args, **kwargs)
+        sql_recorded.set()
+        assert allow_dispatch.wait(timeout=3), "测试等待放行 SQL 派发超时"
+
+    task.record_worker_sql_start = blocking_record  # type: ignore[method-assign]
+    worker = threading.Thread(target=task.step)
+    worker.start()
+    assert sql_recorded.wait(timeout=3)
+
+    task.stop()
+    allow_dispatch.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert task.status is TaskStatus.STOPPED
+    assert db.executed[startup_sql_count:] == []
+
+
+def test_worker_迟到重连在任务停止后会关闭新连接(tmp_path: Path) -> None:
+    class DelayedReconnectDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delay_next_connect = False
+            self.reconnect_started = threading.Event()
+            self.allow_reconnect = threading.Event()
+            self.close_count = 0
+
+        def connect(self) -> None:
+            if self.delay_next_connect:
+                self.reconnect_started.set()
+                assert self.allow_reconnect.wait(timeout=3), "测试等待放行重连超时"
+            self.connected = True
+
+        def close(self) -> None:
+            self.close_count += 1
+            self.connected = False
+
+        def connection_diagnostics(self) -> dict:
+            return {"connection_open": self.connected}
+
+    db = DelayedReconnectDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    db.delay_next_connect = True
+    with task._lock:
+        task._worker_states[0].needs_reconnect = True
+    worker = threading.Thread(target=task.step)
+    worker.start()
+    assert db.reconnect_started.wait(timeout=3)
+
+    task.stop()
+    db.allow_reconnect.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert task.status is TaskStatus.STOPPED
+    assert db.connected is False
+    assert db.close_count >= 3
+
+
+def test_worker_重连返回时已停止不再准备会话_sql(tmp_path: Path) -> None:
+    class StopWhileReconnectDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delay_next_connect = False
+            self.reconnect_started = threading.Event()
+            self.allow_reconnect = threading.Event()
+            self.stop_close_started = threading.Event()
+            self.allow_stop_close = threading.Event()
+            self.sql_after_stop = threading.Event()
+            self.stop_thread: threading.Thread | None = None
+            self.task: FuzzTask | None = None
+
+        def connect(self) -> None:
+            if self.delay_next_connect:
+                self.reconnect_started.set()
+                assert self.allow_reconnect.wait(timeout=3), "测试等待放行重连超时"
+            self.connected = True
+
+        def close(self) -> None:
+            if threading.current_thread() is self.stop_thread:
+                self.stop_close_started.set()
+                assert self.allow_stop_close.wait(timeout=3), "测试等待放行停止关闭超时"
+            self.connected = False
+
+        def execute(self, sql: str) -> None:
+            if self.task is not None and self.task.status is TaskStatus.STOPPED:
+                self.sql_after_stop.set()
+            super().execute(sql)
+
+        def connection_diagnostics(self) -> dict:
+            return {"connection_open": self.connected}
+
+    db = StopWhileReconnectDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    db.task = task
+    task.start()
+    db.delay_next_connect = True
+    with task._lock:
+        task._worker_states[0].needs_reconnect = True
+    worker = threading.Thread(target=task.step)
+    worker.start()
+    assert db.reconnect_started.wait(timeout=3)
+
+    stop_thread = threading.Thread(target=task.stop)
+    db.stop_thread = stop_thread
+    stop_thread.start()
+    assert db.stop_close_started.wait(timeout=3)
+
+    db.allow_reconnect.set()
+    worker.join(timeout=3)
+    db.allow_stop_close.set()
+    stop_thread.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert not stop_thread.is_alive()
+    assert db.sql_after_stop.is_set() is False
+    assert db.connected is False
+
+
+def test_恢复探测迟到_ping_在任务停止后会关闭新连接(tmp_path: Path) -> None:
+    class DelayedPingDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ping_started = threading.Event()
+            self.allow_ping = threading.Event()
+            self.close_count = 0
+
+        def ping(self) -> bool:
+            self.ping_started.set()
+            assert self.allow_ping.wait(timeout=3), "测试等待放行 ping 超时"
+            self.connected = True
+            return True
+
+        def close(self) -> None:
+            self.close_count += 1
+            self.connected = False
+
+    db = DelayedPingDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    with task._lock:
+        task._set_status_locked(TaskStatus.RECOVERING)
+        task._next_probe_at = None
+    probe = threading.Thread(target=task.probe_recovery)
+    probe.start()
+    assert db.ping_started.wait(timeout=3)
+
+    task.stop()
+    db.allow_ping.set()
+    probe.join(timeout=3)
+
+    assert not probe.is_alive()
+    assert task.status is TaskStatus.STOPPED
+    assert db.connected is False
+    assert db.close_count >= 2
 
 
 def test_运行时生成选项不包含向量强制开关(tmp_path: Path) -> None:

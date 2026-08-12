@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from select_fuzz.api.app import create_app, create_default_app
 from select_fuzz.api.service import BUILTIN_BASE_SQL_DIR, RuntimeService
 from select_fuzz.base_tables import build_base_sql_bundle
+from select_fuzz.base_tables import registry as base_table_registry
 from select_fuzz.metadata.models import BaseSqlFile
 from select_fuzz.monitor.events import LostConnectionEvent
 from select_fuzz.monitor.logs import SqlLogRecord, append_jsonl
@@ -340,6 +341,43 @@ def test_真实内置目录无需布尔标志即可生成扩展包(tmp_path: Pat
     assert task_id not in service._real_tasks
 
 
+def test_内置核心模式统一从配置目录加载(tmp_path: Path, monkeypatch) -> None:
+    builtin_dir = tmp_path / "project" / "sql_base_tables"
+    builtin_dir.mkdir(parents=True)
+    (builtin_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    events: list[str] = []
+    database = ApiFakeDatabase()
+    original_connect = database.connect
+    monkeypatch.setattr("select_fuzz.api.service.BUILTIN_BASE_SQL_DIR", builtin_dir)
+
+    def load(base_dir: Path):
+        events.append(f"load:{Path(base_dir).resolve()}")
+        return _small_bundle()
+
+    def factory(_node):
+        events.append("factory")
+        return database
+
+    def connect() -> None:
+        events.append("connect")
+        original_connect()
+
+    database.connect = connect
+    monkeypatch.setattr("select_fuzz.api.service.load_base_sql_bundle", load)
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=builtin_dir,
+        db_factory=factory,
+        run_background=False,
+    )
+
+    response = TestClient(create_app(service)).post("/api/tasks", json=_task_payload())
+
+    assert response.json()["status"] == "执行 SQL"
+    assert events[:3] == [f"load:{builtin_dir.resolve()}", "factory", "connect"]
+
+
 def test_缺少基表来源会在准备基表阶段失败且不创建数据库资源(tmp_path: Path) -> None:
     factory_calls = 0
 
@@ -415,6 +453,48 @@ def test_扩展基表生成失败发生在任何数据库资源之前(tmp_path: 
     assert "模拟扩展基表生成失败" in response.json()["last_error"]
     assert response.json()["base_table_seed"] == "7"
     assert factory_calls == 0
+
+
+def test_扩展生成器返回非法结构时在准备基表阶段失败且数据库零调用(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir()
+    database = ApiFakeDatabase()
+    factory_calls = 0
+
+    def factory(_node):
+        nonlocal factory_calls
+        factory_calls += 1
+        return database
+
+    monkeypatch.setitem(
+        base_table_registry._GENERATORS,
+        "v1",
+        lambda seed: _small_bundle(expanded=True, seed=seed),
+    )
+    monkeypatch.setattr("select_fuzz.api.service.BUILTIN_BASE_SQL_DIR", builtin_dir)
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=builtin_dir,
+        db_factory=factory,
+        run_background=False,
+    )
+
+    response = TestClient(create_app(service)).post(
+        "/api/tasks",
+        json=_task_payload(expand_base_table_columns=True, base_table_seed="7"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "失败"
+    assert response.json()["phase"] == "准备基表"
+    assert "文件名顺序" in response.json()["last_error"]
+    assert factory_calls == 0
+    assert database.connect_count == 0
+    assert database.executed == []
 
 
 def test_内置基表包在_db_factory_和连接前准备(tmp_path: Path, monkeypatch) -> None:
@@ -643,6 +723,165 @@ def test_终态任务重复停止暂停恢复都不改变原终态(tmp_path: Pat
     assert failed_client.post(f"/api/tasks/{failed_id}/pause").json()["状态"] == "失败"
     assert failed_client.post(f"/api/tasks/{failed_id}/resume").json()["状态"] == "失败"
     assert failed_client.post(f"/api/tasks/{failed_id}/stop").json()["状态"] == "失败"
+
+
+@pytest.mark.parametrize("action", ("pause", "resume"))
+def test_暂停或恢复与停止并发时快照保持终态(tmp_path: Path, action: str) -> None:
+    client = _client(tmp_path)
+    service = client.app.state.runtime_service
+    response = client.post("/api/tasks", json=_task_payload())
+    task_id = response.json()["task_id"]
+    task = service._real_tasks[task_id]
+    if action == "resume":
+        service.pause_task(task_id)
+
+    state_captured = threading.Event()
+    allow_stale_sync = threading.Event()
+    original_snapshot_counts = task.snapshot_counts
+    action_thread: threading.Thread | None = None
+
+    def blocking_snapshot_counts():
+        state = original_snapshot_counts()
+        if threading.current_thread() is action_thread:
+            state_captured.set()
+            assert allow_stale_sync.wait(timeout=3), "测试等待放行迟到快照超时"
+        return state
+
+    task.snapshot_counts = blocking_snapshot_counts  # type: ignore[method-assign]
+    action_method = service.pause_task if action == "pause" else service.resume_task
+    action_thread = threading.Thread(target=lambda: action_method(task_id))
+    action_thread.start()
+    assert state_captured.wait(timeout=3)
+
+    stopped = service.stop_task(task_id)
+    allow_stale_sync.set()
+    action_thread.join(timeout=3)
+
+    assert not action_thread.is_alive()
+    assert stopped.status == "已停止"
+    assert service.get_task(task_id)["status"] == "已停止"
+
+
+@pytest.mark.parametrize("action", ("pause", "resume"))
+def test_暂停或恢复在终态检查后遇到停止清理不覆盖终态(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    client = _client(tmp_path)
+    service = client.app.state.runtime_service
+    response = client.post("/api/tasks", json=_task_payload())
+    task_id = response.json()["task_id"]
+    checked_non_terminal = threading.Event()
+    allow_lookup = threading.Event()
+    original_is_terminal = service._snapshot_is_terminal
+    action_thread: threading.Thread | None = None
+
+    def blocking_is_terminal(snapshot) -> bool:
+        result = original_is_terminal(snapshot)
+        if threading.current_thread() is action_thread and not result:
+            checked_non_terminal.set()
+            assert allow_lookup.wait(timeout=3), "测试等待放行运行实例查找超时"
+        return result
+
+    service._snapshot_is_terminal = blocking_is_terminal  # type: ignore[method-assign]
+    action_method = service.pause_task if action == "pause" else service.resume_task
+    action_thread = threading.Thread(target=lambda: action_method(task_id))
+    action_thread.start()
+    assert checked_non_terminal.wait(timeout=3)
+
+    service.stop_task(task_id)
+    assert task_id not in service._real_tasks
+    allow_lookup.set()
+    action_thread.join(timeout=3)
+
+    assert not action_thread.is_alive()
+    snapshot = service.get_task(task_id)
+    assert snapshot["status"] == "已停止"
+    assert snapshot["phase"] == "已停止"
+    assert snapshot["last_error"] is None
+
+
+def test_后台线程部分启动失败返回失败快照并收敛资源(tmp_path: Path, monkeypatch) -> None:
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    databases: list[ApiFakeDatabase] = []
+    tunnel_events: list[str] = []
+    first_thread_exited = threading.Event()
+
+    class FakeTunnel:
+        local_host = "127.0.0.1"
+        local_port = 44001
+
+        def __init__(self, jump_host, target_node) -> None:
+            del jump_host, target_node
+
+        def start(self) -> tuple[str, int]:
+            tunnel_events.append("start")
+            return self.local_host, self.local_port
+
+        def stop(self) -> None:
+            tunnel_events.append("stop")
+
+    def factory(_node):
+        database = ApiFakeDatabase()
+        database.closed = False
+
+        def close() -> None:
+            database.closed = True
+
+        database.close = close
+        databases.append(database)
+        return database
+
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=factory,
+        run_background=True,
+        query_interval_seconds=0,
+    )
+    service.add_jump_host(
+        {"name": "jump-prod", "host": "10.2.0.8", "port": 22, "username": "ops"}
+    )
+    original_exited = service._background_thread_exited
+
+    def recording_exited(task_id: str, thread_key: int) -> None:
+        original_exited(task_id, thread_key)
+        if thread_key == 0:
+            first_thread_exited.set()
+
+    service._background_thread_exited = recording_exited  # type: ignore[method-assign]
+    original_start = threading.Thread.start
+    sql_fuzz_start_count = 0
+
+    def fail_second_sql_fuzz_start(thread: threading.Thread) -> None:
+        nonlocal sql_fuzz_start_count
+        if thread.name.startswith("sql_fuzz-"):
+            sql_fuzz_start_count += 1
+            if sql_fuzz_start_count == 2:
+                raise RuntimeError("模拟后台线程启动失败")
+        original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_second_sql_fuzz_start)
+    monkeypatch.setattr("select_fuzz.api.service.JumpTunnel", FakeTunnel)
+
+    response = TestClient(create_app(service)).post(
+        "/api/tasks",
+        json=_task_payload(thread_count=2, jump_host="jump-prod"),
+    )
+    task_id = response.json()["task_id"]
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "失败"
+    assert "模拟后台线程启动失败" in response.json()["last_error"]
+    assert first_thread_exited.wait(timeout=3)
+    assert tunnel_events == ["start", "stop"]
+    assert all(database.closed for database in databases)
+    assert task_id not in service._real_tasks
+    assert task_id not in service._background_stop_events
+    assert task_id not in service._background_worker_threads
 
 
 def test_health_返回中文状态(tmp_path: Path) -> None:

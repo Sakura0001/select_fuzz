@@ -13,7 +13,6 @@ from select_fuzz.base_tables import (
     CURRENT_BASE_TABLE_GENERATOR_VERSION,
     BaseSqlBundle,
     generate_base_sql_bundle,
-    generate_core_base_sql_bundle,
     load_base_sql_bundle,
 )
 from select_fuzz.config import JumpHostConfig, TargetNodeConfig
@@ -195,17 +194,19 @@ class RuntimeService:
             if generator_version is None or seed is None:
                 raise RuntimeError("扩展基表列缺少生成器版本或种子")
             return generate_base_sql_bundle(generator_version, seed)
-        if self._uses_builtin_base_tables:
-            return generate_core_base_sql_bundle()
         if self.base_sql_dir is None:
             raise RuntimeError("未配置基表目录")
         return load_base_sql_bundle(self.base_sql_dir)
 
     def _mark_snapshot_failed(self, snapshot: TaskSnapshot, exc: Exception, phase: TaskStatus) -> None:
-        snapshot.status = TaskStatus.FAILED.value
-        snapshot.phase = phase.value
-        snapshot.last_error = f"{phase.value}失败: {exc}"
-        self.metric_store.upsert_task_metric(snapshot.task_id, snapshot.node_name, snapshot.status, 0, 0)
+        with self._lifecycle_lock:
+            if self._snapshot_is_terminal(snapshot):
+                return
+            snapshot.status = TaskStatus.FAILED.value
+            snapshot.phase = phase.value
+            snapshot.last_error = f"{phase.value}失败: {exc}"
+            metric_values = (snapshot.task_id, snapshot.node_name, snapshot.status)
+        self.metric_store.upsert_task_metric(*metric_values, 0, 0)
 
     def stop_task(self, task_id: str) -> TaskSnapshot:
         task = self._tasks[task_id]
@@ -359,8 +360,22 @@ class RuntimeService:
         with self._lifecycle_lock:
             self._background_stop_events[task.task_id] = stop_event
             self._background_worker_threads[task.task_id] = registered_threads
-        for thread in list(registered_threads.values()):
-            thread.start()
+        started_keys: set[int] = set()
+        try:
+            for thread_key, thread in registered_threads.items():
+                thread.start()
+                started_keys.add(thread_key)
+        except Exception as exc:
+            stop_event.set()
+            with self._lifecycle_lock:
+                tracked_threads = self._background_worker_threads.get(task.task_id, {})
+                for thread_key in set(registered_threads) - started_keys:
+                    tracked_threads.pop(thread_key, None)
+            task.fail(exc, phase=TaskStatus.RUNNING.value)
+            self._sync_snapshot_from_task(task)
+            self._finalize_terminal_task(task.task_id)
+            self._join_background_threads(task.task_id)
+            self._try_finalize_terminal_task(task.task_id)
 
     def _run_task_step(self, task: FuzzTask, worker_id: int) -> None:
         try:
@@ -416,20 +431,24 @@ class RuntimeService:
         return snapshot.status in {TaskStatus.STOPPED.value, TaskStatus.FAILED.value}
 
     def _sync_snapshot_from_task(self, task: FuzzTask) -> None:
-        snapshot = self._tasks[task.task_id]
         state = task.snapshot_counts()
-        snapshot.status = state["status"].value
-        snapshot.phase = state["phase"]
-        snapshot.last_error = state["last_error"]
-        snapshot.sql_total = state["sql_total"]
-        snapshot.success_query_total = state["success_query_total"]
-        snapshot.failed_query_total = state["failed_query_total"]
-        snapshot.ordinary_error_total = state["ordinary_error_total"]
-        snapshot.lost_connection_total = state["lost_connection_total"]
-        snapshot.worker_states = self._worker_states_with_thread_diagnostics(task.task_id, state["worker_states"])
-        snapshot.expand_base_table_columns = state["expand_base_table_columns"]
-        snapshot.base_table_seed = state["base_table_seed"]
-        snapshot.base_table_generator_version = state["base_table_generator_version"]
+        with self._lifecycle_lock:
+            snapshot = self._tasks[task.task_id]
+            incoming_terminal = state["status"] in {TaskStatus.STOPPED, TaskStatus.FAILED}
+            if self._snapshot_is_terminal(snapshot) and not incoming_terminal:
+                return
+            snapshot.status = state["status"].value
+            snapshot.phase = state["phase"]
+            snapshot.last_error = state["last_error"]
+            snapshot.sql_total = state["sql_total"]
+            snapshot.success_query_total = state["success_query_total"]
+            snapshot.failed_query_total = state["failed_query_total"]
+            snapshot.ordinary_error_total = state["ordinary_error_total"]
+            snapshot.lost_connection_total = state["lost_connection_total"]
+            snapshot.worker_states = self._worker_states_with_thread_diagnostics(task.task_id, state["worker_states"])
+            snapshot.expand_base_table_columns = state["expand_base_table_columns"]
+            snapshot.base_table_seed = state["base_table_seed"]
+            snapshot.base_table_generator_version = state["base_table_generator_version"]
 
     def _worker_states_with_thread_diagnostics(self, task_id: str, worker_states: list[dict]) -> list[dict]:
         threads = self._background_worker_threads.get(task_id, {})

@@ -186,6 +186,9 @@ class FuzzTask:
             if self._is_terminal_locked():
                 return
         self.record_worker_sql_start(worker_id, sql, sql_metadata=sql_metadata)
+        with self._lock:
+            if self.status is not TaskStatus.RUNNING or self._base_sql_bundle_released:
+                return
         try:
             self._set_query_execution_timeout(worker.db)
             worker.db.execute(sql)
@@ -227,6 +230,15 @@ class FuzzTask:
         all_connections_alive = all(worker.db.ping() for worker in workers)
         with self._lock:
             if self.status is not TaskStatus.RECOVERING:
+                should_close = True
+            else:
+                should_close = False
+        if should_close:
+            self._close_databases(workers)
+            return
+
+        with self._lock:
+            if self.status is not TaskStatus.RECOVERING:
                 return
 
         if all_connections_alive:
@@ -234,6 +246,11 @@ class FuzzTask:
                 base_sql_bundle = self._require_base_sql_bundle()
                 for worker in workers:
                     self._prepare_worker_session(worker.db, base_sql_bundle)
+                    with self._lock:
+                        should_close = self.status is not TaskStatus.RECOVERING
+                    if should_close:
+                        self._close_databases(workers)
+                        return
             except Exception:
                 with self._lock:
                     if self.status is not TaskStatus.RECOVERING:
@@ -591,28 +608,46 @@ class FuzzTask:
         try:
             worker.db.close()
             worker.db.connect()
+            with self._lock:
+                terminal_after_connect = self._is_terminal_locked() or self._base_sql_bundle_released
+            if terminal_after_connect:
+                worker.db.close()
+                return False
             self._prepare_worker_session(worker.db, self._require_base_sql_bundle())
         except Exception as exc:
             with self._lock:
-                if self._is_terminal_locked() or self._base_sql_bundle_released:
-                    return False
+                terminal = self._is_terminal_locked() or self._base_sql_bundle_released
+            if terminal:
+                worker.db.close()
+                return False
             self.fail(exc, phase="恢复 worker 会话")
             return False
 
         with self._lock:
             if self._is_terminal_locked() or self._base_sql_bundle_released:
-                return False
-            state = self._worker_state(worker_id)
-            if state is not None:
-                state.needs_reconnect = False
-                state.state = "空闲"
-                state.current_sql = None
-                state.current_sql_started_at = None
-                state.current_sql_metadata = None
-                state.last_error = None
-                state.last_heartbeat = self.clock()
-            self._write_metrics()
+                terminal = True
+            else:
+                terminal = False
+            if not terminal:
+                state = self._worker_state(worker_id)
+                if state is not None:
+                    state.needs_reconnect = False
+                    state.state = "空闲"
+                    state.current_sql = None
+                    state.current_sql_started_at = None
+                    state.current_sql_metadata = None
+                    state.last_error = None
+                    state.last_heartbeat = self.clock()
+                self._write_metrics()
+        if terminal:
+            worker.db.close()
+            return False
         return True
+
+    @staticmethod
+    def _close_databases(workers: list[TaskWorker]) -> None:
+        for worker in workers:
+            worker.db.close()
 
     def _is_terminal_locked(self) -> bool:
         return self.status in {TaskStatus.STOPPED, TaskStatus.FAILED}

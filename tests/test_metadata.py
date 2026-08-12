@@ -1,9 +1,13 @@
 from pathlib import Path
 import re
 
-from select_fuzz.metadata.base_sql import is_base_table_definition_file, load_base_sql_files
+from select_fuzz.metadata.base_sql import (
+    is_base_table_definition,
+    is_base_table_definition_file,
+    load_base_sql_files,
+)
 from select_fuzz.metadata.ddl_parser import parse_create_table
-from select_fuzz.metadata.models import ColumnTypeFamily
+from select_fuzz.metadata.models import BaseSqlFile, ColumnTypeFamily
 
 
 def test_按文件名顺序读取基表_sql(tmp_path: Path) -> None:
@@ -38,6 +42,20 @@ def test_生成器种子脚本不作为基表解析() -> None:
     path = Path("sql_base_tables", "zz_seed_fk_data.sql")
 
     assert is_base_table_definition_file(path) is False
+
+
+def test_内存基表定义判断只使用_sql_内容() -> None:
+    custom_table = BaseSqlFile(
+        path=Path("不存在/zz_seed_fk_data.sql"),
+        sql="CREATE TABLE custom_table (id BIGINT NOT NULL, PRIMARY KEY (id));",
+    )
+    generated_seed = BaseSqlFile(
+        path=Path("不存在/t0.sql"),
+        sql="CREATE TABLE `_select_fuzz_seed_numbers` (`n` INT); /* t0:rows=10 */",
+    )
+
+    assert is_base_table_definition(custom_table) is True
+    assert is_base_table_definition(generated_seed) is False
 
 
 def test_解析_create_temporary_table() -> None:

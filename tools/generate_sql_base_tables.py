@@ -188,14 +188,13 @@ def generate_files(
     output_dir.mkdir(parents=True, exist_ok=True)
     _assert_no_unknown_sql(output_dir)
     for sql_file in files:
-        (output_dir / sql_file.path.name).write_text(sql_file.sql, encoding="utf-8")
-    (output_dir / "执行顺序说明.md").write_text(
+        (output_dir / sql_file.path.name).write_bytes(sql_file.sql.encode("utf-8"))
+    (output_dir / "执行顺序说明.md").write_bytes(
         execution_doc(
             include_subpartition=include_subpartition,
             expand_columns=expand_columns,
             seed=normalized_seed,
-        ),
-        encoding="utf-8",
+        ).encode("utf-8")
     )
 
 

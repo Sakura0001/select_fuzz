@@ -8,6 +8,7 @@ import struct
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 import pytest
@@ -118,6 +119,23 @@ def _core_projection(bundle: BaseSqlBundle) -> tuple[object, ...]:
     return tuple(tables), tuple(inserts)
 
 
+def _evaluate_decimal_extra_expr(expression: str, n: int) -> Decimal:
+    """按 v1 支持的 DECIMAL 扩展列表达式计算单个正数种子值。"""
+
+    direct = re.fullmatch(r"ROUND\(\(`n` \+ (\d+)\) / (\d+), (\d+)\)", expression)
+    bounded = re.fullmatch(r"ROUND\(MOD\(`n` \+ (\d+), (\d+)\) / (\d+), (\d+)\)", expression)
+    if direct is not None:
+        bias, divisor, scale = map(int, direct.groups())
+        numerator = n + bias
+    elif bounded is not None:
+        bias, modulus, divisor, scale = map(int, bounded.groups())
+        numerator = (n + bias) % modulus
+    else:
+        raise AssertionError(f"无法解析 DECIMAL 扩展列种子表达式：{expression}")
+    quantum = Decimal(1).scaleb(-scale)
+    return (Decimal(numerator) / Decimal(divisor)).quantize(quantum, rounding=ROUND_HALF_UP)
+
+
 def test_确定性派生原语符合冻结向量() -> None:
     assert derive_uint64(seed="0", domain="vector/zero") == 15736695893721689427
     assert derive_uint64(seed="12345", domain="vector/basic") == 149763499408569138
@@ -175,6 +193,27 @@ def test_v1_扩展包覆盖列数边界且_insert_列值等长同序() -> None:
         assert insert_columns == tuple(table.columns)
         assert len(insert_values) == len(table.columns)
         assert f"extra_t{index}_000" in table.columns
+
+
+def test_v1_decimal_扩展列种子值不超出声明精度() -> None:
+    seed = "12345"
+
+    for table_index in range(v1.TOTAL_TABLE_COUNT):
+        row_count = v1.seed_row_count(table_index)
+        for spec in v1.extra_column_specs(table_index, seed=seed):
+            type_match = re.fullmatch(r"decimal\((\d+),(\d+)\)", spec.sql_type)
+            if type_match is None:
+                continue
+            precision, scale = map(int, type_match.groups())
+            limit = Decimal(10) ** (precision - scale)
+            maximum = max(
+                _evaluate_decimal_extra_expr(spec.value_expr, n)
+                for n in range(1, row_count + 1)
+            )
+            assert maximum < limit, (
+                f"t{table_index}.{spec.name} 的最大种子值 {maximum} "
+                f"超出 {spec.sql_type} 的整数位上限 {limit}"
+            )
 
 
 def test_v1_相同种子字节一致_不同种子只改变扩展投影() -> None:
@@ -358,6 +397,35 @@ def test_默认生成八种一级分区和六十四种二级分区组合(tmp_pat
 
     assert first_level_types == PARTITION_TYPES
     assert subpartition_pairs == {(outer, inner) for outer in PARTITION_TYPES for inner in PARTITION_TYPES}
+
+
+def test_离线生成器在_windows_换行环境仍逐字写入_lf_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_write_bytes = Path.write_bytes
+
+    def windows_write_text(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        del errors, newline
+        return original_write_bytes(path, data.replace("\n", "\r\n").encode(encoding or "utf-8"))
+
+    monkeypatch.setattr(Path, "write_text", windows_write_text)
+    generator.generate_files(tmp_path)
+
+    bundle = generate_core_base_sql_bundle()
+    for sql_file in bundle.files:
+        generated = (tmp_path / sql_file.path.name).read_bytes()
+        assert generated == sql_file.sql.encode("utf-8")
+        assert b"\r" not in generated
+    execution_doc = (tmp_path / "执行顺序说明.md").read_bytes()
+    assert execution_doc == generator.execution_doc().encode("utf-8")
+    assert b"\r" not in execution_doc
 
 
 def test_默认输出不包含向量并可关闭二级分区() -> None:

@@ -226,7 +226,11 @@ def _decimal_extra_column(index: int, offset: int, seed: str) -> tuple[str, str]
     )
     bias = derive_range(seed=seed, domain=_extra_domain(index, offset, "decimal/bias"), minimum=0, maximum=9999)
     divisor = derive_range(seed=seed, domain=_extra_domain(index, offset, "decimal/divisor"), minimum=2, maximum=19)
-    return f"decimal({precision},{scale})", f"ROUND((`n` + {bias}) / {divisor}, {scale})"
+    integer_modulus = 10 ** (precision - scale)
+    return (
+        f"decimal({precision},{scale})",
+        f"ROUND(MOD(`n` + {bias}, {integer_modulus}) / {divisor}, {scale})",
+    )
 
 
 def _float_extra_column(index: int, offset: int, seed: str) -> tuple[str, str]:

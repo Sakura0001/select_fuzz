@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from select_fuzz.metadata.ddl_parser import parse_create_table
+from select_fuzz.base_tables import generate_base_sql_bundle, normalize_base_table_seed
+from select_fuzz.base_tables import v1
 
 SQL_DIR = ROOT / "sql_base_tables"
 EXECUTION_DOC = SQL_DIR / "执行顺序说明.md"
@@ -23,6 +25,7 @@ MIN_SEED_ROWS = 10
 MAX_SEED_ROWS = 100
 MIN_TABLE_COLUMNS = 200
 MAX_TABLE_COLUMNS = 500
+CORE_TABLE_COLUMNS = len(v1.base_seed_columns())
 SEED_NUMBER_TABLE = "_select_fuzz_seed_numbers"
 FIRST_PARTITION_START = 7
 FIRST_PARTITION_COUNT = 8
@@ -158,8 +161,39 @@ def assert_seed_partition_coverage(seed_sql: str, errors: list[str]) -> None:
             fail(f"t{index} 种子数据 subpart_id 未覆盖 {SUBPARTITION_VALUES}", errors)
 
 
-def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
+def main(
+    sql_dir: Path = SQL_DIR,
+    include_subpartition: bool = True,
+    *,
+    expanded_columns: bool = False,
+    generator_version: str | None = None,
+    seed: str | None = None,
+) -> int:
     errors: list[str] = []
+    expected_sql: dict[str, str] | None = None
+    normalized_seed: str | None = None
+    if expanded_columns:
+        if (generator_version is None) != (seed is None):
+            fail("扩展列精确校验必须同时指定生成器版本和种子", errors)
+        elif generator_version is not None and seed is not None:
+            try:
+                normalized_seed = normalize_base_table_seed(seed)
+                standard_bundle = generate_base_sql_bundle(generator_version, normalized_seed)
+                expected_files = (
+                    standard_bundle.files
+                    if include_subpartition
+                    else v1.render_sql_files(
+                        normalized_seed,
+                        expand_base_table_columns=True,
+                        include_subpartition=False,
+                    )
+                )
+                expected_sql = {item.path.name: item.sql for item in expected_files}
+            except ValueError as exc:
+                fail(str(exc), errors)
+    elif generator_version is not None or seed is not None:
+        fail("核心列校验不能指定扩展生成器版本或种子", errors)
+
     files = sorted(path.name for path in sql_dir.glob("t*.sql"))
     if len(files) != TOTAL_TABLE_COUNT:
         fail(f"期望 {TOTAL_TABLE_COUNT} 个 tN.sql 文件，实际 {len(files)} 个", errors)
@@ -174,13 +208,28 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
         if not sql:
             continue
         all_sql_parts.append(sql)
+        if expected_sql is not None and expected_sql.get(f"t{index}.sql") != sql:
+            fail(f"t{index}.sql 与指定生成器版本和种子不一致", errors)
         table_metadata = parse_create_table(sql)
         column_count = len(table_metadata.columns)
         column_counts.append(column_count)
-        if not MIN_TABLE_COLUMNS <= column_count <= MAX_TABLE_COLUMNS:
-            fail(f"t{index}.sql 列数应在 {MIN_TABLE_COLUMNS} 到 {MAX_TABLE_COLUMNS} 之间，实际 {column_count}", errors)
-        if f"`extra_t{index}_000`" not in sql:
-            fail(f"t{index}.sql 缺少随机扩展列", errors)
+        extra_columns = tuple(
+            name
+            for name in table_metadata.columns
+            if re.fullmatch(r"extra_t\d+_\d{3}", name)
+        )
+        if expanded_columns:
+            if not MIN_TABLE_COLUMNS <= column_count <= MAX_TABLE_COLUMNS:
+                fail(f"t{index}.sql 列数应在 {MIN_TABLE_COLUMNS} 到 {MAX_TABLE_COLUMNS} 之间，实际 {column_count}", errors)
+            if f"extra_t{index}_000" not in table_metadata.columns:
+                fail(f"t{index}.sql 缺少扩展列 extra_t{index}_000", errors)
+            if len(extra_columns) != column_count - CORE_TABLE_COLUMNS:
+                fail(f"t{index}.sql 扩展列命名或数量不符合约定", errors)
+        else:
+            if column_count != CORE_TABLE_COLUMNS:
+                fail(f"t{index}.sql 核心模式应恰好包含 {CORE_TABLE_COLUMNS} 列，实际 {column_count}", errors)
+            if extra_columns:
+                fail(f"t{index}.sql 核心模式不应包含 extra_tN_NNN 扩展列", errors)
         create_pattern = rf"^CREATE\s+(?:TEMPORARY\s+)?TABLE\s+`t{index}`"
         if len(re.findall(create_pattern, sql, flags=re.I | re.M)) != 1:
             fail(f"t{index}.sql 没有且仅有一个匹配表名的 CREATE TABLE", errors)
@@ -269,10 +318,13 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
     if re.search(r"\bFULLTEXT\b", all_sql, re.I):
         fail("基表目录不应包含 FULLTEXT 索引", errors)
     if column_counts:
-        if min(column_counts) != MIN_TABLE_COLUMNS or max(column_counts) != MAX_TABLE_COLUMNS:
-            fail(f"基表列数应覆盖 {MIN_TABLE_COLUMNS} 到 {MAX_TABLE_COLUMNS}，实际 {min(column_counts)} 到 {max(column_counts)}", errors)
-        if len(set(column_counts)) < 20:
-            fail("基表列数随机性不足，不同列数少于 20 种", errors)
+        if expanded_columns:
+            if min(column_counts) != MIN_TABLE_COLUMNS or max(column_counts) != MAX_TABLE_COLUMNS:
+                fail(f"扩展基表列数应覆盖 {MIN_TABLE_COLUMNS} 到 {MAX_TABLE_COLUMNS}，实际 {min(column_counts)} 到 {max(column_counts)}", errors)
+            if len(set(column_counts)) < 20:
+                fail("扩展基表列数派生覆盖不足，不同列数少于 20 种", errors)
+        elif column_counts != [CORE_TABLE_COLUMNS] * TOTAL_TABLE_COUNT:
+            fail(f"核心基表应全部为 {CORE_TABLE_COLUMNS} 列", errors)
     char_lengths = [int(value) for value in re.findall(r"`char_col`\s+char\((\d+)\)", all_sql, flags=re.I)]
     varchar_lengths = [int(value) for value in re.findall(r"`varchar_col`\s+varchar\((\d+)\)", all_sql, flags=re.I)]
     if len(char_lengths) != TOTAL_TABLE_COUNT or min(char_lengths) != 1 or max(char_lengths) != 255:
@@ -305,6 +357,8 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
         fail("缺少 zz_seed_fk_data.sql", errors)
     else:
         seed_sql = seed_path.read_text(encoding="utf-8")
+        if expected_sql is not None and expected_sql.get("zz_seed_fk_data.sql") != seed_sql:
+            fail("zz_seed_fk_data.sql 与指定生成器版本和种子不一致", errors)
         assert_no_unsupported_geometry(seed_sql, "基表种子数据", errors)
         if "SET transaction_isolation = 'READ-COMMITTED';" not in seed_sql:
             fail("种子数据脚本缺少 READ COMMITTED 隔离级别设置", errors)
@@ -337,7 +391,13 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
         for name in ["t0.sql", "t1.sql", *[f"t{index}.sql" for index in range(2, TOTAL_TABLE_COUNT)], "zz_seed_fk_data.sql"]:
             if name not in doc:
                 fail(f"执行顺序说明缺少 {name}", errors)
-        doc_fragments = ["READ-COMMITTED", "10", "100", "200", "500", "UNIQUE KEY"]
+        doc_fragments = ["READ-COMMITTED", "10", "100", "UNIQUE KEY"]
+        if expanded_columns:
+            doc_fragments.extend(["扩展列模式", "200", "500", "v1"])
+            if normalized_seed is not None:
+                doc_fragments.append(normalized_seed)
+        else:
+            doc_fragments.extend(["默认核心模式", str(CORE_TABLE_COLUMNS), "extra_tN_NNN"])
         for fragment in doc_fragments:
             if fragment not in doc:
                 fail(f"执行顺序说明缺少约束说明：{fragment}", errors)
@@ -351,7 +411,12 @@ def main(sql_dir: Path = SQL_DIR, include_subpartition: bool = True) -> int:
     if errors:
         print("\n".join(errors))
         return 1
-    print(f"结构验证通过：{TOTAL_TABLE_COUNT} 张基表、每表 200 到 500 列、8 种一级分区、64 种二级分区组合、随机列类型、分区种子数据、无向量约束、外键、索引类型和执行顺序文档均满足要求。")
+    column_summary = (
+        f"每表 {MIN_TABLE_COLUMNS} 到 {MAX_TABLE_COLUMNS} 列的扩展模式"
+        if expanded_columns
+        else f"每表 {CORE_TABLE_COLUMNS} 列的默认核心模式"
+    )
+    print(f"结构验证通过：{TOTAL_TABLE_COUNT} 张基表、{column_summary}、8 种一级分区、64 种二级分区组合、分区种子数据、无向量约束、外键、索引类型和执行顺序文档均满足要求。")
     return 0
 
 
@@ -359,7 +424,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="校验生成的基表 DDL 是否覆盖当前要求")
     parser.add_argument("--sql-dir", type=Path, default=SQL_DIR, help="待校验的 SQL 目录")
     parser.add_argument("--without-subpartition", action="store_true", help="按不含二级分区的兼容输出校验")
-    return parser.parse_args()
+    parser.add_argument("--expanded-columns", action="store_true", help="按每表 200 到 500 列的扩展模式校验")
+    parser.add_argument("--generator-version", help="可选：精确校验扩展模式生成器版本")
+    parser.add_argument("--seed", help="可选：精确校验扩展模式规范 uint64 种子")
+    args = parser.parse_args()
+    if args.expanded_columns:
+        if (args.generator_version is None) != (args.seed is None):
+            parser.error("精确校验必须同时指定 --generator-version 和 --seed")
+    elif args.generator_version is not None or args.seed is not None:
+        parser.error("--generator-version 和 --seed 只能与 --expanded-columns 一起使用")
+    return args
 
 
 if __name__ == "__main__":
@@ -368,5 +442,8 @@ if __name__ == "__main__":
         main(
             sql_dir=args.sql_dir,
             include_subpartition=not args.without_subpartition,
+            expanded_columns=args.expanded_columns,
+            generator_version=args.generator_version,
+            seed=args.seed,
         )
     )

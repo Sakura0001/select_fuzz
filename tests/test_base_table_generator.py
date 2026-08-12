@@ -1,6 +1,31 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import struct
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
+from select_fuzz.base_tables import (
+    CURRENT_BASE_TABLE_GENERATOR_VERSION,
+    MAX_BASE_TABLE_SEED,
+    available_base_table_generator_versions,
+    generate_base_sql_bundle,
+    generate_core_base_sql_bundle,
+    normalize_base_table_seed,
+    serialize_bundle,
+)
+from select_fuzz.base_tables.deterministic import derive_range, derive_uint64, pick
+from select_fuzz.base_tables.models import BaseSqlBundle
+from select_fuzz.base_tables import v1
 from select_fuzz.metadata.ddl_parser import parse_create_table
+from select_fuzz.metadata.models import BaseSqlFile
 from tools import generate_sql_base_tables as generator
 from tools import validate_sql_base_tables as validator
 
@@ -15,6 +40,7 @@ PARTITION_TYPES = {
     "KEY",
     "LINEAR KEY",
 }
+GOLDEN_MANIFEST = Path(__file__).parent / "golden" / "base_table_v1_seed_12345.json"
 
 
 def _partition_type(sql: str) -> str:
@@ -29,6 +55,255 @@ def _subpartition_type(sql: str) -> str:
         if line.startswith("SUBPARTITION BY "):
             return line.removeprefix("SUBPARTITION BY ").split(" (", 1)[0].split(" SUBPARTITIONS ", 1)[0].strip()
     raise AssertionError("缺少 SUBPARTITION BY")
+
+
+def _split_top_level_csv(text: str) -> tuple[str, ...]:
+    """拆分测试中的 INSERT 列和值，忽略括号或字符串内部的逗号。"""
+
+    parts: list[str] = []
+    depth = 0
+    quote: str | None = None
+    start = 0
+    for index, char in enumerate(text):
+        if quote is not None:
+            if char == quote and (index == 0 or text[index - 1] != "\\"):
+                quote = None
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(text[start:index].strip())
+            start = index + 1
+    parts.append(text[start:].strip())
+    return tuple(parts)
+
+
+def _seed_insert_parts(bundle: BaseSqlBundle, index: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    seed_sql = bundle.files[-1].sql
+    match = re.search(
+        rf"INSERT INTO `t{index}` \((?P<columns>.*?)\)\nSELECT\n  (?P<values>.*?)\nFROM `",
+        seed_sql,
+        flags=re.S,
+    )
+    assert match is not None
+    columns = tuple(value.strip("`") for value in _split_top_level_csv(match.group("columns")))
+    values = _split_top_level_csv(match.group("values"))
+    return columns, values
+
+
+def _core_projection(bundle: BaseSqlBundle) -> tuple[object, ...]:
+    tables = []
+    inserts = []
+    for index, table in enumerate(bundle.tables):
+        core_columns = tuple(table.columns.values())[:42]
+        tables.append(
+            (
+                table.name,
+                tuple((column.name, column.sql_type, column.nullable) for column in core_columns),
+                tuple((item.name, tuple(item.columns), item.unique, item.primary) for item in table.indexes.values()),
+                tuple(
+                    (item.name, tuple(item.child_columns), item.parent_table, tuple(item.parent_columns))
+                    for item in table.foreign_keys
+                ),
+                table.partition,
+                table.is_temporary,
+            )
+        )
+        columns, values = _seed_insert_parts(bundle, index)
+        inserts.append((columns[:42], values[:42]))
+    return tuple(tables), tuple(inserts)
+
+
+def test_确定性派生原语符合冻结向量() -> None:
+    assert derive_uint64(seed="0", domain="vector/zero") == 15736695893721689427
+    assert derive_uint64(seed="12345", domain="vector/basic") == 149763499408569138
+    assert derive_uint64(seed=str(2**64 - 1), domain="vector/max") == 12404590578299919091
+    assert derive_range(seed="12345", domain="vector/range", minimum=200, maximum=500) == 373
+    assert pick(seed="12345", domain="vector/pick", candidates=("integer", "decimal", "json")) == "json"
+
+
+def test_确定性范围使用拒绝采样而非直接取模() -> None:
+    # counter 0、1、2 的 64 位派生值都落在拒绝区，counter 3 才被接受。
+    assert derive_range(
+        seed="12345",
+        domain="vector/rejection/3",
+        minimum=0,
+        maximum=2**63,
+    ) == 8602145318330365119
+
+
+def test_版本注册表和默认核心包契约() -> None:
+    assert CURRENT_BASE_TABLE_GENERATOR_VERSION == "v1"
+    assert MAX_BASE_TABLE_SEED == 2**64 - 1
+    assert available_base_table_generator_versions() == ("v1",)
+
+    bundle = generate_core_base_sql_bundle()
+
+    assert bundle.expand_base_table_columns is False
+    assert bundle.generator_version is None
+    assert bundle.seed is None
+    assert [item.path.name for item in bundle.files] == [
+        *[f"t{index}.sql" for index in range(79)],
+        "zz_seed_fk_data.sql",
+    ]
+    assert [table.name for table in bundle.tables] == [f"t{index}" for index in range(79)]
+    assert all(len(table.columns) == 42 for table in bundle.tables)
+    assert all(not any(name.startswith("extra_t") for name in table.columns) for table in bundle.tables)
+    assert all("\r" not in item.sql and item.sql.endswith("\n") for item in bundle.files)
+    for index, table in enumerate(bundle.tables):
+        insert_columns, insert_values = _seed_insert_parts(bundle, index)
+        assert insert_columns == tuple(table.columns)
+        assert len(insert_values) == 42
+
+
+def test_v1_扩展包覆盖列数边界且_insert_列值等长同序() -> None:
+    bundle = generate_base_sql_bundle("v1", "12345")
+
+    assert bundle.expand_base_table_columns is True
+    assert bundle.generator_version == "v1"
+    assert bundle.seed == "12345"
+    assert len(bundle.files) == 80
+    assert len(bundle.tables[0].columns) == 200
+    assert len(bundle.tables[1].columns) == 500
+    assert all(200 <= len(table.columns) <= 500 for table in bundle.tables)
+    for index, table in enumerate(bundle.tables):
+        insert_columns, insert_values = _seed_insert_parts(bundle, index)
+        assert insert_columns == tuple(table.columns)
+        assert len(insert_values) == len(table.columns)
+        assert f"extra_t{index}_000" in table.columns
+
+
+def test_v1_相同种子字节一致_不同种子只改变扩展投影() -> None:
+    first = generate_base_sql_bundle("v1", "12345")
+    repeated = generate_base_sql_bundle("v1", "12345")
+    other = generate_base_sql_bundle("v1", "67890")
+
+    assert serialize_bundle(first) == serialize_bundle(repeated)
+    assert serialize_bundle(first) != serialize_bundle(other)
+    assert _core_projection(first) == _core_projection(other)
+    first_extra = tuple(tuple((column.name, column.sql_type) for column in tuple(table.columns.values())[42:]) for table in first.tables)
+    other_extra = tuple(tuple((column.name, column.sql_type) for column in tuple(table.columns.values())[42:]) for table in other.tables)
+    assert first_extra != other_extra
+
+
+def test_v1_并发生成没有共享可变随机状态() -> None:
+    seeds = ("12345", "67890", "12345", "0", "67890", str(MAX_BASE_TABLE_SEED))
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        digests = tuple(executor.map(lambda seed: serialize_bundle(generate_base_sql_bundle("v1", seed)), seeds))
+
+    assert digests[0] == digests[2]
+    assert digests[1] == digests[4]
+    assert len(set(digests)) == 4
+
+
+def test_v1_运行时代码不依赖_python_random_或工具模块() -> None:
+    source = Path(v1.__file__).read_text(encoding="utf-8")
+
+    assert "import random" not in source
+    assert "random." not in source
+    assert "repr(" not in source
+    assert "from tools" not in source
+    assert "import tools" not in source
+
+
+@pytest.mark.parametrize(
+    "seed",
+    ("", "00", "01", "+1", "-1", " 1", "1 ", "1.0", "١", "１", str(2**64)),
+)
+def test_种子只接受规范_ascii_uint64(seed: str) -> None:
+    with pytest.raises(ValueError, match="基表种子"):
+        normalize_base_table_seed(seed)
+
+
+@pytest.mark.parametrize("seed", ("0", "1", "12345", str(2**64 - 1)))
+def test_规范种子保持原十进制字符串(seed: str) -> None:
+    assert normalize_base_table_seed(seed) == seed
+
+
+def test_未知生成器版本返回中文错误() -> None:
+    with pytest.raises(ValueError, match="^未知基表生成器版本：v2$"):
+        generate_base_sql_bundle("v2", "0")
+
+
+def test_bundle_序列化使用大端长度前缀避免拼接歧义() -> None:
+    bundle = BaseSqlBundle(
+        files=(BaseSqlFile(Path("t0.sql"), "SELECT '甲';\n"),),
+        tables=(),
+    )
+    name = b"t0.sql"
+    sql = "SELECT '甲';\n".encode("utf-8")
+
+    assert serialize_bundle(bundle) == struct.pack(">I", len(name)) + name + struct.pack(">I", len(sql)) + sql
+
+
+def test_v1_seed_12345_匹配固定八十文件和完整_bundle_金标() -> None:
+    expected = json.loads(GOLDEN_MANIFEST.read_text(encoding="utf-8"))
+    bundle = generate_base_sql_bundle("v1", "12345")
+    actual_files = {
+        item.path.name: hashlib.sha256(item.sql.encode("utf-8")).hexdigest()
+        for item in bundle.files
+    }
+
+    assert expected["generator_version"] == "v1"
+    assert expected["seed"] == "12345"
+    assert list(expected["files"]) == [*[f"t{index}.sql" for index in range(79)], "zz_seed_fk_data.sql"]
+    assert actual_files == expected["files"]
+    assert hashlib.sha256(serialize_bundle(bundle)).hexdigest() == expected["bundle_sha256"]
+
+
+def test_v1_跨独立进程和_pythonhashseed_保持摘要一致() -> None:
+    code = (
+        "import hashlib; "
+        "from select_fuzz.base_tables import generate_base_sql_bundle, serialize_bundle; "
+        "print(hashlib.sha256(serialize_bundle(generate_base_sql_bundle('v1', '12345'))).hexdigest())"
+    )
+    digests = []
+    for hash_seed in ("1", "8675309"):
+        environment = os.environ.copy()
+        environment["PYTHONHASHSEED"] = hash_seed
+        digests.append(
+            subprocess.check_output(
+                [sys.executable, "-c", code],
+                cwd=Path(__file__).parents[1],
+                env=environment,
+                text=True,
+            ).strip()
+        )
+
+    assert digests[0] == digests[1]
+    assert digests[0] == json.loads(GOLDEN_MANIFEST.read_text(encoding="utf-8"))["bundle_sha256"]
+
+
+def test_运行时生成入口不写磁盘(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def reject_write(*args: object, **kwargs: object) -> int:
+        raise AssertionError("运行时生成入口不应写磁盘")
+
+    monkeypatch.setattr(Path, "write_text", reject_write)
+    monkeypatch.setattr(Path, "open", reject_write)
+    generate_core_base_sql_bundle()
+    generate_base_sql_bundle("v1", "12345")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_工具公共_helper_默认生成四十二核心列() -> None:
+    assert len(generator.base_seed_columns()) == 42
+    assert generator.table_column_count(0) == 42
+    assert generator.table_column_count(1) == 42
+
+    table = parse_create_table(generator.create_table_sql(0))
+
+    assert len(table.columns) == 42
+    assert not any(name.startswith("extra_t0_") for name in table.columns)
+    columns, values = _seed_insert_parts(generator.core_bundle(), 0)
+    assert columns == tuple(table.columns)
+    assert len(values) == len(columns)
 
 
 def test_种子数据每张表生成可复现十到一百行() -> None:
@@ -46,14 +321,9 @@ def test_种子数据每张表生成可复现十到一百行() -> None:
     assert seed_sql.upper().count("INSERT INTO") == 80
 
 
-def test_基表列类型长度按表可复现随机覆盖范围() -> None:
+def test_核心列类型长度按表冻结并保留覆盖范围() -> None:
     profiles = [generator.table_column_profile(index) for index in range(79)]
     assert [generator.table_column_profile(index) for index in range(79)] == profiles
-    column_counts = [generator.table_column_count(index) for index in range(79)]
-    assert [generator.table_column_count(index) for index in range(79)] == column_counts
-    assert min(column_counts) == 200
-    assert max(column_counts) == 500
-    assert len(set(column_counts)) >= 20
 
     char_lengths = {profile.char_length for profile in profiles}
     varchar_lengths = {profile.varchar_length for profile in profiles}
@@ -67,28 +337,12 @@ def test_基表列类型长度按表可复现随机覆盖范围() -> None:
     assert "`idx_t1_varchar_prefix` (`varchar_col`(1))" in short_varchar_sql
 
 
-def test_基表生成二百到五百列并纳入种子插入() -> None:
-    min_sql = generator.create_table_sql(0)
-    max_sql = generator.create_table_sql(1)
-    min_table = parse_create_table(min_sql)
-    max_table = parse_create_table(max_sql)
-
-    assert len(min_table.columns) == 200
-    assert len(max_table.columns) == 500
-    assert "extra_t0_000" in min_table.columns
-    assert "extra_t1_000" in max_table.columns
-
-    seed_sql = generator.seed_sql()
-    assert "`extra_t0_000`" in seed_sql
-    assert "`extra_t1_000`" in seed_sql
-
-
 def test_默认生成八种一级分区和六十四种二级分区组合(tmp_path: Path) -> None:
     generator.generate_files(tmp_path)
 
     table_files = sorted(tmp_path.glob("t*.sql"), key=lambda path: int(path.stem[1:]))
-
     assert [path.name for path in table_files] == [f"t{index}.sql" for index in range(79)]
+    assert all(len(parse_create_table(path.read_text(encoding="utf-8")).columns) == 42 for path in table_files)
 
     first_level_types = {
         _partition_type((tmp_path / f"t{index}.sql").read_text(encoding="utf-8"))
@@ -104,13 +358,6 @@ def test_默认生成八种一级分区和六十四种二级分区组合(tmp_pat
 
     assert first_level_types == PARTITION_TYPES
     assert subpartition_pairs == {(outer, inner) for outer in PARTITION_TYPES for inner in PARTITION_TYPES}
-
-    range_range_sql = (tmp_path / "t15.sql").read_text(encoding="utf-8")
-    list_list_sql = (tmp_path / "t33.sql").read_text(encoding="utf-8")
-    assert "SUBPARTITION p0sp0 VALUES LESS THAN (2)" in range_range_sql
-    assert "SUBPARTITION p0sp7 VALUES LESS THAN (MAXVALUE)" in range_range_sql
-    assert "SUBPARTITION p0sp0 VALUES IN (1)" in list_list_sql
-    assert "SUBPARTITION p0sp7 VALUES IN (8)" in list_list_sql
 
 
 def test_默认输出不包含向量并可关闭二级分区() -> None:
@@ -134,7 +381,39 @@ def test_唯一索引转换遵守分区键限制() -> None:
     assert "KEY `idx_t0_varchar_prefix`" in normal_sql
     assert "UNIQUE KEY `idx_t7_extra_tenant_int`" in partition_sql
     assert "UNIQUE KEY `idx_t7_int_col`" not in partition_sql
-    assert "UNIQUE KEY `idx_t11_extra_tenant_int`" not in subpartition_sql
+    assert "UNIQUE KEY `idx_t15_extra_tenant_int`" not in subpartition_sql
+
+
+def test_离线生成器拒绝清理未知_sql(tmp_path: Path) -> None:
+    user_sql = tmp_path / "用户.sql"
+    user_sql.write_text("SELECT 1;\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="未知 SQL 文件"):
+        generator.generate_files(tmp_path)
+
+    assert user_sql.read_text(encoding="utf-8") == "SELECT 1;\n"
+
+
+def test_校验器默认接受四十二核心列目录(tmp_path: Path) -> None:
+    generator.generate_files(tmp_path)
+
+    assert validator.main(sql_dir=tmp_path) == 0
+
+
+def test_校验器扩展模式接受指定_v1_和种子(tmp_path: Path) -> None:
+    generator.generate_files(
+        tmp_path,
+        expand_columns=True,
+        generator_version="v1",
+        seed="12345",
+    )
+
+    assert validator.main(
+        sql_dir=tmp_path,
+        expanded_columns=True,
+        generator_version="v1",
+        seed="12345",
+    ) == 0
 
 
 def test_校验器发现分区种子覆盖退化(tmp_path: Path) -> None:

@@ -6,14 +6,21 @@ import re
 from pathlib import Path
 from typing import Iterable
 
-from select_fuzz.metadata.base_sql import is_base_table_definition, load_base_sql_files
+from select_fuzz.metadata.base_sql import (
+    is_base_table_definition,
+    load_base_sql_files,
+    split_sql_statements,
+)
 from select_fuzz.metadata.ddl_parser import parse_create_table
 from select_fuzz.metadata.models import BaseSqlFile
 
 from .models import BaseSqlBundle
 
 
-_CREATE_TABLE_RE = re.compile(r"\bCREATE\s+(?:TEMPORARY\s+)?TABLE\b", re.IGNORECASE)
+_CREATE_TABLE_STATEMENT_RE = re.compile(
+    r"^\s*CREATE\s+(?:TEMPORARY\s+)?TABLE\b",
+    re.IGNORECASE,
+)
 
 
 def build_base_sql_bundle(
@@ -30,12 +37,13 @@ def build_base_sql_bundle(
     for sql_file in ordered_files:
         if not is_base_table_definition(sql_file):
             continue
-        if not _CREATE_TABLE_RE.search(sql_file.sql):
-            continue
-        try:
-            tables.append(parse_create_table(sql_file.sql))
-        except ValueError as exc:
-            raise RuntimeError(f"基表 SQL 解析失败（{sql_file.path.name}）：{exc}") from exc
+        for statement in split_sql_statements(sql_file.sql):
+            if not _CREATE_TABLE_STATEMENT_RE.match(statement):
+                continue
+            try:
+                tables.append(parse_create_table(statement))
+            except ValueError as exc:
+                raise RuntimeError(f"基表 SQL 解析失败（{sql_file.path.name}）：{exc}") from exc
 
     if not tables:
         raise RuntimeError("至少需要一张可解析的基表")

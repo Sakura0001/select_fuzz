@@ -70,7 +70,37 @@ def test_构建基表包只解析每个建表文件一次(monkeypatch: pytest.Mo
     )
 
     assert [table.name for table in bundle.tables] == ["t0"]
-    assert parsed_sql == [table_sql]
+    assert parsed_sql == [table_sql.rstrip(";")]
+
+
+@pytest.mark.parametrize(
+    ("path_name", "sql"),
+    (
+        ("注释.sql", "-- CREATE TABLE phantom (id INT);\nSET @x=1;"),
+        ("字符串.sql", "SELECT 'CREATE TABLE phantom (id INT)';"),
+    ),
+)
+def test_注释或字符串中的_create_table_不作为基表(path_name: str, sql: str) -> None:
+    with pytest.raises(RuntimeError, match="^至少需要一张可解析的基表$"):
+        build_base_sql_bundle((BaseSqlFile(Path("虚拟目录", path_name), sql),))
+
+
+def test_注释和字符串中的_create_table_不混入合法表元数据() -> None:
+    bundle = build_base_sql_bundle(
+        (
+            BaseSqlFile(Path("虚拟目录/real.sql"), "CREATE TABLE real_table (id INT);"),
+            BaseSqlFile(
+                Path("虚拟目录/注释.sql"),
+                "-- CREATE TABLE phantom_comment (id INT);\nSET @x=1;",
+            ),
+            BaseSqlFile(
+                Path("虚拟目录/字符串.sql"),
+                "SELECT 'CREATE TABLE phantom_string (id INT)';",
+            ),
+        )
+    )
+
+    assert [table.name for table in bundle.tables] == ["real_table"]
 
 
 def test_损坏的_create_table_在预校验时报告文件名() -> None:

@@ -16,3 +16,10 @@ class BaseSqlBundle:
     expand_base_table_columns: bool = False
     generator_version: str | None = None
     seed: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.expand_base_table_columns:
+            if self.generator_version is None or self.seed is None:
+                raise ValueError("扩展基表列时，生成器版本和种子不能为空")
+        elif self.generator_version is not None or self.seed is not None:
+            raise ValueError("未扩展基表列时，生成器版本和种子必须为空")

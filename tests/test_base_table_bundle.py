@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -47,7 +49,7 @@ def test_内存基表包保持输入顺序并跳过生成器种子脚本() -> No
         bundle.seed = "456"  # type: ignore[misc]
 
 
-def test_构建基表包只解析每个非种子文件一次(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_构建基表包只解析每个建表文件一次(monkeypatch: pytest.MonkeyPatch) -> None:
     table_sql = "CREATE TABLE t0 (id INT);"
     ignored_sql = "SET sql_mode = 'STRICT_ALL_TABLES';"
     parsed_sql: list[str] = []
@@ -68,9 +70,46 @@ def test_构建基表包只解析每个非种子文件一次(monkeypatch: pytest
     )
 
     assert [table.name for table in bundle.tables] == ["t0"]
-    assert parsed_sql == [table_sql, ignored_sql]
-    assert [table.name for table in bundle.tables] == ["t0"]
-    assert parsed_sql == [table_sql, ignored_sql]
+    assert parsed_sql == [table_sql]
+
+
+def test_损坏的_create_table_在预校验时报告文件名() -> None:
+    files = (
+        BaseSqlFile(Path("虚拟目录/t0.sql"), "CREATE TABLE t0 (id INT);"),
+        BaseSqlFile(Path("虚拟目录/损坏.sql"), "CREATE TEMPORARY TABLE broken (id INT;"),
+        BaseSqlFile(Path("虚拟目录/session.sql"), "SET FOREIGN_KEY_CHECKS=0;"),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        build_base_sql_bundle(files)
+
+    assert "损坏.sql" in str(exc_info.value)
+    assert "括号不完整" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("expand_base_table_columns", "generator_version", "seed", "error_message"),
+    (
+        (False, "v1", None, "未扩展基表列时，生成器版本和种子必须为空"),
+        (False, None, "123", "未扩展基表列时，生成器版本和种子必须为空"),
+        (True, None, "123", "扩展基表列时，生成器版本和种子不能为空"),
+        (True, "v1", None, "扩展基表列时，生成器版本和种子不能为空"),
+    ),
+)
+def test_基表包拒绝模式与生成器信息不一致(
+    expand_base_table_columns: bool,
+    generator_version: str | None,
+    seed: str | None,
+    error_message: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"^{error_message}$"):
+        BaseSqlBundle(
+            files=(),
+            tables=(),
+            expand_base_table_columns=expand_base_table_columns,
+            generator_version=generator_version,
+            seed=seed,
+        )
 
 
 def test_没有可解析表时构建基表包失败() -> None:

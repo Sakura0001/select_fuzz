@@ -141,8 +141,8 @@ body {
   gap: 4px;
 }
 
-.base-table-seed,
-.base-table-reproduction-id {
+.base-table-mode .base-table-seed,
+.base-table-mode .base-table-reproduction-id {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   white-space: nowrap;

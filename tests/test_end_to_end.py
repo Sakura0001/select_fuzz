@@ -104,6 +104,8 @@ def test_端到端任务执行日志去重和_api_查询(tmp_path: Path) -> None
 
 
 def test_扩列请求从_api_到运行日志共享同一复现凭据且不持久化初始化_sql(tmp_path: Path, monkeypatch) -> None:
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir()
     bundle = build_base_sql_bundle(
         (
             BaseSqlFile(
@@ -117,10 +119,11 @@ def test_扩列请求从_api_到运行日志共享同一复现凭据且不持久
     )
     database = EndToEndDatabase()
     monkeypatch.setattr("select_fuzz.api.service.generate_base_sql_bundle", lambda version, seed: bundle)
+    monkeypatch.setattr("select_fuzz.api.service.BUILTIN_BASE_SQL_DIR", builtin_dir)
     service = RuntimeService(
         metric_store=MetricStore(tmp_path / "metrics.db"),
         log_dir=tmp_path / "logs",
-        use_builtin_base_tables=True,
+        base_sql_dir=builtin_dir,
         db_factory=lambda _node: database,
         run_background=False,
     )

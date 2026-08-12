@@ -11,7 +11,7 @@ from select_fuzz.monitor.store import MetricStore
 from select_fuzz.runner.db import PyMySQLClient
 
 from .schemas import JumpHostRequest, TaskCreateRequest, TaskResponse
-from .service import RuntimeService
+from .service import BUILTIN_BASE_SQL_DIR, RuntimeService
 
 
 def create_app(service: RuntimeService) -> FastAPI:
@@ -101,8 +101,7 @@ def create_default_app() -> FastAPI:
         metric_store=MetricStore(log_dir / "metrics.db"),
         log_dir=log_dir,
         failed_sql_dir=log_dir / "failed_sql",
-        base_sql_dir=Path("sql_base_tables"),
-        use_builtin_base_tables=True,
+        base_sql_dir=BUILTIN_BASE_SQL_DIR,
         db_factory=lambda node: PyMySQLClient(node),
     )
     return create_app(service)

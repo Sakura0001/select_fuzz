@@ -21,6 +21,11 @@ from select_fuzz.modes.fuzz.materialization import (
     FuzzMaterializer,
     fuzz_database_name,
 )
+from select_fuzz.modes.fuzz.diagnostics import FuzzProcesslistCollector
+from select_fuzz.modes.fuzz.forensics import (
+    FuzzErrorAggregator,
+    capture_exception_evidence,
+)
 from select_fuzz.modes.fuzz.query_pipeline import GenerationOutcome, InlineQueryPipeline
 from select_fuzz.modes.fuzz.service import (
     FuzzModeService,
@@ -210,6 +215,220 @@ class _NoopFactory:
 class _QueryGenerator:
     def generate(self, context, *, seed):  # type: ignore[no-untyped-def]
         return GeneratedQuery("SELECT 1", seed, "test")
+
+
+class _ConnectorInternalError(RuntimeError):
+    errno = -1
+    sqlstate = "HY000"
+
+
+def _diagnostic_service(tmp_path, *, progress_sink=None):  # type: ignore[no-untyped-def]
+    return FuzzModeService(
+        config=FuzzConfig(
+            databases=1,
+            writer_threads_per_database=1,
+            reader_threads_per_database=3,
+            initial_tables=1,
+            initial_rows_per_table=20,
+            max_rows_per_database=100,
+        ),
+        primary=NodeConfig(role=NodeRole.CUSTOM_ON, host="primary"),
+        replica=NodeConfig(role=NodeRole.CUSTOM_ON, host="replica", port=3307),
+        factory=_NoopFactory(),
+        records=JsonlWriter(tmp_path / "events.jsonl"),
+        query_generator=WeightedQueryGenerator((("test", _QueryGenerator(), 1),)),
+        materializer_factory=lambda: _Materializer([], Lock()),
+        progress_sink=progress_sink,
+    )
+
+
+def _internal_error_evidence() -> dict[str, object]:
+    try:
+        raise _ConnectorInternalError("Unread result found")
+    except _ConnectorInternalError as error:
+        evidence = capture_exception_evidence(error, "execute")
+    evidence["connection_id"] = 71
+    evidence["watchdog"] = {
+        "timed_out": True,
+        "kill_query_succeeded": True,
+        "abort_attempted": True,
+        "abort_succeeded": True,
+        "completed": True,
+    }
+    return evidence
+
+
+def test_error_forensics_writes_one_full_sample_for_new_fingerprint(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    service = _diagnostic_service(tmp_path)
+    request = RunRequest("run-error-sample", "fuzz", 1, 1, None, 7)
+    evidence = _internal_error_evidence()
+
+    for seed in (101, 102):
+        service._record_error(  # type: ignore[attr-defined]
+            request,
+            "sf_f_case",
+            "reader",
+            0,
+            "replica",
+            seed,
+            "SELECT 1",
+            "_ConnectorInternalError:errno=-1:sqlstate=HY000",
+            failure_evidence=evidence,
+        )
+
+    events = read_jsonl(tmp_path / "events.jsonl")
+    samples = [event for event in events if event["type"] == "fuzz_error_sample"]
+    operations = [event for event in events if event["type"] == "fuzz_operation_error"]
+    assert len(samples) == 1
+    assert len(operations) == 1
+    assert samples[0]["fingerprint"] == operations[0]["fingerprint"]
+    assert samples[0]["sql"] == "SELECT 1"
+    assert samples[0]["evidence"]["failure_stage"] == "execute"
+    assert samples[0]["evidence"]["exception"]["message"] == "Unread result found"
+    assert samples[0]["evidence"]["connection_id"] == 71
+    assert samples[0]["evidence"]["watchdog"]["abort_succeeded"] is True
+    assert "_internal_error_evidence" in samples[0]["traceback"]
+    assert service._counters.snapshot().errors == 2  # type: ignore[attr-defined]
+
+
+def test_error_forensics_emits_representative_with_suppressed_count(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    service = _diagnostic_service(tmp_path)
+    current = [0]
+    service._error_aggregator = FuzzErrorAggregator(  # type: ignore[attr-defined]
+        clock_ns=lambda: current[0]
+    )
+    request = RunRequest("run-error-suppression", "fuzz", 1, 1, None, 7)
+    evidence = _internal_error_evidence()
+
+    for ordinal, now_ns in enumerate((0, 1_000_000_000, 2_000_000_000)):
+        current[0] = now_ns
+        service._record_error(  # type: ignore[attr-defined]
+            request,
+            "sf_f_case",
+            "reader",
+            0,
+            "replica",
+            ordinal,
+            "SELECT 1",
+            "_ConnectorInternalError:errno=-1:sqlstate=HY000",
+            failure_evidence=evidence,
+        )
+    current[0] = 31_000_000_000
+    service._record_error(  # type: ignore[attr-defined]
+        request,
+        "sf_f_case",
+        "reader",
+        0,
+        "replica",
+        4,
+        "SELECT 2",
+        "_ConnectorInternalError:errno=-1:sqlstate=HY000",
+        failure_evidence=evidence,
+    )
+
+    operations = [
+        event
+        for event in read_jsonl(tmp_path / "events.jsonl")
+        if event["type"] == "fuzz_operation_error"
+    ]
+    assert len(operations) == 2
+    assert operations[0]["error"] == "_ConnectorInternalError:errno=-1:sqlstate=HY000"
+    assert operations[0]["sql"] == "SELECT 1"
+    assert operations[1]["suppressed_repeats"] == 2
+    assert operations[1]["sql"] == "SELECT 2"
+
+
+def test_stage_snapshot_writes_bounded_error_summary(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    service = _diagnostic_service(tmp_path)
+    request = RunRequest("run-error-summary", "fuzz", 1, 1, None, 7)
+    service._record_error(  # type: ignore[attr-defined]
+        request,
+        "sf_f_case",
+        "reader",
+        0,
+        "replica",
+        101,
+        "SELECT 1",
+        "_ConnectorInternalError:errno=-1:sqlstate=HY000",
+        failure_evidence=_internal_error_evidence(),
+    )
+
+    service._append_stage_snapshot(request, final=False)  # type: ignore[attr-defined]
+
+    events = read_jsonl(tmp_path / "events.jsonl")
+    snapshot = next(event for event in events if event["type"] == "fuzz_stage_snapshot")
+    summary = next(event for event in events if event["type"] == "fuzz_error_summary")
+    assert snapshot["errors_summary"] == summary["summary"]
+    assert summary["summary"]["total_count"] == 1
+    assert summary["summary"]["interval_count"] == 1
+    assert len(summary["summary"]["top"]) == 1
+    assert summary["summary"]["top"][0]["error_type"] == "_ConnectorInternalError"
+    assert summary["summary"]["top"][0]["message"] == "Unread result found"
+    assert "traceback_frames" not in summary["summary"]["top"][0]
+
+
+def test_error_sample_distinguishes_uncollected_from_invisible_connection(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    service = _diagnostic_service(tmp_path)
+    request = RunRequest("run-visibility-uncollected", "fuzz", 1, 1, None, 7)
+
+    service._record_error(  # type: ignore[attr-defined]
+        request,
+        "sf_f_case",
+        "reader",
+        0,
+        "replica",
+        101,
+        "SELECT 1",
+        "_ConnectorInternalError:errno=-1:sqlstate=HY000",
+        failure_evidence=_internal_error_evidence(),
+    )
+
+    sample = read_jsonl(tmp_path / "events.jsonl")[0]
+    assert sample["evidence"]["mysql_visibility"] == {
+        "visible": None,
+        "reason": "processlist_sample_has_no_registered_connections",
+    }
+
+
+def test_error_sample_uses_fresh_processlist_connection_ids_without_persisting_them(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    service = _diagnostic_service(tmp_path)
+    request = RunRequest("run-visibility-sampled", "fuzz", 1, 1, None, 7)
+    replica = FuzzProcesslistCollector._empty_endpoint(1)
+    replica["visible"] = 1
+    replica["sleep"] = 1
+    replica["_visible_connection_ids"] = (71,)
+    service._latest_processlist = {  # type: ignore[attr-defined]
+        "sampled_at_ns": time.monotonic_ns(),
+        "endpoints": {
+            "primary": FuzzProcesslistCollector._empty_endpoint(0),
+            "replica": replica,
+        },
+    }
+
+    service._record_error(  # type: ignore[attr-defined]
+        request,
+        "sf_f_case",
+        "reader",
+        0,
+        "replica",
+        101,
+        "SELECT 1",
+        "_ConnectorInternalError:errno=-1:sqlstate=HY000",
+        failure_evidence=_internal_error_evidence(),
+    )
+    service._append_stage_snapshot(request, final=False)  # type: ignore[attr-defined]
+
+    events = read_jsonl(tmp_path / "events.jsonl")
+    sample = next(event for event in events if event["type"] == "fuzz_error_sample")
+    snapshot = next(event for event in events if event["type"] == "fuzz_stage_snapshot")
+    visibility = sample["evidence"]["mysql_visibility"]
+    assert visibility["visible"] is True
+    assert visibility["reason"] == "periodic_processlist_sample"
+    assert "_visible_connection_ids" not in snapshot["processlist"]["endpoints"]["replica"]
 
 
 class _EmptyCursor:

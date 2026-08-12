@@ -29,18 +29,19 @@
 
 `StreamingQueryExecutor` 在失败路径构造结构化错误现场，并随 `FuzzExecutionResult` 返回。现场包含：
 
-- `failure_stage`：`connection_id`、`watchdog_arm`、`execute`、`fetch`、`cursor_close`、
-  `watchdog_cancel` 或 `connection_health_check`；
+- `failure_stage`：`connection_open`、`connection_id`、`watchdog_arm`、`execute`、`fetch`、
+  `cursor_close` 或 `watchdog_cancel`；
 - 主异常的类名、完整模块名、`str(error)`、`repr(error)`、有界 `args`、errno 和 SQLSTATE；
 - 最多 8 层 `__cause__` / `__context__` 异常链，并阻止循环引用；
 - 最多 16 KiB 的 traceback；
-- execute、fetch、cursor close 和 MySQL 可见性探测各阶段耗时；
+- execute、fetch、cursor close 和总执行耗时；
 - cursor close 发生的独立异常，不能再被静默吞掉或覆盖主异常；
 - 查询前取得的 connection ID；
 - timeout、manual stop 和 watchdog 动作诊断；
-- 对 timeout、connector 内部异常、客户端错误或 cursor close 异常记录 connector 本地状态；新错误
-  指纹首次出现时，再通过有绝对截止时间的控制连接查询对应 connection ID 是否仍被 MySQL 看见。
-  禁止在工作会话上执行可能无限阻塞的 `session.is_alive()`，所有探测禁止自动 reconnect。
+- 对 timeout、connector 内部异常、客户端错误或 cursor close 异常记录 watchdog 与连接 ID；
+  服务层复用后台周期 PROCESSLIST 样本判断对应 connection ID 是否仍被 MySQL 看见，同时记录
+  样本年龄、采集错误或尚未完成首次采样的原因。工作线程不执行额外控制查询，也不在工作会话上
+  调用可能无限阻塞的 `session.is_alive()`，因此错误风暴不会放大控制连接负载。
 
 普通服务端 SQL 错误仍可复用原路径，不为每个预期语法错误额外执行连接探测。
 
@@ -76,11 +77,10 @@
 - 首次和最后出现的 monotonic 时间；
 - 累计次数和上个诊断周期后的增量；
 - 影响的 worker、数据库和端点数量，各集合最多保留 64 个成员，另记录截断数；
-- 首次完整现场和最近 3 个有界代表样本；
-- 首次完整 SQL和最近一条完整 SQL；
+- 首次完整现场、首次完整 SQL和最近 3 个有界代表样本；
 - timeout、连接丢失、连接在 MySQL 不可见的累计次数。
 
-超过 64 个指纹时，保留累计次数最高的指纹，并用 `other` 桶汇总剩余计数。聚合器只在内存中保存
+超过 64 个指纹时，保留先出现的 64 个指纹，并用 `other` 桶汇总剩余计数。聚合器只在内存中保存
 有界状态；周期快照后清零周期增量，不清零累计值。
 
 ### 5. 结构化事件
@@ -123,7 +123,8 @@
 - 异常消息、repr 和单个参数各限制 4 KiB，异常链最多 8 层，traceback 最多 16 KiB；
 - 终端字段和 SQL各限制 300 字符；首次结构化 SQL完整保存；
 - 最多 64 个错误指纹、每个 3 个代表样本、状态行最多 3 个错误摘要；
-- MySQL 可见性探测只在新指纹首次出现时执行，使用控制连接和 200 ms 绝对截止时间；
+- MySQL 可见性只读取后台诊断线程最近一次有界 PROCESSLIST 样本；精确 connection ID 集合只在
+  进程内关联，不写入周期事件；
 - 聚合和快照使用短临界区，不在锁内执行数据库调用、格式化 traceback 或写文件；
 - 诊断构造、MySQL 可见性探测或输出失败时，记录有界的诊断自身错误，不影响 fuzz 主循环。
 
@@ -132,14 +133,15 @@
 1. reader/writer 调用 `StreamingQueryExecutor.execute_session()`。
 2. 失败时执行层分别捕获主异常、清理异常、watchdog 快照和 connector 本地状态。
 3. 执行层返回包含结构化现场的 `FuzzExecutionResult`。
-4. `FuzzModeService` 计算指纹并提交错误聚合器；新指纹用有界控制查询补充 MySQL 可见性。
-5. 新指纹写 `fuzz_error_sample`；每次失败写兼容的轻量 `fuzz_operation_error`。
+4. `FuzzModeService` 用最近一次 PROCESSLIST 样本补充 MySQL 可见性，计算指纹并提交错误聚合器。
+5. 新指纹写 `fuzz_error_sample`；同一指纹最多每 30 秒写一条兼容的轻量
+   `fuzz_operation_error`，其余只计数。
 6. 诊断周期读取聚合快照，写 `fuzz_error_summary`，并让 reporter 结合读增量和 PROCESSLIST 判因。
 
 ## 测试策略
 
 - 执行层测试覆盖 execute、fetch、cursor close 和 watchdog cancel 异常原文不丢失；
-- 服务测试覆盖首次指纹的有界 MySQL 可见性探测成功、超时和失败；
+- 服务测试覆盖 PROCESSLIST 可见、不可见、未采样、陈旧和采集失败的连接证据；
 - watchdog 测试覆盖 KILL QUERY、fallback abort、KILL CONNECTION 成功和失败快照；
 - 指纹测试覆盖动态 ID/耗时归一化、不同根因区分和稳定性；
 - 聚合测试覆盖首次样本、重复计数、周期增量、容量上限、other 桶和并发安全；

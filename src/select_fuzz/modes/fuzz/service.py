@@ -11,7 +11,7 @@ import random
 import sys
 from threading import Event, Lock, Thread
 import time
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Mapping
 
 from select_fuzz.artifacts import JsonlWriter
 from select_fuzz.config import FuzzConfig, NodeConfig
@@ -27,6 +27,10 @@ from select_fuzz.modes.fuzz.diagnostics import (
     FuzzRuntimeDiagnostics,
 )
 from select_fuzz.modes.fuzz.execution import StreamingQueryExecutor
+from select_fuzz.modes.fuzz.forensics import (
+    FuzzErrorAggregator,
+    render_traceback_text,
+)
 from select_fuzz.modes.fuzz.materialization import (
     _event_error_message,
     FuzzDatabaseSchema,
@@ -236,6 +240,8 @@ class FuzzModeService:
         self._connector_implementation = connector_implementation
         self._telemetry = FuzzStageTelemetry()
         self._runtime = FuzzRuntimeDiagnostics()
+        self._error_aggregator = FuzzErrorAggregator()
+        self._last_error_summary_ns: int | None = None
         self._progress_sink = progress_sink
         expected_primary_readers = (
             config.databases * config.reader_threads_per_database // 3
@@ -600,6 +606,19 @@ class FuzzModeService:
         )
         with self._processlist_lock:
             processlist = self._latest_processlist
+        public_processlist = self._public_processlist_snapshot(processlist)
+        now_ns = time.monotonic_ns()
+        interval_seconds = self._config.diagnostics_interval_seconds
+        if self._last_error_summary_ns is not None:
+            interval_seconds = max(
+                1e-9,
+                (now_ns - self._last_error_summary_ns) / 1_000_000_000,
+            )
+        self._last_error_summary_ns = now_ns
+        raw_error_summary = self._error_aggregator.snapshot(
+            interval_seconds=interval_seconds
+        )
+        error_summary = self._bounded_error_summary(raw_error_summary)
         runtime_snapshot, runtime_connections = self._runtime.snapshot_with_connections()
         registered_connections = tuple(
             asdict(connection) for connection in runtime_connections
@@ -621,9 +640,26 @@ class FuzzModeService:
                 "registered": registered_connections[:3],
                 "truncated": max(0, len(registered_connections) - 3),
             },
-            "processlist": processlist,
+            "processlist": public_processlist,
+            "errors_summary": error_summary,
         }
         self._records.append(document)
+        total_error_count = error_summary.get("total_count")
+        if (
+            isinstance(total_error_count, int)
+            and not isinstance(total_error_count, bool)
+            and total_error_count > 0
+        ):
+            self._records.append(
+                {
+                    "type": "fuzz_error_summary",
+                    "run_id": request.run_id,
+                    "mode": "fuzz",
+                    "occurred_at": _now(),
+                    "final": final,
+                    "summary": error_summary,
+                }
+            )
         reporter = self._progress_reporter
         sink = self._progress_sink
         if reporter is None or sink is None:
@@ -1159,6 +1195,7 @@ class FuzzModeService:
                             query.sql,
                             result.error or "query_error",
                             connection_lost=result.connection_lost,
+                            failure_evidence=result.failure_evidence,
                         )
                         if result.connection_lost:
                             if stop_event.is_set():
@@ -1332,6 +1369,7 @@ class FuzzModeService:
                                         statement.sql,
                                         result.error or "dml_error",
                                         connection_lost=result.connection_lost,
+                                        failure_evidence=result.failure_evidence,
                                     )
                                     break
                                 if stop_event.is_set():
@@ -1399,8 +1437,56 @@ class FuzzModeService:
         sql: str | None,
         error: str,
         connection_lost: bool = False,
+        failure_evidence: Mapping[str, object] | None = None,
     ) -> None:
         self._counters.increment("errors")
+        evidence = (
+            dict(failure_evidence)
+            if failure_evidence is not None
+            else self._identity_evidence(error)
+        )
+        connection_id = evidence.get("connection_id")
+        mysql_visibility = self._connection_visibility(endpoint, connection_id)
+        evidence["mysql_visibility"] = mysql_visibility
+        worker = f"{database}:{worker_kind}-{endpoint}:{worker_id}"
+        watchdog = evidence.get("watchdog")
+        timed_out = bool(
+            isinstance(watchdog, Mapping) and watchdog.get("timed_out") is True
+        )
+        raw_visible = mysql_visibility.get("visible")
+        mysql_visible = raw_visible if isinstance(raw_visible, bool) else None
+        decision = self._error_aggregator.record(
+            evidence=evidence,
+            worker=worker,
+            database=database,
+            endpoint=endpoint,
+            sql=sql,
+            timed_out=timed_out,
+            connection_lost=connection_lost,
+            mysql_visible=mysql_visible,
+        )
+        if decision.is_new:
+            self._records.append(
+                {
+                    "type": "fuzz_error_sample",
+                    "run_id": request.run_id,
+                    "mode": "fuzz",
+                    "occurred_at": _now(),
+                    "generation": self._runtime.snapshot().get("generation"),
+                    "database": database,
+                    "worker_kind": worker_kind,
+                    "worker_id": worker_id,
+                    "endpoint": endpoint,
+                    "seed": seed,
+                    "sql": sql,
+                    "fingerprint": decision.fingerprint,
+                    "error": error,
+                    "evidence": evidence,
+                    "traceback": render_traceback_text(evidence),
+                }
+            )
+        if not decision.write_operation_event:
+            return
         record: dict[str, object] = {
             "type": "fuzz_operation_error",
             "run_id": request.run_id,
@@ -1413,16 +1499,161 @@ class FuzzModeService:
             "seed": seed,
             "error": error,
             "connection_lost": connection_lost,
+            "fingerprint": decision.fingerprint,
+            "suppressed_repeats": decision.suppressed_repeats,
         }
         if sql is not None:
             record["sql"] = sql
         self._records.append(record)
         self._runtime.record_issue(
-            worker=f"{database}:{worker_kind}-{endpoint}:{worker_id}",
+            worker=worker,
             endpoint=endpoint,
             error=error,
             sql=sql,
         )
+
+    @staticmethod
+    def _identity_evidence(error: str) -> dict[str, object]:
+        exception_type = error.split(":", 1)[0] or "query_error"
+        return {
+            "failure_stage": "operation",
+            "exception": {
+                "module": "",
+                "type": exception_type,
+                "message": error,
+                "repr": error,
+                "args": (error,),
+                "errno": None,
+                "sqlstate": None,
+                "relation": "root",
+            },
+            "exception_chain": (),
+            "traceback_frames": (),
+            "connection_id": None,
+            "watchdog": {"timed_out": False, "fired": False, "completed": True},
+        }
+
+    def _connection_visibility(
+        self,
+        endpoint: str,
+        connection_id: object,
+    ) -> dict[str, object]:
+        if not isinstance(connection_id, int) or isinstance(connection_id, bool):
+            return {"visible": None, "reason": "connection_id_unavailable"}
+        with self._processlist_lock:
+            processlist = self._latest_processlist
+        if processlist.get("collector_error_type") is not None:
+            return {
+                "visible": None,
+                "reason": "processlist_collector_error",
+                "collector_error_type": processlist.get("collector_error_type"),
+            }
+        sampled_at_ns = processlist.get("sampled_at_ns")
+        if not isinstance(sampled_at_ns, int) or isinstance(sampled_at_ns, bool):
+            return {"visible": None, "reason": "processlist_sample_unavailable"}
+        age_seconds = max(0.0, (time.monotonic_ns() - sampled_at_ns) / 1_000_000_000)
+        if age_seconds > max(15.0, self._config.diagnostics_interval_seconds * 2):
+            return {
+                "visible": None,
+                "reason": "processlist_sample_stale",
+                "sample_age_seconds": age_seconds,
+            }
+        endpoints = processlist.get("endpoints")
+        endpoint_summary = (
+            endpoints.get(endpoint)
+            if isinstance(endpoints, Mapping)
+            else None
+        )
+        if not isinstance(endpoint_summary, Mapping):
+            return {"visible": None, "reason": "endpoint_sample_unavailable"}
+        registered = endpoint_summary.get("registered")
+        if (
+            not isinstance(registered, int)
+            or isinstance(registered, bool)
+            or registered <= 0
+        ):
+            return {
+                "visible": None,
+                "reason": "processlist_sample_has_no_registered_connections",
+            }
+        visible_ids = endpoint_summary.get("_visible_connection_ids")
+        if not isinstance(visible_ids, (tuple, list)):
+            return {"visible": None, "reason": "connection_ids_unavailable"}
+        return {
+            "visible": connection_id in visible_ids,
+            "reason": "periodic_processlist_sample",
+            "sample_age_seconds": age_seconds,
+        }
+
+    @staticmethod
+    def _public_processlist_snapshot(
+        processlist: Mapping[str, object],
+    ) -> dict[str, object]:
+        public = dict(processlist)
+        raw_endpoints = processlist.get("endpoints")
+        if not isinstance(raw_endpoints, Mapping):
+            return public
+        public["endpoints"] = {
+            str(endpoint): {
+                str(key): value
+                for key, value in summary.items()
+                if not str(key).startswith("_")
+            }
+            if isinstance(summary, Mapping)
+            else summary
+            for endpoint, summary in raw_endpoints.items()
+        }
+        return public
+
+    @staticmethod
+    def _bounded_error_summary(summary: Mapping[str, object]) -> dict[str, object]:
+        raw_top = summary.get("top")
+        top: list[dict[str, object]] = []
+        if isinstance(raw_top, (tuple, list)):
+            for raw_item in raw_top[:8]:
+                if not isinstance(raw_item, Mapping):
+                    continue
+                evidence = raw_item.get("first_evidence")
+                evidence_map = evidence if isinstance(evidence, Mapping) else {}
+                exception = evidence_map.get("exception")
+                exception_map = exception if isinstance(exception, Mapping) else {}
+                top.append(
+                    {
+                        key: raw_item.get(key)
+                        for key in (
+                            "fingerprint",
+                            "total_count",
+                            "interval_count",
+                            "rate_per_second",
+                            "worker_count",
+                            "database_count",
+                            "endpoints",
+                            "timed_out_count",
+                            "connection_lost_count",
+                            "mysql_not_visible_count",
+                        )
+                    }
+                    | {
+                        "failure_stage": evidence_map.get("failure_stage"),
+                        "error_type": exception_map.get("type"),
+                        "message": str(exception_map.get("message", ""))[:4096],
+                        "connection_id": evidence_map.get("connection_id"),
+                        "mysql_visibility": evidence_map.get("mysql_visibility"),
+                        "watchdog": evidence_map.get("watchdog"),
+                        "sample_sql": str(raw_item.get("sample_sql") or "")[:300],
+                    }
+                )
+        return {
+            key: summary.get(key)
+            for key in (
+                "total_count",
+                "interval_count",
+                "rate_per_second",
+                "fingerprint_count",
+                "other_count",
+                "other_interval_count",
+            )
+        } | {"top": tuple(top)}
 
     def _record_reconnect(
         self,

@@ -43,6 +43,7 @@ class FuzzExecutionResult:
     fetch_elapsed_ns: int = 0
     timed_out: bool = False
     stopped: bool = False
+    failure_evidence: dict[str, object] | None = None
 
 
 class FuzzRowBudget:

@@ -249,6 +249,8 @@ def _document(
     processes_alive: int = 4,
     processlist: dict[str, object] | None = None,
     connection_groups: dict[str, int] | None = None,
+    errors: int = 2,
+    errors_summary: dict[str, object] | None = None,
 ) -> dict[str, object]:
     stage_counts = stages or {
         "waiting_for_generated_sql": 8,
@@ -271,7 +273,7 @@ def _document(
             "generations_ready": 1,
             "reads": reads,
             "writes": 10,
-            "errors": 2,
+            "errors": errors,
             "timeouts": 1,
             "connection_losses": 0,
             "reconnects": 0,
@@ -333,6 +335,16 @@ def _document(
                     "slowest_connections": (),
                 },
             },
+        },
+        "errors_summary": errors_summary
+        or {
+            "total_count": errors,
+            "interval_count": 0,
+            "rate_per_second": 0.0,
+            "fingerprint_count": 0,
+            "other_count": 0,
+            "other_interval_count": 0,
+            "top": (),
         },
     }
 
@@ -621,6 +633,118 @@ def test_reporter_prioritizes_generator_wait_over_mysql_mismatch() -> None:
     line = reporter.render(document)[0]
 
     assert "判断=SQL生成速度不足" in line
+
+
+def test_reporter_identifies_client_error_storm_before_mysql_mismatch() -> None:
+    current = [0]
+    reporter = FuzzProgressReporter(
+        diagnostics_interval_seconds=5,
+        expected_connection_groups={
+            "primary_writer": 1,
+            "primary_reader": 1,
+            "replica_reader": 1,
+        },
+        clock_ns=lambda: current[0],
+    )
+    processlist = {
+        "sampled_at_ns": 0,
+        "endpoints": {
+            "primary": {
+                "registered": 2,
+                "visible": 2,
+                "missing": 0,
+                "commands": {"Sleep": 2},
+                "longest_sleep_seconds": 120,
+                "longest_query_seconds": 0,
+                "slowest_connections": (),
+            },
+            "replica": {
+                "registered": 1,
+                "visible": 1,
+                "missing": 0,
+                "commands": {"Sleep": 1},
+                "longest_sleep_seconds": 120,
+                "longest_query_seconds": 0,
+                "slowest_connections": (),
+            },
+        },
+    }
+    base = _document(
+        errors=0,
+        stages={"reader_executing": 2, "writer_executing": 1},
+        connection_groups={
+            "primary_writer": 1,
+            "primary_reader": 1,
+            "replica_reader": 1,
+        },
+        processlist=processlist,
+    )
+    reporter.render(base)
+    current[0] = 15_000_000_000
+    processlist["sampled_at_ns"] = current[0]
+    storm = _document(
+        errors=7500,
+        stages={"reader_executing": 2, "writer_executing": 1},
+        connection_groups={
+            "primary_writer": 1,
+            "primary_reader": 1,
+            "replica_reader": 1,
+        },
+        processlist=processlist,
+        errors_summary={
+            "total_count": 7500,
+            "interval_count": 2500,
+            "rate_per_second": 500.0,
+            "fingerprint_count": 1,
+            "other_count": 0,
+            "other_interval_count": 0,
+            "top": (
+                {
+                    "fingerprint": "8f32a6d417cb",
+                    "total_count": 7500,
+                    "interval_count": 2500,
+                    "rate_per_second": 500.0,
+                    "worker_count": 72,
+                    "database_count": 6,
+                    "endpoints": ("primary", "replica"),
+                    "failure_stage": "execute",
+                    "error_type": "InternalError",
+                    "message": "Unread result found",
+                    "connection_id": 71,
+                    "mysql_visibility": {
+                        "visible": True,
+                        "reason": "periodic_processlist_sample",
+                    },
+                    "watchdog": {
+                        "timed_out": True,
+                        "kill_query_succeeded": True,
+                        "abort_attempted": True,
+                        "abort_succeeded": True,
+                    },
+                    "sample_sql": "SELECT 1",
+                },
+            ),
+        },
+    )
+
+    lines = reporter.render(storm)
+
+    assert "判断=客户端错误风暴；查询未发送到 MySQL，客户端快速失败" in lines[0]
+    assert "错误风暴=8f32a6d417cb:500.0/s" in lines[0]
+    assert len(lines) == 2
+    assert "指纹=8f32a6d417cb" in lines[1]
+    assert "异常=InternalError:Unread result found" in lines[1]
+    assert "阶段=execute" in lines[1]
+    assert "watchdog={超时:是,KILL:成功,abort:成功}" in lines[1]
+    assert "影响=72线程/6数据库/primary,replica" in lines[1]
+    assert "SQL=SELECT 1" in lines[1]
+
+    current[0] = 30_000_000_000
+    processlist["sampled_at_ns"] = current[0]
+    processlist["endpoints"]["replica"]["missing"] = 1
+    incomplete_lines = reporter.render(storm)
+    assert "判断=客户端错误风暴" in incomplete_lines[0]
+    assert "查询未发送到 MySQL" not in incomplete_lines[0]
 
 
 def test_reporter_rejects_stale_mysql_sample_and_new_stage_as_long_running() -> None:

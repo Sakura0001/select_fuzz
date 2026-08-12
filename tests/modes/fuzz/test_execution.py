@@ -52,6 +52,14 @@ class _Factory:
     control_session = query_session
 
 
+class _FailingOpenFactory(_Factory):
+    @contextmanager
+    def query_session(self, node: NodeConfig, database: str):  # type: ignore[no-untyped-def]
+        del node, database
+        raise _InternalConnectorError("cannot establish query connection")
+        yield  # pragma: no cover
+
+
 def test_streaming_executor_discards_values_and_counts_rows() -> None:
     node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
     result = StreamingQueryExecutor(_Factory()).execute(
@@ -66,6 +74,25 @@ def test_streaming_executor_discards_values_and_counts_rows() -> None:
     assert result.error is None
     assert result.execute_elapsed_ns >= 0
     assert result.fetch_elapsed_ns >= 0
+
+
+def test_streaming_executor_preserves_connection_open_failure_evidence() -> None:
+    node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
+
+    result = StreamingQueryExecutor(_FailingOpenFactory()).execute(
+        node,
+        "sf_f_case",
+        "SELECT value FROM t",
+        timeout_seconds=5,
+    )
+
+    assert result.success is False
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["failure_stage"] == "connection_open"
+    assert (
+        result.failure_evidence["exception"]["message"]
+        == "cannot establish query connection"
+    )
 
 
 class _Handle:
@@ -102,6 +129,18 @@ class _Watchdog:
         return self.handle
 
 
+class _TimeoutAfterCancelHandle(_Handle):
+    def cancel(self, *, statement_token=None) -> None:  # type: ignore[no-untyped-def]
+        super().cancel(statement_token=statement_token)
+        self.timed_out = True
+
+
+class _TimeoutAfterCancelWatchdog(_Watchdog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.handle = _TimeoutAfterCancelHandle()
+
+
 def test_streaming_session_arms_deadline_and_stop_triggers_active_query() -> None:
     node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
     watchdog = _Watchdog()
@@ -127,9 +166,142 @@ def test_streaming_session_arms_deadline_and_stop_triggers_active_query() -> Non
     assert blocking.triggered == 1
 
 
+def test_streaming_session_records_watchdog_timeout_without_connector_exception() -> None:
+    node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
+
+    result = StreamingQueryExecutor(  # type: ignore[arg-type]
+        _Factory(),
+        watchdog=_TimeoutAfterCancelWatchdog(),
+    ).execute_session(
+        _Session(),
+        "SELECT value FROM t",
+        node=node,
+        database="sf_f_case",
+        timeout_seconds=5,
+    )
+
+    assert result.success is False
+    assert result.timed_out is True
+    assert result.error == "query_timeout"
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["failure_stage"] == "watchdog_timeout"
+    assert result.failure_evidence["watchdog"]["timed_out"] is True
+
+
 class _Interrupted(Exception):
     errno = 1317
     sqlstate = "42000"
+
+
+class _InternalConnectorError(RuntimeError):
+    errno = -1
+    sqlstate = "HY000"
+
+
+class _FailingExecuteSession(_Session):
+    def execute(self, sql: str) -> _Cursor:
+        raise _InternalConnectorError("Unread result found")
+
+
+class _FailingFetchCursor(_Cursor):
+    def fetchmany(self, size: int):  # type: ignore[no-untyped-def]
+        del size
+        raise _InternalConnectorError("fetch protocol state is invalid")
+
+
+class _FailingFetchSession(_Session):
+    def execute(self, sql: str) -> _FailingFetchCursor:
+        assert sql == "SELECT value FROM t"
+        return _FailingFetchCursor()
+
+
+class _FailingCloseCursor(_Cursor):
+    def fetchmany(self, size: int):  # type: ignore[no-untyped-def]
+        del size
+        return ()
+
+    def close(self) -> None:
+        raise _InternalConnectorError("cursor close found unread result")
+
+
+class _FailingCloseSession(_Session):
+    def execute(self, sql: str) -> _FailingCloseCursor:
+        assert sql == "SELECT value FROM t"
+        return _FailingCloseCursor()
+
+
+def test_streaming_session_preserves_execute_exception_evidence() -> None:
+    node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
+    watchdog = _Watchdog()
+
+    result = StreamingQueryExecutor(  # type: ignore[arg-type]
+        _Factory(),
+        watchdog=watchdog,
+    ).execute_session(
+        _FailingExecuteSession(),
+        "SELECT value FROM t",
+        node=node,
+        database="sf_f_case",
+        timeout_seconds=5,
+    )
+
+    assert result.success is False
+    assert result.error == "_InternalConnectorError:errno=-1:sqlstate=HY000"
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["failure_stage"] == "execute"
+    assert result.failure_evidence["connection_id"] == 7
+    assert result.failure_evidence["exception"]["message"] == "Unread result found"
+    assert result.failure_evidence["watchdog"]["timed_out"] is False
+
+
+def test_streaming_session_preserves_fetch_exception_evidence() -> None:
+    node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
+
+    result = StreamingQueryExecutor(  # type: ignore[arg-type]
+        _Factory(),
+        watchdog=_Watchdog(),
+    ).execute_session(
+        _FailingFetchSession(),
+        "SELECT value FROM t",
+        node=node,
+        database="sf_f_case",
+        timeout_seconds=5,
+    )
+
+    assert result.success is False
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["failure_stage"] == "fetch"
+    assert (
+        result.failure_evidence["exception"]["message"]
+        == "fetch protocol state is invalid"
+    )
+    assert result.failure_evidence["timings"]["fetch_elapsed_ns"] >= 0
+    assert result.failure_evidence["timings"]["total_elapsed_ns"] >= 0
+
+
+def test_streaming_session_turns_cursor_close_failure_into_evidence() -> None:
+    node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
+
+    result = StreamingQueryExecutor(  # type: ignore[arg-type]
+        _Factory(),
+        watchdog=_Watchdog(),
+    ).execute_session(
+        _FailingCloseSession(),
+        "SELECT value FROM t",
+        node=node,
+        database="sf_f_case",
+        timeout_seconds=5,
+    )
+
+    assert result.success is False
+    assert result.error == "_InternalConnectorError:errno=-1:sqlstate=HY000"
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["failure_stage"] == "cursor_close"
+    assert (
+        result.failure_evidence["exception"]["message"]
+        == "cursor close found unread result"
+    )
+    assert result.failure_evidence["timings"]["cursor_close_elapsed_ns"] >= 0
 
 
 class _BlockingSession:

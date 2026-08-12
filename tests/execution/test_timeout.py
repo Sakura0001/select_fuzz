@@ -84,6 +84,28 @@ class _SlowControlFactory(_ControlFactory):
         yield _SlowControlSession(self.killed, self.kill_seen, self.release_kill)
 
 
+class _FailingKillQuerySession(_ControlSession):
+    def execute(self, sql: str) -> _ControlCursor:
+        assert sql.startswith("KILL QUERY ")
+        raise RuntimeError("control connection rejected KILL QUERY")
+
+
+class _FallbackControlFactory(_ControlFactory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.opens = 0
+
+    @contextmanager
+    def control_session(self, node: NodeConfig, database: str):  # type: ignore[no-untyped-def]
+        del node
+        self.control_databases.append(database)
+        self.opens += 1
+        if self.opens == 1:
+            yield _FailingKillQuerySession(self.killed, self.kill_seen)
+            return
+        yield _ControlSession(self.killed, self.kill_seen)
+
+
 @pytest.fixture
 def node() -> NodeConfig:
     return NodeConfig(role=NodeRole.BASELINE, host="127.0.0.1", port=33061)
@@ -110,6 +132,27 @@ def test_watchdog_uses_an_independent_control_session_and_integer_kill(
     assert factory.killed == ["KILL QUERY 41"]
     assert factory.control_databases == ["sf_case_1"]
     assert handle.thread_alive is False
+    assert handle.diagnostic_snapshot() == {
+        "action": "timeout_kill",
+        "timed_out": True,
+        "fired": True,
+        "action_error_type": None,
+        "action_error": None,
+        "kill_query_started": True,
+        "kill_query_finished": True,
+        "kill_query_succeeded": True,
+        "kill_query_error_type": None,
+        "kill_query_error": None,
+        "abort_attempted": False,
+        "abort_succeeded": None,
+        "abort_error_type": None,
+        "abort_error": None,
+        "kill_connection_attempted": False,
+        "kill_connection_succeeded": None,
+        "kill_connection_error_type": None,
+        "kill_connection_error": None,
+        "completed": True,
+    }
 
 
 def test_watchdog_cancellation_joins_before_connection_can_be_reused(
@@ -210,6 +253,10 @@ def test_scheduler_survives_one_action_thread_start_failure(
     assert first_abort_seen.is_set()
     assert second.timed_out is True
     assert factory.killed == ["KILL QUERY 42"]
+    snapshot = first.diagnostic_snapshot()
+    assert snapshot["action_error_type"] == "RuntimeError"
+    assert snapshot["action_error"] == "injected action thread start failure"
+    assert snapshot["abort_succeeded"] is True
 
 
 def test_watchdog_aborts_when_control_kill_thread_cannot_start(
@@ -250,6 +297,47 @@ def test_watchdog_aborts_when_control_kill_thread_cannot_start(
     assert handle.timed_out is True
     assert handle.kill_error_type == "RuntimeError"
     assert factory.killed == []
+    snapshot = handle.diagnostic_snapshot()
+    assert snapshot["kill_query_started"] is False
+    assert snapshot["kill_query_finished"] is True
+    assert snapshot["kill_query_succeeded"] is False
+    assert snapshot["kill_query_error_type"] == "RuntimeError"
+    assert snapshot["kill_query_error"] == "injected control kill thread start failure"
+    assert snapshot["abort_attempted"] is True
+    assert snapshot["abort_succeeded"] is True
+    assert snapshot["completed"] is True
+
+
+def test_watchdog_records_control_abort_and_kill_connection_failover(
+    node: NodeConfig,
+) -> None:
+    factory = _FallbackControlFactory()
+
+    def failing_abort() -> None:
+        raise OSError("local socket abort failed")
+
+    handle = KillQueryWatchdog(factory, kill_grace_s=0.01).arm(
+        node,
+        "sf_case_1",
+        connection_id=41,
+        timeout_s=0.01,
+        fallback_abort=failing_abort,
+    )
+
+    assert factory.kill_seen.wait(1)
+    handle.cancel()
+
+    snapshot = handle.diagnostic_snapshot()
+    assert snapshot["kill_query_succeeded"] is False
+    assert snapshot["kill_query_error_type"] == "RuntimeError"
+    assert snapshot["kill_query_error"] == "control connection rejected KILL QUERY"
+    assert snapshot["abort_attempted"] is True
+    assert snapshot["abort_succeeded"] is False
+    assert snapshot["abort_error_type"] == "OSError"
+    assert snapshot["abort_error"] == "local socket abort failed"
+    assert snapshot["kill_connection_attempted"] is True
+    assert snapshot["kill_connection_succeeded"] is True
+    assert factory.killed == ["KILL CONNECTION 41"]
 
 
 def test_scheduler_compacts_cancelled_handles_behind_a_live_deadline(

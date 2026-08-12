@@ -124,10 +124,10 @@ watchdog 和 fingerprint；相同指纹立即重复时不写第二条 sample。
 断言 `_append_stage_snapshot()` 追加 `fuzz_error_summary`，同时 stage snapshot 新增 `errors_summary`
 且已有字段不变。
 
-- [ ] **Step 4: 写失败测试——首次指纹用有界控制连接检查 connection ID 可见性**
+- [ ] **Step 4: 写失败测试——首次指纹关联周期 PROCESSLIST 的 connection ID 可见性**
 
-模拟 `control_session_until`，断言查询只插入经校验的整数 ID，deadline 不超过 200 ms；采样超时或
-权限错误只进入诊断字段，不改变 fuzz 结果。
+模拟后台 PROCESSLIST 的新鲜、陈旧、未采样和采集失败结果，断言精确 connection ID 关联只读取
+内存快照，不发起工作线程控制查询；权限错误只进入诊断字段，不改变 fuzz 结果。
 
 - [ ] **Step 5: 运行服务测试确认事件和聚合缺失**
 
@@ -140,10 +140,10 @@ Expected: FAIL，提示新事件、摘要或探测字段缺失。
 `_record_error()` 接收 `failure_evidence`，精确增加 counter；首次指纹生成完整 traceback 文本并写
 sample，重复指纹按 30 秒采样兼容事件；周期快照写 summary。
 
-- [ ] **Step 7: 实现首次指纹的 200 ms MySQL 可见性探测**
+- [ ] **Step 7: 实现后台 PROCESSLIST 快照的 MySQL 可见性关联**
 
-复用 control session absolute deadline 能力查询 `information_schema.PROCESSLIST`；若生产 factory
-不支持 deadline API，则明确记录 `unsupported`，禁止退化为无界工作连接 ping。
+后台采集时保留登记 connection ID 中 MySQL 可见的集合，错误路径仅做内存关联并记录样本年龄；
+写周期事件前移除该内部集合，禁止工作线程退化为无界工作连接 ping 或额外控制查询。
 
 - [ ] **Step 8: 运行 Task 3 测试**
 

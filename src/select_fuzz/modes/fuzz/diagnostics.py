@@ -219,6 +219,7 @@ class FuzzProcesslistCollector:
             "longest_sleep_seconds": 0,
             "longest_query_seconds": 0,
             "slowest_connections": (),
+            "_visible_connection_ids": (),
         }
 
     def collect(self) -> dict[str, object]:
@@ -322,6 +323,7 @@ class FuzzProcesslistCollector:
                         ),
                     )[:_DETAIL_LIMIT]
                 ),
+                "_visible_connection_ids": tuple(sorted(visible_ids)),
             }
         )
         return summary
@@ -502,6 +504,20 @@ class FuzzProgressReporter:
             and waiting_age >= _NO_READ_WARNING_SECONDS
         ):
             return "generation_slow", "SQL生成速度不足"
+        error_storm = self._error_storm_top(document)
+        if no_read_seconds >= _NO_READ_WARNING_SECONDS and error_storm:
+            mysql_query, mysql_sleep = self._mysql_commands(document)
+            query_not_sent = (
+                self._processlist_is_fresh(document, now_ns)
+                and self._processlist_has_complete_visibility(document)
+                and mysql_query == 0
+                and mysql_sleep > 0
+                and error_storm.get("failure_stage") == "execute"
+            )
+            diagnosis = "客户端错误风暴"
+            if query_not_sent:
+                diagnosis += "；查询未发送到 MySQL，客户端快速失败"
+            return "client_error_storm", diagnosis
         reader_executing = stage_counts.get("reader_executing", 0)
         reader_executing_age = self._stage_age_seconds(
             document,
@@ -605,6 +621,17 @@ class FuzzProgressReporter:
             sleep += _int_value(commands, "Sleep")
         return query, sleep
 
+    @staticmethod
+    def _error_storm_top(document: Mapping[str, object]) -> Mapping[str, object]:
+        summary = _mapping(document.get("errors_summary"))
+        rate = summary.get("rate_per_second")
+        if not isinstance(rate, (int, float)) or isinstance(rate, bool) or rate < 10:
+            return {}
+        top = summary.get("top")
+        if not isinstance(top, (tuple, list)) or not top:
+            return {}
+        return _mapping(top[0])
+
     def _status_line(
         self,
         document: Mapping[str, object],
@@ -652,6 +679,15 @@ class FuzzProgressReporter:
             else f"{_int_value(runtime, 'refresh_remaining_ns') / 1_000_000_000:.1f}s"
         )
         duration_text = self._duration_text(document)
+        error_storm = self._error_storm_top(document)
+        error_storm_text = ""
+        if error_storm:
+            rate = error_storm.get("rate_per_second", 0.0)
+            rendered_rate = float(rate) if isinstance(rate, (int, float)) else 0.0
+            error_storm_text = (
+                f" 错误风暴={error_storm.get('fingerprint', 'unknown')}:"
+                f"{rendered_rate:.1f}/s"
+            )
         active_threads = sum(
             _int_value(stages, str(name)) for name in stages
         )
@@ -672,7 +708,7 @@ class FuzzProgressReporter:
             f"{_int_value(pipeline, 'processes_total')} "
             f"待生成={_int_value(pipeline, 'pending_requests')} "
             f"最久={_int_value(pipeline, 'oldest_pending_ns') / 1_000_000_000:.1f}s "
-            f"耗时={{{duration_text}}} {processlist_text} "
+            f"耗时={{{duration_text}}}{error_storm_text} {processlist_text} "
             f"无读取={no_read_seconds:.1f}s 判断={diagnosis}"
         )
 
@@ -785,10 +821,51 @@ class FuzzProgressReporter:
                 )
         issue_text = "；".join(issue_parts) or "无"
         mysql_slowest = FuzzProgressReporter._mysql_slowest_text(document)
+        storm_text = FuzzProgressReporter._error_storm_warning_text(document)
         return (
             f"[fuzz警告] 连续{no_read_seconds:.1f}秒无读取进展；"
             f"初步原因={diagnosis}；最老线程={worker_text}；"
-            f"MySQL最慢={mysql_slowest}；最近错误={issue_text}"
+            f"MySQL最慢={mysql_slowest}；最近错误={issue_text}{storm_text}"
+        )
+
+    @staticmethod
+    def _error_storm_warning_text(document: Mapping[str, object]) -> str:
+        top = FuzzProgressReporter._error_storm_top(document)
+        if not top:
+            return ""
+        watchdog = _mapping(top.get("watchdog"))
+
+        def yes_no(value: object) -> str:
+            if value is True:
+                return "是"
+            if value is False:
+                return "否"
+            return "未知"
+
+        def success(value: object) -> str:
+            if value is True:
+                return "成功"
+            if value is False:
+                return "失败"
+            return "未执行"
+
+        raw_endpoints = top.get("endpoints")
+        endpoints = (
+            ",".join(str(value) for value in raw_endpoints)
+            if isinstance(raw_endpoints, (tuple, list))
+            else "未知"
+        )
+        sql = _truncate(top.get("sample_sql", "")) or "无"
+        message = _truncate(top.get("message", "")) or "无"
+        return (
+            f"；错误取证=指纹={top.get('fingerprint', 'unknown')} "
+            f"异常={top.get('error_type', 'unknown')}:{message} "
+            f"阶段={top.get('failure_stage', 'unknown')} "
+            f"watchdog={{超时:{yes_no(watchdog.get('timed_out'))},"
+            f"KILL:{success(watchdog.get('kill_query_succeeded'))},"
+            f"abort:{success(watchdog.get('abort_succeeded'))}}} "
+            f"影响={_int_value(top, 'worker_count')}线程/"
+            f"{_int_value(top, 'database_count')}数据库/{endpoints} SQL={sql}"
         )
 
     @staticmethod

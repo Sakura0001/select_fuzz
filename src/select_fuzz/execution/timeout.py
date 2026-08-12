@@ -16,6 +16,13 @@ from select_fuzz.execution.protocols import ControlConnectionFactory
 _DEADLINE_COMPACT_INTERVAL = 256
 
 
+def _diagnostic_error_text(error: BaseException) -> str:
+    try:
+        return str(error)[:4096]
+    except Exception as render_error:  # pragma: no cover - hostile exception text
+        return f"<{type(error).__name__} str failed: {type(render_error).__name__}>"
+
+
 class _DeadlineScheduler:
     """One lazy daemon schedules normal statement deadlines process-wide."""
 
@@ -108,6 +115,21 @@ class KillHandle:
         self._timed_out = False
         self._fired = False
         self._kill_error_type: str | None = None
+        self._action_error_type: str | None = None
+        self._action_error: str | None = None
+        self._kill_query_started = False
+        self._kill_query_finished = False
+        self._kill_query_succeeded: bool | None = None
+        self._kill_query_error_type: str | None = None
+        self._kill_query_error: str | None = None
+        self._abort_attempted = False
+        self._abort_succeeded: bool | None = None
+        self._abort_error_type: str | None = None
+        self._abort_error: str | None = None
+        self._kill_connection_attempted = False
+        self._kill_connection_succeeded: bool | None = None
+        self._kill_connection_error_type: str | None = None
+        self._kill_connection_error: str | None = None
         self._kill_finished = Event()
         self._completed = Event()
         self._scheduler = scheduler
@@ -144,6 +166,8 @@ class KillHandle:
         except BaseException as error:
             with self._lock:
                 self._kill_error_type = type(error).__name__
+                self._action_error_type = type(error).__name__
+                self._action_error = _diagnostic_error_text(error)
             try:
                 if self._fallback_abort is not None:
                     self._abort_connection()
@@ -167,6 +191,10 @@ class KillHandle:
             except BaseException as error:
                 with self._lock:
                     self._kill_error_type = type(error).__name__
+                    self._kill_query_finished = True
+                    self._kill_query_succeeded = False
+                    self._kill_query_error_type = type(error).__name__
+                    self._kill_query_error = _diagnostic_error_text(error)
                 self._kill_finished.set()
             if self._fallback_abort is not None:
                 should_abort = manual_kill
@@ -206,6 +234,8 @@ class KillHandle:
             self._completed.set()
 
     def _kill_query(self) -> None:
+        with self._lock:
+            self._kill_query_started = True
         try:
             with self._factory.control_session(self._node, self._database) as session:
                 cursor = session.execute(f"KILL QUERY {self._connection_id}")
@@ -213,24 +243,40 @@ class KillHandle:
                     cursor.fetchmany(1)
                 finally:
                     cursor.close()
+            with self._lock:
+                self._kill_query_succeeded = True
         except Exception as error:  # connector failures are diagnostics, not thread crashes
             with self._lock:
                 self._kill_error_type = type(error).__name__
+                self._kill_query_succeeded = False
+                self._kill_query_error_type = type(error).__name__
+                self._kill_query_error = _diagnostic_error_text(error)
         finally:
+            with self._lock:
+                self._kill_query_finished = True
             self._kill_finished.set()
 
     def _abort_connection(self) -> bool:
         assert self._fallback_abort is not None
+        with self._lock:
+            self._abort_attempted = True
         try:
             self._fallback_abort()
+            with self._lock:
+                self._abort_succeeded = True
             return True
         except Exception as error:
             with self._lock:
+                self._abort_succeeded = False
+                self._abort_error_type = type(error).__name__
+                self._abort_error = _diagnostic_error_text(error)
                 if self._kill_error_type is None:
                     self._kill_error_type = type(error).__name__
             return False
 
     def _kill_connection(self) -> None:
+        with self._lock:
+            self._kill_connection_attempted = True
         try:
             with self._factory.control_session(self._node, self._database) as session:
                 cursor = session.execute(f"KILL CONNECTION {self._connection_id}")
@@ -238,8 +284,13 @@ class KillHandle:
                     cursor.fetchmany(1)
                 finally:
                     cursor.close()
+            with self._lock:
+                self._kill_connection_succeeded = True
         except Exception as error:
             with self._lock:
+                self._kill_connection_succeeded = False
+                self._kill_connection_error_type = type(error).__name__
+                self._kill_connection_error = _diagnostic_error_text(error)
                 if self._kill_error_type is None:
                     self._kill_error_type = type(error).__name__
 
@@ -290,6 +341,32 @@ class KillHandle:
     @property
     def thread_alive(self) -> bool:
         return not self._completed.is_set()
+
+    def diagnostic_snapshot(self) -> dict[str, object]:
+        """Return a JSON-safe snapshot without changing watchdog behavior."""
+
+        with self._lock:
+            return {
+                "action": self._action,
+                "timed_out": self._timed_out,
+                "fired": self._fired,
+                "action_error_type": self._action_error_type,
+                "action_error": self._action_error,
+                "kill_query_started": self._kill_query_started,
+                "kill_query_finished": self._kill_query_finished,
+                "kill_query_succeeded": self._kill_query_succeeded,
+                "kill_query_error_type": self._kill_query_error_type,
+                "kill_query_error": self._kill_query_error,
+                "abort_attempted": self._abort_attempted,
+                "abort_succeeded": self._abort_succeeded,
+                "abort_error_type": self._abort_error_type,
+                "abort_error": self._abort_error,
+                "kill_connection_attempted": self._kill_connection_attempted,
+                "kill_connection_succeeded": self._kill_connection_succeeded,
+                "kill_connection_error_type": self._kill_connection_error_type,
+                "kill_connection_error": self._kill_connection_error,
+                "completed": self._completed.is_set(),
+            }
 
 
 class KillQueryWatchdog:

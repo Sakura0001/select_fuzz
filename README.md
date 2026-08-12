@@ -251,6 +251,18 @@ uv run select-fuzz run --mode fuzz --config config/local.yaml \
   SQL 生成速度不足、生成进程退出、查询仍在 MySQL 执行、客户端拉取结果、连接重试、
   工作线程缺失，以及“程序标记执行但 MySQL 显示 Sleep”的状态矛盾。诊断采样失败只显示
   原始错误，不会中断 fuzz。
+- 错误率达到每秒 10 次且连续 15 秒无读取时，终端优先显示 `客户端错误风暴`，并给出最高频
+  错误的 12 位指纹、异常原文、失败阶段、watchdog/KILL/abort 结果、影响范围和代表 SQL。
+  PROCESSLIST 样本新鲜、登记连接全部可见且对应节点只有 Sleep 时，还会明确显示
+  `查询未发送到 MySQL，客户端快速失败`；证据缺失时不会作这个结论。
+- `events.jsonl` 中每个新错误指纹首次出现时写一条 `fuzz_error_sample`，保存完整 SQL、异常
+  模块/类型/原文/参数/异常链、最多 32 层 traceback frame、连接 ID、各执行阶段耗时、
+  watchdog 动作和最近一次 PROCESSLIST 可见性。相同指纹的 `fuzz_operation_error` 最多每
+  30 秒写一条，并用 `suppressed_repeats` 记录被抑制的重复日志。
+- 每个诊断周期写 `fuzz_error_summary`，包含准确累计数、周期增量、错误率和 Top 8 根因；
+  准确错误总数应读取 `counters.errors` 或该 summary，不能再用 `fuzz_operation_error` 行数
+  统计。内存最多跟踪先出现的 64 个指纹，额外种类汇总到 `other_count`。连接 ID 明细只在
+  进程内用于关联 PROCESSLIST，不写入周期快照。
 - 每张表默认随机生成 200～500 列，包含固定业务列和随机类型列；候选类型池包含整数、精确数值、
   浮点、BIT、日期时间、字符、二进制、TEXT/BLOB、ENUM、SET 等 56 个变体。每张表随机
   抽样，不保证单表一次运行出现全部 56 个变体。

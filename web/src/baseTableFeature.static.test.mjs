@@ -89,5 +89,10 @@ test("表单条件字段、任务卡片和准备进度文案完整呈现", () =>
   assert.match(app, /基表模式：扩展列（200～500 列）/);
   assert.match(app, /每表 10～100 行/);
   assert.doesNotMatch(app, /每表 10 行/);
-  assert.match(styles, /\.base-table-mode[\s\S]*overflow-wrap:\s*anywhere/);
+  assert.match(app, /className="task-card-header"/);
+  assert.match(app, /className="task-card-steps"/);
+  assert.match(app, /className="base-table-reproduction-id"/);
+  assert.match(styles, /\.task-card-steps[\s\S]*margin-top:/);
+  assert.match(styles, /\.base-table-reproduction-id[\s\S]*white-space:\s*nowrap/);
+  assert.doesNotMatch(styles, /\.base-table-mode\s*\{[\s\S]*?overflow-wrap:\s*anywhere/);
 });

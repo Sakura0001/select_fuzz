@@ -127,16 +127,22 @@ function BaseTableMode({ task }: { task: FuzzTask }) {
   return (
     <div className="base-table-mode">
       <Text type="secondary" className="base-table-mode-text">
-        基表模式：扩展列（200～500 列） · {version} · 种子 <span className="base-table-seed">{seed}</span>
+        基表模式：扩展列（200～500 列）
+      </Text>
+      <Text type="secondary" className="base-table-identity">
+        {version} · 种子 <span className="base-table-seed">{seed}</span>
       </Text>
       {reproductionId && (
-        <Text
-          type="secondary"
-          className="base-table-reproduction"
-          copyable={{ text: reproductionId, tooltips: ["复制复现标识", "已复制"] }}
-        >
-          复现标识 {reproductionId}
-        </Text>
+        <div className="base-table-reproduction">
+          <Text type="secondary">复现标识</Text>
+          <Text
+            type="secondary"
+            className="base-table-reproduction-id"
+            copyable={{ text: reproductionId, tooltips: ["复制复现标识", "已复制"] }}
+          >
+            {reproductionId}
+          </Text>
+        </div>
       )}
     </div>
   );
@@ -266,25 +272,21 @@ function TaskCard({
 
   return (
     <Card className={`task-card ${task.status === "恢复检测" || task.status === "失败" ? "task-card-alert" : ""}`} bordered={false}>
-      <Row align="middle" gutter={14}>
-        <Col span={5}>
+      <Row align="top" gutter={[14, 12]} className="task-card-header">
+        <Col span={9}>
           <div className="node-name">{task.node_name}</div>
           <Text type="secondary">{task.target} · {task.jump_host ?? "直连"}</Text>
           <BaseTableMode task={task} />
         </Col>
-        <Col span={12}>
-          <Steps
-            size="small"
-            current={currentStep}
-            status={isFailed || task.status === "恢复检测" ? "error" : task.status === "已暂停" ? "wait" : "process"}
-            items={[
-              { title: "连接实例", description: stepDescription(task, "连接实例", "完成") },
-              { title: "准备基表", description: stepDescription(task, "准备基表", baseTablePreparationDescription(task)) },
-              { title: "执行 SQL", description: stepDescription(task, "执行 SQL", `${task.thread_count} 线程 · ${task.sql_rate} 条/秒`) }
-            ]}
-          />
+        <Col span={11}>
+          <div className="query-summary">
+            <div><span>成功查询</span><b>{task.success_query_total}</b></div>
+            <div><span>失败查询</span><b className={task.failed_query_total > 0 ? "danger-text" : ""}>{task.failed_query_total}</b></div>
+            <div><span>普通错误</span><b>{task.ordinary_error_total}</b></div>
+            <div><span>lost connection 事件</span><b>{task.lost_connection_total}</b></div>
+          </div>
         </Col>
-        <Col span={3}>
+        <Col span={4}>
           <Space direction="vertical" size={6}>
             {statusTag(task)}
             <Space size={6}>
@@ -306,15 +308,19 @@ function TaskCard({
             </Space>
           </Space>
         </Col>
-        <Col span={4}>
-          <div className="query-summary">
-            <div><span>成功查询</span><b>{task.success_query_total}</b></div>
-            <div><span>失败查询</span><b className={task.failed_query_total > 0 ? "danger-text" : ""}>{task.failed_query_total}</b></div>
-            <div><span>普通错误</span><b>{task.ordinary_error_total}</b></div>
-            <div><span>lost connection 事件</span><b>{task.lost_connection_total}</b></div>
-          </div>
-        </Col>
       </Row>
+      <div className="task-card-steps">
+        <Steps
+          size="small"
+          current={currentStep}
+          status={isFailed || task.status === "恢复检测" ? "error" : task.status === "已暂停" ? "wait" : "process"}
+          items={[
+            { title: "连接实例", description: stepDescription(task, "连接实例", "完成") },
+            { title: "准备基表", description: stepDescription(task, "准备基表", baseTablePreparationDescription(task)) },
+            { title: "执行 SQL", description: stepDescription(task, "执行 SQL", `${task.thread_count} 线程 · ${task.sql_rate} 条/秒`) }
+          ]}
+        />
+      </div>
       <Collapse
         ghost
         activeKey={activeDetailKeys}

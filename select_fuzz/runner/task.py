@@ -23,6 +23,10 @@ from .db import DatabaseClient, LostConnectionError
 QUERY_MAX_EXECUTION_TIME_MS = 5000
 
 
+class _TaskInitializationStopped(Exception):
+    """任务初始化期间收到终态请求；用于立即退出未完成的外部调用序列。"""
+
+
 class TaskStatus(str, Enum):
     NEW = "新建"
     CONNECTING = "连接实例"
@@ -132,21 +136,22 @@ class FuzzTask:
 
     def start(self) -> None:
         try:
-            self._set_status(TaskStatus.SEEDING)
-            self._set_all_worker_states("准备基表")
+            self._set_initialization_state(TaskStatus.SEEDING, "准备基表")
             base_sql_bundle = self._require_base_sql_bundle()
-            self._set_status(TaskStatus.CONNECTING)
-            self._set_all_worker_states("连接实例")
+            self._raise_if_initialization_stopped()
+            self._set_initialization_state(TaskStatus.CONNECTING, "连接实例")
             self.db.connect()
-            self._set_status(TaskStatus.SEEDING)
-            self._set_all_worker_states("准备基表")
+            self._raise_if_initialization_stopped()
+            self._set_initialization_state(TaskStatus.SEEDING, "准备基表")
             self._recreate_database()
             for sql_file in base_sql_bundle.files:
                 self._execute_statements(sql_file, self.db)
             self._verify_seed_data(self.db)
             self._prepare_additional_workers(base_sql_bundle)
-            self._set_status(TaskStatus.RUNNING)
-            self._set_all_worker_states("空闲")
+            self._set_initialization_state(TaskStatus.RUNNING, "空闲")
+        except _TaskInitializationStopped:
+            self._close_worker_connections("任务初始化已停止")
+            return
         except Exception as exc:
             self.fail(exc)
             raise
@@ -421,11 +426,6 @@ class FuzzTask:
             self._next_probe_at = now + timedelta(seconds=self.recovery_probe_seconds)
             self._write_metrics()
 
-    def _set_status(self, status: TaskStatus) -> None:
-        with self._lock:
-            self._set_status_locked(status)
-            self._write_metrics()
-
     def _set_status_locked(self, status: TaskStatus) -> bool:
         if self._is_terminal_locked():
             return self.status is status
@@ -446,10 +446,6 @@ class FuzzTask:
             self._set_all_worker_states_locked("失败", self.last_error)
             self._write_metrics()
             return True
-
-    def _set_all_worker_states(self, state: str, error: Optional[str] = None) -> None:
-        with self._lock:
-            self._set_all_worker_states_locked(state, error)
 
     def _set_all_worker_states_locked(self, state: str, error: Optional[str] = None) -> None:
         now = self.clock()
@@ -711,25 +707,41 @@ class FuzzTask:
 
     def _recreate_database(self) -> None:
         database = self._database_name()
-        self.db.execute(f"DROP DATABASE IF EXISTS {_quote_identifier(database)}")
-        self.db.execute(f"CREATE DATABASE {_quote_identifier(database)}")
-        self.db.execute(f"USE {_quote_identifier(database)}")
+        for statement in (
+            f"DROP DATABASE IF EXISTS {_quote_identifier(database)}",
+            f"CREATE DATABASE {_quote_identifier(database)}",
+            f"USE {_quote_identifier(database)}",
+        ):
+            self._execute_initialization_statement(self.db, statement)
 
     def _prepare_additional_workers(self, base_sql_bundle: BaseSqlBundle) -> None:
         for worker_id in range(1, self.thread_count):
             assert self.db_factory is not None
             db = self.db_factory()
             try:
+                self._raise_if_initialization_stopped()
                 db.connect()
+                self._raise_if_initialization_stopped()
                 self._prepare_worker_session(db, base_sql_bundle)
+                self._raise_if_initialization_stopped()
             except Exception:
                 db.close()
                 raise
-            self._workers.append(TaskWorker(worker_id=worker_id, db=db, generator=self._new_generator(worker_id)))
-            self._worker_states.append(WorkerRuntimeState(worker_id=worker_id, state="空闲", last_heartbeat=self.clock()))
+            with self._lock:
+                if self._is_terminal_locked() or self._base_sql_bundle_released:
+                    should_append = False
+                else:
+                    should_append = True
+                    self._workers.append(TaskWorker(worker_id=worker_id, db=db, generator=self._new_generator(worker_id)))
+                    self._worker_states.append(
+                        WorkerRuntimeState(worker_id=worker_id, state="空闲", last_heartbeat=self.clock())
+                    )
+            if not should_append:
+                db.close()
+                raise _TaskInitializationStopped
 
     def _prepare_worker_session(self, db: DatabaseClient, base_sql_bundle: BaseSqlBundle) -> None:
-        db.execute(f"USE {_quote_identifier(self._database_name())}")
+        self._execute_initialization_statement(db, f"USE {_quote_identifier(self._database_name())}")
         temporary_names = {table.name for table in self.tables if table.is_temporary}
         if not temporary_names:
             return
@@ -742,13 +754,15 @@ class FuzzTask:
     def _verify_seed_data(self, db: DatabaseClient, table_names: set[str] | None = None) -> None:
         targets = [table for table in self.tables if table_names is None or table.name in table_names]
         for table in targets:
+            self._raise_if_initialization_stopped()
             count = db.query_scalar(f"SELECT COUNT(*) FROM {_quote_identifier(table.name)}")
+            self._raise_if_initialization_stopped()
             if count <= 0:
                 raise RuntimeError(f"基表初始化未插入数据: {table.name}")
 
     def _execute_statements(self, sql_file: BaseSqlFile, db: DatabaseClient) -> None:
         for statement in split_sql_statements(sql_file.sql):
-            db.execute(statement)
+            self._execute_initialization_statement(db, statement)
 
     def _set_query_execution_timeout(self, db: DatabaseClient) -> None:
         db.execute(f"SET SESSION max_execution_time = {QUERY_MAX_EXECUTION_TIME_MS}")
@@ -768,7 +782,26 @@ class FuzzTask:
             for statement in split_sql_statements(sql_file.sql):
                 target = self._insert_target_table(statement)
                 if target in temporary_names:
-                    db.execute(statement)
+                    self._execute_initialization_statement(db, statement)
+
+    def _execute_initialization_statement(self, db: DatabaseClient, statement: str) -> None:
+        self._raise_if_initialization_stopped()
+        db.execute(statement)
+        self._raise_if_initialization_stopped()
+
+    def _raise_if_initialization_stopped(self) -> None:
+        with self._lock:
+            stopped = self._is_terminal_locked() or self._base_sql_bundle_released
+        if stopped:
+            raise _TaskInitializationStopped
+
+    def _set_initialization_state(self, status: TaskStatus, worker_state: str) -> None:
+        with self._lock:
+            if self._is_terminal_locked() or self._base_sql_bundle_released:
+                raise _TaskInitializationStopped
+            self._set_status_locked(status)
+            self._set_all_worker_states_locked(worker_state)
+            self._write_metrics()
 
     def _insert_target_table(self, statement: str) -> Optional[str]:
         match = re.match(r"\s*INSERT\s+INTO\s+`?(?P<table>[\w$]+)`?", statement, re.IGNORECASE)

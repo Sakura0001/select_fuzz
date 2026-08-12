@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from select_fuzz.api.app import create_app, create_default_app
+from select_fuzz.api.schemas import TaskCreateRequest
 from select_fuzz.api.service import BUILTIN_BASE_SQL_DIR, RuntimeService
 from select_fuzz.base_tables import build_base_sql_bundle
 from select_fuzz.base_tables import registry as base_table_registry
@@ -133,6 +134,25 @@ def _join_threads(threads: list[threading.Thread]) -> None:
     for thread in threads:
         thread.join(timeout=3)
         assert not thread.is_alive(), f"后台线程未按期退出: {thread.name}"
+
+
+def _start_creating_task(
+    service: RuntimeService,
+    **payload_overrides,
+) -> tuple[threading.Thread, dict[str, object]]:
+    result: dict[str, object] = {}
+
+    def create() -> None:
+        try:
+            result["snapshot"] = service.create_task(
+                TaskCreateRequest(**_task_payload(**payload_overrides))
+            )
+        except BaseException as exc:  # pragma: no cover - 仅用于把线程异常带回测试线程
+            result["error"] = exc
+
+    thread = threading.Thread(target=create)
+    thread.start()
+    return thread, result
 
 
 def test_创建任务默认关闭扩列并返回空复现参数(tmp_path: Path) -> None:
@@ -495,6 +515,548 @@ def test_扩展生成器返回非法结构时在准备基表阶段失败且数�
     assert factory_calls == 0
     assert database.connect_count == 0
     assert database.executed == []
+
+
+@pytest.mark.parametrize("action", ("stop", "pause"))
+def test_准备基表包期间终态请求会阻止继续创建任何运行资源(
+    tmp_path: Path,
+    action: str,
+) -> None:
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    prepare_started = threading.Event()
+    allow_prepare = threading.Event()
+    database = ApiFakeDatabase()
+    factory_calls = 0
+
+    def factory(_node):
+        nonlocal factory_calls
+        factory_calls += 1
+        return database
+
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=factory,
+        run_background=False,
+    )
+    original_prepare = service._prepare_base_sql_bundle
+
+    def blocking_prepare(**kwargs):
+        prepare_started.set()
+        assert allow_prepare.wait(timeout=3), "测试等待放行基表包准备超时"
+        return original_prepare(**kwargs)
+
+    service._prepare_base_sql_bundle = blocking_prepare  # type: ignore[method-assign]
+    create_thread, result = _start_creating_task(service)
+    assert prepare_started.wait(timeout=3)
+
+    terminal = service.stop_task("task-1") if action == "stop" else service.pause_task("task-1")
+    expected_status = "已停止" if action == "stop" else "失败"
+    expected_phase = "已停止" if action == "stop" else "执行 SQL"
+    assert terminal.status == expected_status
+    assert terminal.phase == expected_phase
+    allow_prepare.set()
+    create_thread.join(timeout=3)
+
+    assert not create_thread.is_alive()
+    assert "error" not in result
+    assert result["snapshot"] is terminal
+    assert terminal.status == expected_status
+    assert terminal.phase == expected_phase
+    if action == "stop":
+        assert terminal.last_error is None
+    else:
+        assert "任务运行实例不存在" in (terminal.last_error or "")
+    assert factory_calls == 0
+    assert database.connect_count == 0
+    assert database.executed == []
+    assert "task-1" not in service._real_tasks
+    assert "task-1" not in service._background_stop_events
+    assert "task-1" not in service._background_worker_threads
+    assert "task-1" not in service._task_tunnels
+
+
+def test_数据库工厂阻塞期间停止会关闭迟到客户端且不连接或执行_sql(tmp_path: Path) -> None:
+    class UnconnectedDatabase(ApiFakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_count = 0
+
+        def close(self) -> None:
+            self.close_count += 1
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    factory_started = threading.Event()
+    allow_factory = threading.Event()
+    database = UnconnectedDatabase()
+
+    def blocking_factory(_node):
+        factory_started.set()
+        assert allow_factory.wait(timeout=3), "测试等待放行数据库工厂超时"
+        return database
+
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=blocking_factory,
+        run_background=False,
+    )
+    create_thread, result = _start_creating_task(service)
+    assert factory_started.wait(timeout=3)
+
+    stopped = service.stop_task("task-1")
+    allow_factory.set()
+    create_thread.join(timeout=3)
+
+    assert not create_thread.is_alive()
+    assert "error" not in result
+    assert stopped.status == "已停止"
+    assert stopped.phase == "已停止"
+    assert stopped.last_error is None
+    assert database.connect_count == 0
+    assert database.executed == []
+    assert database.close_count >= 1
+    assert "task-1" not in service._real_tasks
+    assert "task-1" not in service._background_stop_events
+    assert "task-1" not in service._background_worker_threads
+
+
+def test_跳板隧道启动期间停止会关闭迟到隧道且不创建数据库客户端(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingTunnel:
+        local_host = "127.0.0.1"
+        local_port: int | None = None
+
+        def __init__(self, jump_host, target_node) -> None:
+            del jump_host, target_node
+
+        def start(self) -> tuple[str, int]:
+            tunnel_started.set()
+            assert allow_tunnel.wait(timeout=3), "测试等待放行跳板隧道超时"
+            self.local_port = 44001
+            return self.local_host, self.local_port
+
+        def stop(self) -> None:
+            tunnel_stopped.set()
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    tunnel_started = threading.Event()
+    allow_tunnel = threading.Event()
+    tunnel_stopped = threading.Event()
+    factory_calls = 0
+
+    def factory(_node):
+        nonlocal factory_calls
+        factory_calls += 1
+        return ApiFakeDatabase()
+
+    monkeypatch.setattr("select_fuzz.api.service.JumpTunnel", BlockingTunnel)
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=factory,
+        run_background=False,
+    )
+    service.add_jump_host(
+        {"name": "jump-prod", "host": "10.2.0.8", "port": 22, "username": "ops"}
+    )
+    create_thread, result = _start_creating_task(service, jump_host="jump-prod")
+    assert tunnel_started.wait(timeout=3)
+
+    stopped = service.stop_task("task-1")
+    allow_tunnel.set()
+    create_thread.join(timeout=3)
+
+    assert not create_thread.is_alive()
+    assert "error" not in result
+    assert stopped.status == "已停止"
+    assert stopped.phase == "已停止"
+    assert stopped.last_error is None
+    assert tunnel_stopped.is_set()
+    assert factory_calls == 0
+    assert "task-1" not in service._task_tunnels
+    assert "task-1" not in service._real_tasks
+
+
+def test_首次连接期间停止后迟到连接会关闭且不执行初始化_sql(tmp_path: Path) -> None:
+    class BlockingConnectDatabase(ApiFakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_started = threading.Event()
+            self.allow_connect = threading.Event()
+            self.connected = False
+            self.close_count = 0
+
+        def connect(self) -> None:
+            self.connect_count += 1
+            self.connect_started.set()
+            if not self.allow_connect.wait(timeout=3):
+                raise RuntimeError("测试等待放行首次连接超时")
+            self.connected = True
+
+        def close(self) -> None:
+            self.close_count += 1
+            self.connected = False
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    database = BlockingConnectDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: database,
+        run_background=False,
+    )
+    create_thread, result = _start_creating_task(service)
+    assert database.connect_started.wait(timeout=3)
+
+    stopped = service.stop_task("task-1")
+    assert stopped.status == "已停止"
+    database.allow_connect.set()
+    create_thread.join(timeout=3)
+
+    assert not create_thread.is_alive()
+    assert "error" not in result
+    assert stopped.status == "已停止"
+    assert stopped.phase == "已停止"
+    assert stopped.last_error is None
+    assert database.connect_count == 1
+    assert database.executed == []
+    assert database.connected is False
+    assert database.close_count >= 2
+    assert "task-1" not in service._real_tasks
+    assert "task-1" not in service._background_stop_events
+    assert "task-1" not in service._background_worker_threads
+
+
+@pytest.mark.parametrize(
+    ("blocked_prefix", "expected_executed"),
+    [
+        ("DROP DATABASE", ["DROP DATABASE IF EXISTS `test`"]),
+        (
+            "CREATE DATABASE",
+            ["DROP DATABASE IF EXISTS `test`", "CREATE DATABASE `test`"],
+        ),
+        (
+            "USE",
+            [
+                "DROP DATABASE IF EXISTS `test`",
+                "CREATE DATABASE `test`",
+                "USE `test`",
+            ],
+        ),
+    ],
+)
+def test_重建数据库每条语句返回后都会阻止停止任务继续初始化(
+    tmp_path: Path,
+    blocked_prefix: str,
+    expected_executed: list[str],
+) -> None:
+    class BlockingInitDatabase(ApiFakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.statement_started = threading.Event()
+            self.allow_statement = threading.Event()
+            self.connected = False
+
+        def connect(self) -> None:
+            super().connect()
+            self.connected = True
+
+        def execute(self, sql: str) -> None:
+            super().execute(sql)
+            if sql.startswith(blocked_prefix):
+                self.statement_started.set()
+                if not self.allow_statement.wait(timeout=3):
+                    raise RuntimeError("测试等待放行初始化语句超时")
+
+        def close(self) -> None:
+            self.connected = False
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    database = BlockingInitDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: database,
+        run_background=False,
+    )
+    create_thread, result = _start_creating_task(service)
+    assert database.statement_started.wait(timeout=3)
+
+    stopped = service.stop_task("task-1")
+    database.allow_statement.set()
+    create_thread.join(timeout=3)
+
+    assert not create_thread.is_alive()
+    assert "error" not in result
+    assert stopped.status == "已停止"
+    assert stopped.phase == "已停止"
+    assert stopped.last_error is None
+    assert database.executed == expected_executed
+    assert database.scalar_queries == []
+    assert database.connected is False
+    assert "task-1" not in service._real_tasks
+
+
+def test_基表文件语句执行期间停止后不会继续下一条语句或数据校验(tmp_path: Path) -> None:
+    class BlockingBaseStatementDatabase(ApiFakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.statement_started = threading.Event()
+            self.allow_statement = threading.Event()
+
+        def execute(self, sql: str) -> None:
+            super().execute(sql)
+            if sql.startswith("CREATE TABLE t0"):
+                self.statement_started.set()
+                if not self.allow_statement.wait(timeout=3):
+                    raise RuntimeError("测试等待放行基表语句超时")
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text(
+        "CREATE TABLE t0 (id BIGINT); INSERT INTO t0 VALUES (1);",
+        encoding="utf-8",
+    )
+    database = BlockingBaseStatementDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: database,
+        run_background=False,
+    )
+    create_thread, result = _start_creating_task(service)
+    assert database.statement_started.wait(timeout=3)
+
+    stopped = service.stop_task("task-1")
+    database.allow_statement.set()
+    create_thread.join(timeout=3)
+
+    assert not create_thread.is_alive()
+    assert "error" not in result
+    assert stopped.status == "已停止"
+    assert database.executed[-1] == "CREATE TABLE t0 (id BIGINT)"
+    assert all(not sql.startswith("INSERT INTO t0") for sql in database.executed)
+    assert database.scalar_queries == []
+    assert "task-1" not in service._real_tasks
+
+
+def test_基表数据校验期间停止后不会继续下一个_count查询(tmp_path: Path) -> None:
+    class BlockingCountDatabase(ApiFakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.count_started = threading.Event()
+            self.allow_count = threading.Event()
+
+        def query_scalar(self, sql: str) -> int:
+            result = super().query_scalar(sql)
+            if len(self.scalar_queries) == 1:
+                self.count_started.set()
+                if not self.allow_count.wait(timeout=3):
+                    raise RuntimeError("测试等待放行基表数据校验超时")
+            return result
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    (base_dir / "t1.sql").write_text("CREATE TABLE t1 (id BIGINT);", encoding="utf-8")
+    database = BlockingCountDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: database,
+        run_background=False,
+    )
+    create_thread, result = _start_creating_task(service)
+    assert database.count_started.wait(timeout=3)
+
+    stopped = service.stop_task("task-1")
+    database.allow_count.set()
+    create_thread.join(timeout=3)
+
+    assert not create_thread.is_alive()
+    assert "error" not in result
+    assert stopped.status == "已停止"
+    assert database.scalar_queries == ["SELECT COUNT(*) FROM `t0`"]
+    assert "task-1" not in service._real_tasks
+
+
+def test_附加_worker_连接期间停止会关闭尚未注册的迟到连接(tmp_path: Path) -> None:
+    class BlockingAdditionalDatabase(ApiFakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_started = threading.Event()
+            self.allow_connect = threading.Event()
+            self.connected = False
+            self.close_count = 0
+
+        def connect(self) -> None:
+            self.connect_count += 1
+            self.connect_started.set()
+            if not self.allow_connect.wait(timeout=3):
+                raise RuntimeError("测试等待放行附加 worker 连接超时")
+            self.connected = True
+
+        def close(self) -> None:
+            self.close_count += 1
+            self.connected = False
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    first_database = ApiFakeDatabase()
+    additional_database = BlockingAdditionalDatabase()
+    databases = iter((first_database, additional_database))
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: next(databases),
+        run_background=False,
+    )
+    create_thread, result = _start_creating_task(service, thread_count=2)
+    assert additional_database.connect_started.wait(timeout=3)
+
+    stopped = service.stop_task("task-1")
+    additional_database.allow_connect.set()
+    create_thread.join(timeout=3)
+
+    assert not create_thread.is_alive()
+    assert "error" not in result
+    assert stopped.status == "已停止"
+    assert additional_database.connect_count == 1
+    assert additional_database.executed == []
+    assert additional_database.connected is False
+    assert additional_database.close_count >= 1
+    assert "task-1" not in service._real_tasks
+
+
+def test_停止发生在后台循环注册前不会启动或遗留任何后台线程(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: ApiFakeDatabase(),
+        run_background=True,
+    )
+    background_entry = threading.Event()
+    allow_background_registration = threading.Event()
+    started_sql_threads: list[threading.Thread] = []
+    original_start_background_loop = service._start_background_loop
+    original_thread_start = threading.Thread.start
+
+    def blocking_start_background_loop(task) -> None:
+        background_entry.set()
+        assert allow_background_registration.wait(timeout=3), "测试等待放行后台循环注册超时"
+        original_start_background_loop(task)
+
+    def record_thread_start(thread: threading.Thread) -> None:
+        if thread.name.startswith("sql_fuzz-"):
+            started_sql_threads.append(thread)
+        original_thread_start(thread)
+
+    service._start_background_loop = blocking_start_background_loop  # type: ignore[method-assign]
+    monkeypatch.setattr(threading.Thread, "start", record_thread_start)
+    create_thread, result = _start_creating_task(service)
+    assert background_entry.wait(timeout=3)
+
+    stopped = service.stop_task("task-1")
+    assert stopped.status == "已停止"
+    assert stopped.phase == "已停止"
+    allow_background_registration.set()
+    create_thread.join(timeout=3)
+    for thread in started_sql_threads:
+        thread.join(timeout=3)
+
+    assert not create_thread.is_alive()
+    assert "error" not in result
+    assert result["snapshot"] is stopped
+    assert stopped.status == "已停止"
+    assert stopped.phase == "已停止"
+    assert stopped.last_error is None
+    assert started_sql_threads == []
+    assert "task-1" not in service._real_tasks
+    assert "task-1" not in service._background_stop_events
+    assert "task-1" not in service._background_worker_threads
+    assert "task-1" not in service._task_tunnels
+
+
+def test_后台首个线程已启动时停止不会再启动其余线程或_join_未启动线程(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: ApiFakeDatabase(),
+        run_background=True,
+        query_interval_seconds=0,
+    )
+    first_sql_thread_started = threading.Event()
+    allow_remaining_thread_starts = threading.Event()
+    started_sql_thread_names: list[str] = []
+    original_thread_start = threading.Thread.start
+    original_registered_start = service._start_registered_background_thread
+
+    def record_thread_start(thread: threading.Thread) -> None:
+        if thread.name.startswith("sql_fuzz-"):
+            started_sql_thread_names.append(thread.name)
+        original_thread_start(thread)
+
+    def block_after_first_registered_start(*args, **kwargs):
+        result = original_registered_start(*args, **kwargs)
+        thread_key = args[2]
+        if thread_key == 0 and result[0]:
+            first_sql_thread_started.set()
+            assert allow_remaining_thread_starts.wait(timeout=3), "测试等待放行其余后台线程启动超时"
+        return result
+
+    monkeypatch.setattr(threading.Thread, "start", record_thread_start)
+    service._start_registered_background_thread = block_after_first_registered_start  # type: ignore[method-assign]
+    create_thread, result = _start_creating_task(service, thread_count=2)
+    assert first_sql_thread_started.wait(timeout=3)
+
+    stopped = service.stop_task("task-1")
+    allow_remaining_thread_starts.set()
+    create_thread.join(timeout=3)
+
+    assert not create_thread.is_alive()
+    assert "error" not in result
+    assert stopped.status == "已停止"
+    assert started_sql_thread_names == ["sql_fuzz-task-1-0"]
+    assert "task-1" not in service._real_tasks
+    assert "task-1" not in service._background_stop_events
+    assert "task-1" not in service._background_worker_threads
+    assert "task-1" not in service._task_tunnels
 
 
 def test_内置基表包在_db_factory_和连接前准备(tmp_path: Path, monkeypatch) -> None:

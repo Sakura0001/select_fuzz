@@ -329,6 +329,45 @@ def test_暂停保留内存包而停止后释放_sql_引用(tmp_path: Path) -> N
     assert task.snapshot_counts()["base_table_seed"] is None
 
 
+def test_任务停止或失败后迟到恢复入口不会改写终态(tmp_path: Path) -> None:
+    stopped = FuzzTask(
+        task_id="task-stopped-terminal",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=FakeDatabase(),
+        metric_store=MetricStore(tmp_path / "stopped.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    stopped.start()
+    stopped.stop()
+    stopped._handle_lost_connection("SELECT 1", "Lost connection")
+    stopped.probe_recovery()
+    assert stopped._ensure_worker_session(0, stopped._workers[0]) is False
+    stopped.fail(RuntimeError("迟到失败"))
+    assert stopped.status is TaskStatus.STOPPED
+    assert stopped.phase == "已停止"
+
+    failed = FuzzTask(
+        task_id="task-failed-terminal",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=FakeDatabase(),
+        metric_store=MetricStore(tmp_path / "failed.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    failed.start()
+    failed.fail(RuntimeError("先失败"), phase="执行 SQL")
+    failed.stop()
+    failed.pause()
+    failed.resume()
+    failed._handle_lost_connection("SELECT 1", "Lost connection")
+    assert failed.status is TaskStatus.FAILED
+    assert failed.phase == "执行 SQL"
+    assert failed.last_error == "执行 SQL失败: 先失败"
+
+
 def test_扩展任务_sql_jsonl_只记录复现元数据而不记录初始化_sql(tmp_path: Path) -> None:
     bundle = _in_memory_bundle(expanded=True, seed="18446744073709551615")
     task = FuzzTask(

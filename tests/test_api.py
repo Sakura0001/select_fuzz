@@ -14,7 +14,8 @@ from select_fuzz.metadata.models import BaseSqlFile
 from select_fuzz.monitor.events import LostConnectionEvent
 from select_fuzz.monitor.logs import SqlLogRecord, append_jsonl
 from select_fuzz.monitor.store import MetricStore
-from select_fuzz.runner.db import DatabaseClient
+from select_fuzz.runner.db import DatabaseClient, LostConnectionError
+from select_fuzz.runner.task import TaskStatus
 
 
 class ApiFakeDatabase(DatabaseClient):
@@ -93,6 +94,44 @@ def _small_bundle(*, expanded: bool = False, seed: str | None = None):
         generator_version="v1" if expanded else None,
         seed=seed if expanded else None,
     )
+
+
+class _FixedQueryGenerator:
+    coverage_counts: dict[str, int] = {}
+    recent_hits: list[str] = []
+    last_sql_validity = "合法"
+    last_risk_tags: list[str] = []
+    last_expected_error = False
+
+    def generate(self, *_args, **_kwargs) -> str:
+        return "SELECT 1"
+
+
+class _BlockingQueryDatabase(ApiFakeDatabase):
+    def __init__(self, *, fail_when_closed: bool = True) -> None:
+        super().__init__()
+        self.fail_when_closed = fail_when_closed
+        self.query_started = threading.Event()
+        self.query_release = threading.Event()
+        self.closed = threading.Event()
+
+    def execute(self, sql: str) -> None:
+        if sql.strip().upper().startswith("SELECT"):
+            self.query_started.set()
+            if not self.query_release.wait(timeout=3):
+                raise RuntimeError("测试等待放行查询超时")
+            if self.fail_when_closed and self.closed.is_set():
+                raise LostConnectionError("Lost connection to MySQL server during query")
+        super().execute(sql)
+
+    def close(self) -> None:
+        self.closed.set()
+
+
+def _join_threads(threads: list[threading.Thread]) -> None:
+    for thread in threads:
+        thread.join(timeout=3)
+        assert not thread.is_alive(), f"后台线程未按期退出: {thread.name}"
 
 
 def test_创建任务默认关闭扩列并返回空复现参数(tmp_path: Path) -> None:
@@ -456,11 +495,154 @@ def test_后台任务进入终态会通知所有循环并关闭跳板机(tmp_pat
     assert stop_event.is_set()
     assert tunnel.stopped is True
     assert task_id not in service._task_tunnels
+    assert task_id in service._real_tasks
+    assert task_id in service._background_stop_events
+    assert task_id in service._background_worker_threads
+    service._background_thread_exited(task_id, 0)
     assert task_id not in service._real_tasks
     assert task_id not in service._background_stop_events
     assert task_id not in service._background_worker_threads
     assert task.base_sql_bundle is None
     assert service.get_task(task_id)["status"] == "失败"
+
+
+def test_停止阻塞查询时迟到_lost_connection_不能把快照改回恢复中(tmp_path: Path) -> None:
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    database = _BlockingQueryDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: database,
+        run_background=False,
+        query_interval_seconds=0,
+    )
+    response = TestClient(create_app(service)).post("/api/tasks", json=_task_payload())
+    task_id = response.json()["task_id"]
+    task = service._real_tasks[task_id]
+    task._workers[0].generator = _FixedQueryGenerator()
+    service._start_background_loop(task)
+    threads = list(service._background_worker_threads[task_id].values())
+    assert database.query_started.wait(timeout=3)
+
+    stop_completed = threading.Event()
+
+    def stop_task() -> None:
+        service.stop_task(task_id)
+        stop_completed.set()
+
+    stop_thread = threading.Thread(target=stop_task)
+    stop_thread.start()
+    assert database.closed.wait(timeout=3)
+    assert stop_completed.wait(timeout=3)
+    assert task_id in service._real_tasks
+    assert task_id in service._background_stop_events
+    assert task_id in service._background_worker_threads
+    database.query_release.set()
+    stop_thread.join(timeout=3)
+    assert not stop_thread.is_alive()
+    _join_threads(threads)
+
+    snapshot = service.get_task(task_id)
+    assert snapshot["status"] == "已停止"
+    assert snapshot["phase"] == "已停止"
+    assert task.status is TaskStatus.STOPPED
+    assert task_id not in service._real_tasks
+    assert task_id not in service._background_stop_events
+    assert task_id not in service._background_worker_threads
+
+
+def test_一个_worker_失败后另一个迟到_lost_connection_不能覆盖失败终态(tmp_path: Path) -> None:
+    class BlockingFailureGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+
+        def __init__(self, allow_failure: threading.Event) -> None:
+            self.allow_failure = allow_failure
+
+        def generate(self, *_args, **_kwargs) -> str:
+            if not self.allow_failure.wait(timeout=3):
+                raise RuntimeError("测试等待触发 worker 失败超时")
+            raise RuntimeError("模拟 worker 生成失败")
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    first_database = ApiFakeDatabase()
+    late_database = _BlockingQueryDatabase()
+    databases = iter((first_database, late_database))
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: next(databases),
+        run_background=False,
+        query_interval_seconds=0,
+    )
+    response = TestClient(create_app(service)).post(
+        "/api/tasks",
+        json=_task_payload(thread_count=2),
+    )
+    task_id = response.json()["task_id"]
+    task = service._real_tasks[task_id]
+    allow_failure = threading.Event()
+    task._workers[0].generator = BlockingFailureGenerator(allow_failure)
+    task._workers[1].generator = _FixedQueryGenerator()
+    service._start_background_loop(task)
+    threads = list(service._background_worker_threads[task_id].values())
+    assert late_database.query_started.wait(timeout=3)
+
+    allow_failure.set()
+    assert late_database.closed.wait(timeout=3)
+    assert task.status is TaskStatus.FAILED
+    assert task_id in service._real_tasks
+    assert task_id in service._background_stop_events
+    assert task_id in service._background_worker_threads
+    late_database.query_release.set()
+    _join_threads(threads)
+
+    snapshot = service.get_task(task_id)
+    assert snapshot["status"] == "失败"
+    assert snapshot["phase"] == "执行 SQL"
+    assert "模拟 worker 生成失败" in snapshot["last_error"]
+    assert task.status is TaskStatus.FAILED
+    assert task_id not in service._real_tasks
+    assert task_id not in service._background_stop_events
+    assert task_id not in service._background_worker_threads
+
+
+def test_终态任务重复停止暂停恢复都不改变原终态(tmp_path: Path) -> None:
+    stopped_root = tmp_path / "stopped"
+    stopped_root.mkdir()
+    stopped_client = _client(stopped_root)
+    stopped_response = stopped_client.post("/api/tasks", json=_task_payload())
+    stopped_id = stopped_response.json()["task_id"]
+    assert stopped_client.post(f"/api/tasks/{stopped_id}/stop").json()["状态"] == "已停止"
+    assert stopped_client.post(f"/api/tasks/{stopped_id}/stop").json()["状态"] == "已停止"
+    assert stopped_client.post(f"/api/tasks/{stopped_id}/pause").json()["状态"] == "已停止"
+    assert stopped_client.post(f"/api/tasks/{stopped_id}/resume").json()["状态"] == "已停止"
+
+    failed_root = tmp_path / "failed"
+    failed_root.mkdir()
+    base_dir = failed_root / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    failed_service = RuntimeService(
+        metric_store=MetricStore(failed_root / "metrics.db"),
+        log_dir=failed_root / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: ApiFailingCreateDatabase(),
+        run_background=False,
+    )
+    failed_client = TestClient(create_app(failed_service))
+    failed_response = failed_client.post("/api/tasks", json=_task_payload())
+    failed_id = failed_response.json()["task_id"]
+    assert failed_response.json()["status"] == "失败"
+    assert failed_client.post(f"/api/tasks/{failed_id}/pause").json()["状态"] == "失败"
+    assert failed_client.post(f"/api/tasks/{failed_id}/resume").json()["状态"] == "失败"
+    assert failed_client.post(f"/api/tasks/{failed_id}/stop").json()["状态"] == "失败"
 
 
 def test_health_返回中文状态(tmp_path: Path) -> None:
@@ -506,6 +688,8 @@ def test_创建停止任务并查询任务列表(tmp_path: Path) -> None:
     assert stop_response.json()["状态"] == "已停止"
     assert list_response.json()[0]["node_name"] == "node-a"
     assert stop_event.is_set()
+    assert task_id in service._real_tasks
+    service._background_thread_exited(task_id, 0)
     assert task_id not in service._real_tasks
     assert task_id not in service._background_stop_events
     assert task_id not in service._background_worker_threads

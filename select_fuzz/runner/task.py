@@ -182,16 +182,24 @@ class FuzzTask:
         except Exception as exc:
             self.fail(exc, phase=TaskStatus.RUNNING.value)
             return
+        with self._lock:
+            if self._is_terminal_locked():
+                return
         self.record_worker_sql_start(worker_id, sql, sql_metadata=sql_metadata)
         try:
             self._set_query_execution_timeout(worker.db)
             worker.db.execute(sql)
         except Exception as exc:
+            with self._lock:
+                if self._is_terminal_locked():
+                    return
             if isinstance(exc, LostConnectionError) or is_lost_connection_error(exc):
                 self._finish_worker_sql(worker_id, "恢复检测", str(exc))
                 self._handle_lost_connection(sql, str(exc), sql_metadata)
                 return
             with self._lock:
+                if self._is_terminal_locked():
+                    return
                 self.ordinary_error_total += 1
                 self.failed_query_total += 1
                 self._finish_worker_sql_locked(worker_id, "空闲", str(exc))
@@ -200,6 +208,8 @@ class FuzzTask:
                 self._write_metrics()
             return
         with self._lock:
+            if self._is_terminal_locked():
+                return
             self.sql_total += 1
             self._finish_worker_sql_locked(worker_id, "空闲", None, increment_sql_total=True)
             self._write_sql_log("成功", sql, **sql_metadata)
@@ -214,18 +224,27 @@ class FuzzTask:
                 return
             workers = list(self._workers)
 
-        if all(worker.db.ping() for worker in workers):
+        all_connections_alive = all(worker.db.ping() for worker in workers)
+        with self._lock:
+            if self.status is not TaskStatus.RECOVERING:
+                return
+
+        if all_connections_alive:
             try:
                 base_sql_bundle = self._require_base_sql_bundle()
                 for worker in workers:
                     self._prepare_worker_session(worker.db, base_sql_bundle)
             except Exception:
                 with self._lock:
+                    if self.status is not TaskStatus.RECOVERING:
+                        return
                     self._next_probe_at = now + timedelta(seconds=self.recovery_probe_seconds)
                     self._set_all_worker_states_locked("恢复检测")
                     self._write_metrics()
                 return
             with self._lock:
+                if self.status is not TaskStatus.RECOVERING:
+                    return
                 self._set_status_locked(TaskStatus.RUNNING)
                 self._next_probe_at = None
                 self._set_all_worker_states_locked("空闲")
@@ -233,16 +252,20 @@ class FuzzTask:
             return
 
         with self._lock:
+            if self.status is not TaskStatus.RECOVERING:
+                return
             self._next_probe_at = now + timedelta(seconds=self.recovery_probe_seconds)
             self._set_all_worker_states_locked("恢复检测")
             self._write_metrics()
 
     def stop(self) -> None:
-        self._close_worker_connections("停止任务")
         with self._lock:
+            if self._is_terminal_locked():
+                return
             self._set_status_locked(TaskStatus.STOPPED)
             self._set_all_worker_states_locked("已停止")
             self._write_metrics()
+        self._close_worker_connections("停止任务")
         self._release_base_sql_bundle()
 
     def pause(self) -> None:
@@ -266,7 +289,8 @@ class FuzzTask:
             self._write_metrics()
 
     def fail(self, exc: Exception, phase: Optional[str] = None) -> None:
-        self._mark_failed(exc, phase)
+        if not self._mark_failed(exc, phase):
+            return
         self._close_worker_connections("任务失败")
         self._release_base_sql_bundle()
 
@@ -305,6 +329,8 @@ class FuzzTask:
         sql_metadata: Optional[dict] = None,
     ) -> None:
         with self._lock:
+            if self._is_terminal_locked():
+                return
             state = self._worker_state(worker_id)
             if state is None:
                 return
@@ -323,6 +349,8 @@ class FuzzTask:
         stalled_workers: list[TaskWorker] = []
         stalled_records: list[tuple[str, str, dict]] = []
         with self._lock:
+            if self._is_terminal_locked():
+                return []
             for worker, state in zip(self._workers, self._worker_states):
                 if state.state != "执行 SQL" or state.current_sql_started_at is None:
                     continue
@@ -352,6 +380,8 @@ class FuzzTask:
 
     def _handle_lost_connection(self, sql: str, error_message: str, sql_metadata: Optional[dict] = None) -> None:
         with self._lock:
+            if self._is_terminal_locked():
+                return
             now = self.clock()
             self.failed_query_total += 1
             self._write_sql_log("lost connection", sql, error_message, **(sql_metadata or {}))
@@ -379,20 +409,26 @@ class FuzzTask:
             self._set_status_locked(status)
             self._write_metrics()
 
-    def _set_status_locked(self, status: TaskStatus) -> None:
+    def _set_status_locked(self, status: TaskStatus) -> bool:
+        if self._is_terminal_locked():
+            return self.status is status
         self.status = status
         self.phase = status.value
         if status is not TaskStatus.FAILED:
             self.last_error = None
+        return True
 
-    def _mark_failed(self, exc: Exception, phase: Optional[str] = None) -> None:
+    def _mark_failed(self, exc: Exception, phase: Optional[str] = None) -> bool:
         with self._lock:
+            if self._is_terminal_locked():
+                return False
             failed_phase = phase or self.phase or self.status.value
             self.status = TaskStatus.FAILED
             self.phase = failed_phase
             self.last_error = f"{failed_phase}失败: {exc}"
             self._set_all_worker_states_locked("失败", self.last_error)
             self._write_metrics()
+            return True
 
     def _set_all_worker_states(self, state: str, error: Optional[str] = None) -> None:
         with self._lock:
@@ -423,6 +459,8 @@ class FuzzTask:
 
     def _set_worker_state(self, worker_id: int, state: str, error: Optional[str] = None) -> None:
         with self._lock:
+            if self._is_terminal_locked():
+                return
             worker_state = self._worker_state(worker_id)
             if worker_state is None:
                 return
@@ -451,6 +489,8 @@ class FuzzTask:
         error: Optional[str],
         increment_sql_total: bool = False,
     ) -> None:
+        if self._is_terminal_locked():
+            return
         worker_state = self._worker_state(worker_id)
         if worker_state is None:
             return
@@ -537,6 +577,8 @@ class FuzzTask:
 
     def _ensure_worker_session(self, worker_id: int, worker: TaskWorker) -> bool:
         with self._lock:
+            if self._is_terminal_locked() or self._base_sql_bundle_released:
+                return False
             state = self._worker_state(worker_id)
             diagnostics = self._connection_diagnostics(worker.db)
             if state is not None:
@@ -551,10 +593,15 @@ class FuzzTask:
             worker.db.connect()
             self._prepare_worker_session(worker.db, self._require_base_sql_bundle())
         except Exception as exc:
+            with self._lock:
+                if self._is_terminal_locked() or self._base_sql_bundle_released:
+                    return False
             self.fail(exc, phase="恢复 worker 会话")
             return False
 
         with self._lock:
+            if self._is_terminal_locked() or self._base_sql_bundle_released:
+                return False
             state = self._worker_state(worker_id)
             if state is not None:
                 state.needs_reconnect = False
@@ -566,6 +613,9 @@ class FuzzTask:
                 state.last_heartbeat = self.clock()
             self._write_metrics()
         return True
+
+    def _is_terminal_locked(self) -> bool:
+        return self.status in {TaskStatus.STOPPED, TaskStatus.FAILED}
 
     def _generator_sql_metadata(self, generator: SQLGenerator) -> dict:
         return {

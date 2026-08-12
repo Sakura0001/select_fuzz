@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import secrets
 import threading
+import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +28,7 @@ from .schemas import TaskCreateRequest
 
 
 BUILTIN_BASE_SQL_DIR = Path(__file__).resolve().parents[2] / "sql_base_tables"
+BACKGROUND_JOIN_TIMEOUT_SECONDS = 0.2
 
 
 @dataclass
@@ -89,6 +91,7 @@ class RuntimeService:
         self._background_worker_threads: Dict[str, Dict[int, threading.Thread]] = {}
         self._jump_hosts: List[dict] = []
         self._counter = itertools.count(1)
+        self._lifecycle_lock = threading.RLock()
 
     def create_task(self, request: TaskCreateRequest) -> TaskSnapshot:
         expand_base_table_columns = request.expand_base_table_columns
@@ -166,7 +169,8 @@ class RuntimeService:
             self._stop_jump_tunnel(task_id)
             self._mark_snapshot_failed(snapshot, exc, TaskStatus.CONNECTING)
             return snapshot
-        self._real_tasks[task_id] = real_task
+        with self._lifecycle_lock:
+            self._real_tasks[task_id] = real_task
         try:
             real_task.start()
         except Exception:
@@ -205,13 +209,16 @@ class RuntimeService:
 
     def stop_task(self, task_id: str) -> TaskSnapshot:
         task = self._tasks[task_id]
-        real_task = self._real_tasks.get(task_id)
+        with self._lifecycle_lock:
+            real_task = self._real_tasks.get(task_id)
+            stop_event = self._background_stop_events.get(task_id)
+            if stop_event is not None:
+                stop_event.set()
         if real_task is not None:
             real_task.stop()
             self._sync_snapshot_from_task(real_task)
-        else:
-            task.status = TaskStatus.STOPPED.value
-            task.phase = TaskStatus.STOPPED.value
+        elif not self._snapshot_is_terminal(task):
+            self._mark_snapshot_failed(task, RuntimeError("任务运行实例不存在"), TaskStatus.RUNNING)
         self.metric_store.upsert_task_metric(
             task.task_id,
             task.node_name,
@@ -220,39 +227,48 @@ class RuntimeService:
             task.lost_connection_total,
         )
         self._finalize_terminal_task(task_id)
+        self._join_background_threads(task_id)
+        self._try_finalize_terminal_task(task_id)
         return task
 
     def pause_task(self, task_id: str) -> TaskSnapshot:
         task = self._tasks[task_id]
-        real_task = self._real_tasks.get(task_id)
+        if self._snapshot_is_terminal(task):
+            return task
+        with self._lifecycle_lock:
+            real_task = self._real_tasks.get(task_id)
         if real_task is not None:
             real_task.pause()
             self._sync_snapshot_from_task(real_task)
             return task
-        task.status = TaskStatus.PAUSED.value
-        task.phase = TaskStatus.PAUSED.value
-        self.metric_store.upsert_task_metric(task.task_id, task.node_name, task.status, task.sql_total, task.lost_connection_total)
+        self._mark_snapshot_failed(task, RuntimeError("任务运行实例不存在"), TaskStatus.RUNNING)
+        self._finalize_terminal_task(task_id)
         return task
 
     def resume_task(self, task_id: str) -> TaskSnapshot:
         task = self._tasks[task_id]
-        real_task = self._real_tasks.get(task_id)
+        if self._snapshot_is_terminal(task):
+            return task
+        with self._lifecycle_lock:
+            real_task = self._real_tasks.get(task_id)
         if real_task is not None:
             real_task.resume()
             self._sync_snapshot_from_task(real_task)
             return task
-        task.status = TaskStatus.RUNNING.value
-        task.phase = TaskStatus.RUNNING.value
-        self.metric_store.upsert_task_metric(task.task_id, task.node_name, task.status, task.sql_total, task.lost_connection_total)
+        self._mark_snapshot_failed(task, RuntimeError("任务运行实例不存在"), TaskStatus.RUNNING)
+        self._finalize_terminal_task(task_id)
         return task
 
     def list_tasks(self) -> List[dict]:
-        for task in list(self._real_tasks.values()):
+        with self._lifecycle_lock:
+            real_tasks = list(self._real_tasks.values())
+        for task in real_tasks:
             self._sync_snapshot_from_task(task)
         return [task.to_dict() for task in self._tasks.values()]
 
     def get_task(self, task_id: str) -> dict:
-        real_task = self._real_tasks.get(task_id)
+        with self._lifecycle_lock:
+            real_task = self._real_tasks.get(task_id)
         if real_task is not None:
             self._sync_snapshot_from_task(real_task)
         return self._tasks[task_id].to_dict()
@@ -266,7 +282,9 @@ class RuntimeService:
         registry = build_operator_registry()
         hit_counts: Dict[str, int] = {}
         recent_hits = set()
-        for task in list(self._real_tasks.values()):
+        with self._lifecycle_lock:
+            real_tasks = list(self._real_tasks.values())
+        for task in real_tasks:
             for name, count in task.coverage_counts.items():
                 hit_counts[name] = hit_counts.get(name, 0) + count
             recent_hits.update(task.recent_coverage_hits)
@@ -299,7 +317,6 @@ class RuntimeService:
 
     def _start_background_loop(self, task: FuzzTask) -> None:
         stop_event = threading.Event()
-        self._background_stop_events[task.task_id] = stop_event
 
         def run(worker_id: int) -> None:
             while not stop_event.is_set() and not task.is_terminal:
@@ -318,15 +335,32 @@ class RuntimeService:
                     self._sync_snapshot_from_task(task)
                 stop_event.wait(interval)
 
-        worker_threads: Dict[int, threading.Thread] = {}
+        def run_registered(thread_key: int, target: Callable[[], None]) -> None:
+            try:
+                target()
+            finally:
+                self._background_thread_exited(task.task_id, thread_key)
+
+        registered_threads: Dict[int, threading.Thread] = {}
         for worker_id in range(task.thread_count):
-            thread = threading.Thread(target=run, args=(worker_id,), name=f"sql_fuzz-{task.task_id}-{worker_id}", daemon=True)
-            worker_threads[worker_id] = thread
-        self._background_worker_threads[task.task_id] = worker_threads
-        for thread in worker_threads.values():
+            thread = threading.Thread(
+                target=run_registered,
+                args=(worker_id, lambda worker_id=worker_id: run(worker_id)),
+                name=f"sql_fuzz-{task.task_id}-{worker_id}",
+                daemon=True,
+            )
+            registered_threads[worker_id] = thread
+        registered_threads[-1] = threading.Thread(
+            target=run_registered,
+            args=(-1, watchdog),
+            name=f"sql_fuzz-{task.task_id}-watchdog",
+            daemon=True,
+        )
+        with self._lifecycle_lock:
+            self._background_stop_events[task.task_id] = stop_event
+            self._background_worker_threads[task.task_id] = registered_threads
+        for thread in list(registered_threads.values()):
             thread.start()
-        watcher = threading.Thread(target=watchdog, name=f"sql_fuzz-{task.task_id}-watchdog", daemon=True)
-        watcher.start()
 
     def _run_task_step(self, task: FuzzTask, worker_id: int) -> None:
         try:
@@ -338,12 +372,48 @@ class RuntimeService:
             self._finalize_terminal_task(task.task_id)
 
     def _finalize_terminal_task(self, task_id: str) -> None:
-        stop_event = self._background_stop_events.pop(task_id, None)
+        with self._lifecycle_lock:
+            stop_event = self._background_stop_events.get(task_id)
         if stop_event is not None:
             stop_event.set()
-        self._background_worker_threads.pop(task_id, None)
-        self._real_tasks.pop(task_id, None)
         self._stop_jump_tunnel(task_id)
+        self._try_finalize_terminal_task(task_id)
+
+    def _background_thread_exited(self, task_id: str, thread_key: int) -> None:
+        with self._lifecycle_lock:
+            threads = self._background_worker_threads.get(task_id)
+            if threads is not None:
+                threads.pop(thread_key, None)
+        self._try_finalize_terminal_task(task_id)
+
+    def _join_background_threads(self, task_id: str) -> None:
+        with self._lifecycle_lock:
+            threads = list(self._background_worker_threads.get(task_id, {}).values())
+        current_thread = threading.current_thread()
+        deadline = time.monotonic() + BACKGROUND_JOIN_TIMEOUT_SECONDS
+        for thread in threads:
+            if thread is current_thread:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            thread.join(timeout=remaining)
+
+    def _try_finalize_terminal_task(self, task_id: str) -> bool:
+        with self._lifecycle_lock:
+            snapshot = self._tasks.get(task_id)
+            if snapshot is None or not self._snapshot_is_terminal(snapshot):
+                return False
+            if self._background_worker_threads.get(task_id):
+                return False
+            self._background_worker_threads.pop(task_id, None)
+            self._background_stop_events.pop(task_id, None)
+            self._real_tasks.pop(task_id, None)
+            return True
+
+    @staticmethod
+    def _snapshot_is_terminal(snapshot: TaskSnapshot) -> bool:
+        return snapshot.status in {TaskStatus.STOPPED.value, TaskStatus.FAILED.value}
 
     def _sync_snapshot_from_task(self, task: FuzzTask) -> None:
         snapshot = self._tasks[task.task_id]
@@ -378,11 +448,13 @@ class RuntimeService:
         jump_host = self._find_jump_host(node.jump_host)
         tunnel = JumpTunnel(jump_host=jump_host, target_node=node)
         tunnel.start()
-        self._task_tunnels[task_id] = tunnel
+        with self._lifecycle_lock:
+            self._task_tunnels[task_id] = tunnel
         return tunnel
 
     def _stop_jump_tunnel(self, task_id: str) -> None:
-        tunnel = self._task_tunnels.pop(task_id, None)
+        with self._lifecycle_lock:
+            tunnel = self._task_tunnels.pop(task_id, None)
         if tunnel is not None:
             tunnel.stop()
 

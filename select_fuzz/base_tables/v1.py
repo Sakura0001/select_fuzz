@@ -157,11 +157,17 @@ _SEED_ROW_COUNTS = (
 )
 
 
+def _validate_table_index(index: object) -> int:
+    """严格校验基表编号，避免 `bool` 和负数触发 Python 索引兼容行为。"""
+
+    if type(index) is not int or not 0 <= index < TOTAL_TABLE_COUNT:
+        raise ValueError(f"基表编号必须是 0 到 {TOTAL_TABLE_COUNT - 1} 之间的整数")
+    return index
+
+
 def table_column_profile(index: int) -> TableColumnProfile:
-    try:
-        return _TABLE_COLUMN_PROFILES[index]
-    except IndexError as exc:
-        raise ValueError(f"基表编号必须在 0 到 {TOTAL_TABLE_COUNT - 1} 之间") from exc
+    index = _validate_table_index(index)
+    return _TABLE_COLUMN_PROFILES[index]
 
 
 def table_column_count(index: int, *, seed: str = "0", expand_base_table_columns: bool = False) -> int:
@@ -338,6 +344,7 @@ def _extra_column_spec(index: int, offset: int, seed: str) -> ExtraColumnSpec:
 
 
 def extra_column_specs(index: int, *, seed: str) -> list[ExtraColumnSpec]:
+    index = _validate_table_index(index)
     extra_count = table_column_count(index, seed=seed, expand_base_table_columns=True) - len(base_seed_columns())
     if extra_count < 0:
         raise ValueError(f"t{index} 目标列数小于核心列数")
@@ -345,6 +352,7 @@ def extra_column_specs(index: int, *, seed: str) -> list[ExtraColumnSpec]:
 
 
 def table_kind(index: int) -> str:
+    index = _validate_table_index(index)
     if index <= 1:
         return "normal"
     if index <= 6:
@@ -402,6 +410,7 @@ def top_partition_clause(partition_type: str) -> str:
 
 
 def subpartition_pair(index: int) -> tuple[str, str]:
+    index = _validate_table_index(index)
     pair_index = index - SUBPARTITION_START
     outer = PARTITION_TYPES[pair_index // len(PARTITION_TYPES)]
     inner = PARTITION_TYPES[pair_index % len(PARTITION_TYPES)]
@@ -436,6 +445,7 @@ SUBPARTITION BY {inner_type} {inner_expr}{subpartition_count} (
 
 
 def partition_clause(index: int, include_subpartition: bool = True) -> str:
+    index = _validate_table_index(index)
     if table_kind(index) == "partition":
         return top_partition_clause(PARTITION_TYPES[index - FIRST_PARTITION_START])
     outer, inner = subpartition_pair(index)
@@ -489,6 +499,7 @@ PARTITION_UNIQUE_INDEXES = frozenset({
 
 
 def can_use_unique_index(index: int, index_name: str, include_subpartition: bool = True) -> bool:
+    index = _validate_table_index(index)
     kind = table_kind(index)
     short_name = f"idx_{index_name.removeprefix(f'idx_t{index}_')}"
     if kind in {"normal", "temporary"}:
@@ -499,6 +510,7 @@ def can_use_unique_index(index: int, index_name: str, include_subpartition: bool
 
 
 def key_line(index: int, index_name: str, body: str, include_subpartition: bool = True, suffix: str = "") -> str:
+    index = _validate_table_index(index)
     prefix = "UNIQUE KEY" if can_use_unique_index(index, index_name, include_subpartition) else "KEY"
     return f"  {prefix} `{index_name}` {body}{suffix}"
 
@@ -592,6 +604,7 @@ def supplemental_index_lines(
     include_subpartition: bool = True,
     profile: TableColumnProfile | None = None,
 ) -> list[str]:
+    index = _validate_table_index(index)
     profile = profile or table_column_profile(index)
     extra_varchar_prefix_length = min(32, profile.varchar_length)
     extra_varbinary_prefix_length = min(32, profile.varbinary_length)
@@ -657,6 +670,7 @@ def create_table_sql(
     seed: str = "0",
     expand_base_table_columns: bool = False,
 ) -> str:
+    index = _validate_table_index(index)
     kind = table_kind(index)
     profile = table_column_profile(index)
     extra_columns = extra_column_specs(index, seed=seed) if expand_base_table_columns else []
@@ -766,10 +780,8 @@ def create_table_sql(
 
 
 def seed_row_count(index: int) -> int:
-    try:
-        return _SEED_ROW_COUNTS[index]
-    except IndexError as exc:
-        raise ValueError(f"基表编号必须在 0 到 {TOTAL_TABLE_COUNT - 1} 之间") from exc
+    index = _validate_table_index(index)
+    return _SEED_ROW_COUNTS[index]
 
 
 def max_seed_row_count() -> int:
@@ -777,27 +789,32 @@ def max_seed_row_count() -> int:
 
 
 def tenant_expr(index: int) -> str:
+    index = _validate_table_index(index)
     if index >= 7:
         return f"((`n` - 1) % {len(TOP_PARTITION_VALUES)}) + 1"
     return "1"
 
 
 def subpart_expr(index: int) -> str:
+    index = _validate_table_index(index)
     if index >= SUBPARTITION_START:
         return f"((`n` - 1) % {len(SUBPARTITION_VALUES)}) + 1"
     return "1"
 
 
 def parent_table_index(index: int) -> int:
+    index = _validate_table_index(index)
     return 0 if index == 1 or index % 2 == 0 else 1
 
 
 def parent_row_expr(index: int) -> str:
+    index = _validate_table_index(index)
     parent = parent_table_index(index)
     return f"((`n` - 1) % {seed_row_count(parent)}) + 1"
 
 
 def parent_value_expr(index: int, column: str) -> str:
+    index = _validate_table_index(index)
     if index == 0:
         return "NULL"
     parent = 0 if index == 1 or index % 2 == 0 else 1
@@ -866,15 +883,18 @@ def seed_columns(
     seed: str = "0",
     expand_base_table_columns: bool = False,
 ) -> list[str]:
+    index = _validate_table_index(index)
     extra_columns = extra_column_specs(index, seed=seed) if expand_base_table_columns else []
     return [*base_seed_columns(), *[spec.name for spec in extra_columns]]
 
 
 def unique_binary_expr(index: int, multiplier: int = 100000) -> str:
+    index = _validate_table_index(index)
     return f"UNHEX(CONCAT(LPAD(HEX({index} * {multiplier} + `n`), 8, '0'), REPEAT('00', 28)))"
 
 
 def unique_text_expr(index: int, label: str) -> str:
+    index = _validate_table_index(index)
     return f"CONCAT('r', LPAD(`n`, 6, '0'), '_{label}_{index}')"
 
 
@@ -884,6 +904,7 @@ def seed_value_exprs(
     seed: str = "0",
     expand_base_table_columns: bool = False,
 ) -> list[str]:
+    index = _validate_table_index(index)
     profile = table_column_profile(index)
     tinyint_modulus = 255 if profile.tinyint_unsigned else 127
     values = [
@@ -955,6 +976,7 @@ def insert_sql(
     seed: str = "0",
     expand_base_table_columns: bool = False,
 ) -> str:
+    index = _validate_table_index(index)
     col_sql = ",".join(
         f"`{column}`"
         for column in seed_columns(

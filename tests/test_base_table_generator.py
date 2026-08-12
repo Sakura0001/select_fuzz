@@ -249,6 +249,50 @@ def test_v1_运行时代码不依赖_python_random_或工具模块() -> None:
     assert "import tools" not in source
 
 
+_TABLE_INDEX_HELPERS = (
+    ("table_column_profile", lambda index: v1.table_column_profile(index)),
+    ("table_column_count", lambda index: v1.table_column_count(index)),
+    ("extra_column_specs", lambda index: v1.extra_column_specs(index, seed="0")),
+    ("table_kind", lambda index: v1.table_kind(index)),
+    ("subpartition_pair", lambda index: v1.subpartition_pair(index)),
+    ("partition_clause", lambda index: v1.partition_clause(index)),
+    ("can_use_unique_index", lambda index: v1.can_use_unique_index(index, "idx_t0_int_col")),
+    ("key_line", lambda index: v1.key_line(index, "idx_t0_int_col", "(`int_col`)")),
+    (
+        "supplemental_index_lines",
+        lambda index: v1.supplemental_index_lines(
+            index,
+            v1.TARGET_TOTAL_INDEX_COUNT,
+            profile=v1.table_column_profile(0),
+        ),
+    ),
+    ("create_table_sql", lambda index: v1.create_table_sql(index)),
+    ("seed_row_count", lambda index: v1.seed_row_count(index)),
+    ("tenant_expr", lambda index: v1.tenant_expr(index)),
+    ("subpart_expr", lambda index: v1.subpart_expr(index)),
+    ("parent_table_index", lambda index: v1.parent_table_index(index)),
+    ("parent_row_expr", lambda index: v1.parent_row_expr(index)),
+    ("parent_value_expr", lambda index: v1.parent_value_expr(index, "parent_id_col")),
+    ("seed_columns", lambda index: v1.seed_columns(index)),
+    ("unique_binary_expr", lambda index: v1.unique_binary_expr(index)),
+    ("unique_text_expr", lambda index: v1.unique_text_expr(index, "text")),
+    ("seed_value_exprs", lambda index: v1.seed_value_exprs(index)),
+    ("insert_sql", lambda index: v1.insert_sql(index)),
+)
+
+
+@pytest.mark.parametrize("helper_name,helper", _TABLE_INDEX_HELPERS, ids=lambda value: value if isinstance(value, str) else None)
+@pytest.mark.parametrize("index", (-1, 79, True, False, 1.0, "1"), ids=("negative", "overflow", "true", "false", "float", "string"))
+def test_v1_所有按表_helper_严格拒绝非法基表编号(
+    helper_name: str,
+    helper: object,
+    index: object,
+) -> None:
+    del helper_name
+    with pytest.raises(ValueError, match=r"^基表编号必须"):
+        helper(index)
+
+
 @pytest.mark.parametrize(
     "seed",
     ("", "00", "01", "+1", "-1", " 1", "1 ", "1.0", "١", "１", str(2**64)),

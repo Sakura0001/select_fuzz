@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from select_fuzz.metadata.base_sql import is_base_table_definition_file, load_base_sql_files
 from select_fuzz.metadata.ddl_parser import parse_create_table
 from select_fuzz.sqlgen.generator import GenerationOptions, SQLGenerator, TableRef
@@ -806,6 +808,65 @@ def test_强制生成_select_核心结构() -> None:
     assert any(lock in upper for lock in ["FOR UPDATE", "FOR SHARE", "LOCK IN SHARE MODE"])
     assert any(subquery in upper for subquery in [" EXISTS ", " IN (SELECT", "(SELECT"])
     assert {"WITH", "JOIN ... ON", "WINDOW"} & generator.coverage_hits
+
+
+def test_禁用锁定读时随机_强制和递归路径均不生成锁定子句() -> None:
+    tables = _base_tables()
+    generator = SQLGenerator(random_seed=2201, max_sql_length=8000)
+    lock_pattern = re.compile(r"\b(?:FOR\s+UPDATE|FOR\s+SHARE|LOCK\s+IN\s+SHARE\s+MODE)\b", re.IGNORECASE)
+
+    options = GenerationOptions(
+        require_cte=True,
+        require_set_operation=True,
+        require_subquery=True,
+        require_locking=True,
+        allow_locking=False,
+        invalid_sql_ratio=0.0,
+    )
+    sqls = [generator.generate(tables, options) for _ in range(300)]
+
+    assert all(lock_pattern.search(sql) is None for sql in sqls)
+
+
+def test_禁用临时表时随机_required_fallback_和递归路径均不引用临时表() -> None:
+    permanent = parse_create_table("CREATE TABLE permanent_table (id INT PRIMARY KEY, value_col INT NULL);")
+    temporary = parse_create_table("CREATE TEMPORARY TABLE session_temp (id INT PRIMARY KEY, value_col INT NULL);")
+    tables = [temporary, permanent]
+    options = GenerationOptions(
+        allow_temporary_tables=False,
+        invalid_sql_ratio=0.0,
+        null_compare_ratio=0.0,
+        risky_expr_ratio=0.0,
+    )
+
+    generator = SQLGenerator(random_seed=2202, max_sql_length=8000)
+    random_sqls = [generator.generate(tables, options) for _ in range(500)]
+    required_sqls = [
+        SQLGenerator(random_seed=seed, max_sql_length=8000).generate(
+            tables,
+            GenerationOptions(
+                allow_temporary_tables=False,
+                require_feature=feature,
+                require_cte=True,
+                require_set_operation=True,
+            ),
+        )
+        for seed, feature in enumerate(("table_statement", "lateral_derived_table", "aggregate_window_extensions"), 2300)
+    ]
+    fallback_sql = SQLGenerator(random_seed=2400, max_sql_length=20).generate(tables, options)
+
+    assert all("session_temp" not in sql for sql in [*random_sqls, *required_sqls, fallback_sql])
+    assert "permanent_table" in fallback_sql
+
+
+def test_禁用临时表且没有永久表时明确拒绝() -> None:
+    temporary = parse_create_table("CREATE TEMPORARY TABLE only_temp (id INT PRIMARY KEY);")
+
+    with pytest.raises(ValueError, match="永久表"):
+        SQLGenerator(random_seed=2500).generate(
+            [temporary],
+            GenerationOptions(allow_temporary_tables=False),
+        )
 
 
 def test_随机递归深度和长度保护稳定() -> None:

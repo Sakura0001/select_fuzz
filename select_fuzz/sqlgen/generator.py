@@ -26,6 +26,8 @@ class GenerationOptions:
     invalid_sql_ratio: float = 0.03
     null_compare_ratio: float = 0.08
     risky_expr_ratio: float = 0.08
+    allow_locking: bool = True
+    allow_temporary_tables: bool = True
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,10 @@ class SQLGenerator:
         options = options or GenerationOptions()
         self._active_options = options
         table_list = list(tables)
+        if not options.allow_temporary_tables:
+            table_list = [table for table in table_list if not table.is_temporary]
+            if not table_list:
+                raise ValueError("禁用临时表时至少需要一张永久表元数据才能生成 SQL")
 
         for _ in range(8):
             self._reset_attempt()
@@ -424,7 +430,9 @@ class SQLGenerator:
         refs, from_clause, join_count = self._from_clause(tables, options)
         group_enabled = self._should_group(options)
         window_enabled = options.require_window or self.random.random() < 0.18
-        locking_enabled = allow_locking and (options.require_locking or self.random.random() < 0.08)
+        locking_enabled = allow_locking and options.allow_locking and (
+            options.require_locking or self.random.random() < 0.08
+        )
         if options.require_feature == "aggregate_extensions":
             group_enabled = True
         if options.require_feature == "window_extensions":
@@ -435,7 +443,7 @@ class SQLGenerator:
         if projection_count is not None:
             group_enabled = False
             window_enabled = options.require_window
-            locking_enabled = allow_locking and options.require_locking
+            locking_enabled = allow_locking and options.allow_locking and options.require_locking
 
         modifier = self._select_modifier(locking_enabled, options.require_feature)
         select_items, group_columns, orderable_aliases = self._select_items(
@@ -1447,6 +1455,8 @@ class SQLGenerator:
 
     def _query_table_pool(self, tables: List[TableMetadata]) -> List[TableMetadata]:
         permanent = self._permanent_tables(tables)
+        if not self._active_options.allow_temporary_tables:
+            return permanent
         temporary = [table for table in tables if table.is_temporary]
         if not temporary or self.random.random() < 0.86:
             return permanent

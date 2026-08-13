@@ -1,6 +1,8 @@
 # 配置结构示例；README 中直接启动 uvicorn 的方式不会自动加载本文件。
-# base_sql_dir 供核心模式加载；若改为自定义目录，任务级扩展模式不受支持，
-# 开启扩列的任务会在“准备基表”阶段失败。
+# base_sql_dir 供核心模式加载；若改为自定义目录，任务级扩展模式和逐表 CRUD 均不受支持。
+# 开启扩列的任务会在“准备基表”阶段失败；开启 CRUD 的请求会在连接数据库前被拒绝。
+# replica_host、replica_port、enable_crud 及三组版本化 seed 都是新建任务时的前端/API 字段，
+# 不是本运行配置文件或 target_nodes 的字段，请勿直接添加到下面的 YAML 对象中。
 project_name: sql_fuzz
 display_name: SQL 模糊测试控制台
 base_sql_dir: sql_base_tables
@@ -8,7 +10,8 @@ sql_log_dir: logs
 failed_sql_dir: logs/failed_sql
 lost_connection_dedup_minutes: 10
 recovery_probe_seconds: 60
-default_thread_count: 4
+# 备节点查询 worker/独占连接数；逐表 CRUD 开启后还会固定创建 74 个主节点 DML 连接。
+default_thread_count: 16
 jump_hosts:
   - name: jump-prod
     host: 10.2.0.8
@@ -16,7 +19,8 @@ jump_hosts:
     username: ops
     password: ssh-secret
 target_nodes:
-  - name: polardb-node-a
+  # 这里登记主节点；备节点地址在新建任务时通过 replica_host 指定，端口留空时继承主端口。
+  - name: polardb-primary-a
     host: 172.18.4.12
     port: 3306
     username: fuzz

@@ -11,8 +11,12 @@ from select_fuzz.config import TargetNodeConfig
 from select_fuzz.metadata.models import BaseSqlFile
 from select_fuzz.monitor.logs import read_jsonl
 from select_fuzz.monitor.store import MetricStore
+from select_fuzz.runner import task as task_module
 from select_fuzz.runner.db import DatabaseClient, LostConnectionError, PyMySQLClient
-from select_fuzz.runner.task import FuzzTask, TaskStatus
+from select_fuzz.runner.task import FuzzTask, InitializationResult, TaskStatus
+from select_fuzz.sqlgen.seeds import derive_worker_seed
+from select_fuzz.api.service import BUILTIN_BASE_SQL_DIR
+from select_fuzz.base_tables import load_base_sql_bundle
 
 
 class FakeClock:
@@ -67,6 +71,1056 @@ class FakeDatabase(DatabaseClient):
 
     def close(self) -> None:
         self.connected = False
+
+
+class RoleDatabase(FakeDatabase):
+    def __init__(self, role: str, *, failures: list[Exception] | None = None) -> None:
+        super().__init__()
+        self.role = role
+        self.failures = list(failures or [])
+        self.close_count = 0
+
+    def execute(self, sql: str) -> int:
+        if self.failures and sql.strip().upper().startswith(("SELECT", "INSERT", "UPDATE", "DELETE")):
+            raise self.failures.pop(0)
+        self.executed.append(sql)
+        if sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            return 3
+        return 0
+
+    def query_scalar(self, sql: str) -> int:
+        self.scalar_queries.append(sql)
+        return 50
+
+    def close(self) -> None:
+        self.close_count += 1
+        super().close()
+
+
+def test_无限重连退避在极大尝试次数仍稳定封顶五秒() -> None:
+    assert [task_module.retry_backoff_seconds(attempt) for attempt in range(7)] == [
+        0.1,
+        0.2,
+        0.4,
+        0.8,
+        1.6,
+        3.2,
+        5.0,
+    ]
+    assert task_module.retry_backoff_seconds(10**9) == 5.0
+
+
+def test_初始化遇到1146返回可重试并从重建数据库边界完整重做(tmp_path: Path) -> None:
+    class RetrySeedDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_count = 0
+            self.count_attempt = 0
+
+        def query_scalar(self, sql: str) -> int:
+            self.scalar_queries.append(sql)
+            self.count_attempt += 1
+            if self.count_attempt == 1:
+                raise RuntimeError(1146, "Table doesn't exist")
+            return 1
+
+        def close(self) -> None:
+            self.close_count += 1
+            super().close()
+
+    database = RetrySeedDatabase()
+    task = FuzzTask(
+        task_id="task-init-retry",
+        node=_node(),
+        base_sql_bundle=build_base_sql_bundle(
+            (
+                BaseSqlFile(
+                    path=Path("t0.sql"),
+                    sql="CREATE TABLE t0 (id BIGINT); INSERT INTO t0 VALUES (1);",
+                ),
+            )
+        ),
+        db=database,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    first = task.start(retry_transient=True)
+
+    assert first is InitializationResult.RETRY
+    assert task.status is TaskStatus.SEEDING
+    assert database.connected is False
+    assert database.executed.count("DROP DATABASE IF EXISTS `select_fuzz`") == 1
+    assert database.executed.count("CREATE TABLE t0 (id BIGINT)") == 1
+
+    second = task.start(retry_transient=True)
+
+    assert second is InitializationResult.SUCCESS
+    assert task.status is TaskStatus.RUNNING
+    assert database.executed.count("DROP DATABASE IF EXISTS `select_fuzz`") == 2
+    assert database.executed.count("CREATE TABLE t0 (id BIGINT)") == 2
+    assert database.executed.count("INSERT INTO t0 VALUES (1)") == 2
+    assert database.close_count >= 1
+
+
+def test_execute_返回游标受影响行数(monkeypatch) -> None:
+    class Cursor:
+        rowcount = 7
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, _sql: str) -> None:
+            return None
+
+    class Connection:
+        open = True
+
+        def cursor(self):
+            return Cursor()
+
+    client = PyMySQLClient(_node())
+    client._connection = Connection()
+
+    assert client.execute("UPDATE `t0` SET `id` = `id`") == 7
+
+
+def test_crud_注册74主写worker和独占的备读worker并按角色路由(tmp_path: Path) -> None:
+    bundle = load_base_sql_bundle(BUILTIN_BASE_SQL_DIR)
+    primary = RoleDatabase("primary")
+    primary_created: list[RoleDatabase] = []
+    replicas: list[RoleDatabase] = []
+
+    def primary_factory() -> RoleDatabase:
+        db = RoleDatabase("primary")
+        primary_created.append(db)
+        return db
+
+    def replica_factory() -> RoleDatabase:
+        db = RoleDatabase("replica")
+        replicas.append(db)
+        return db
+
+    task = FuzzTask(
+        task_id="task-crud-routing",
+        node=_node(),
+        primary_target="172.18.4.12:3306",
+        replica_target="172.18.4.13:3307",
+        base_sql_bundle=bundle,
+        db=primary,
+        primary_db_factory=primary_factory,
+        replica_db_factory=replica_factory,
+        thread_count=2,
+        enable_crud=True,
+        query_seed="11",
+        crud_seed="22",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    task.start()
+
+    states = task.worker_states
+    assert task.worker_ids == list(range(76))
+    assert [row["worker_key"] for row in states[:2]] == ["query:0", "query:1"]
+    assert {row["table_name"] for row in states[2:]} == {
+        f"t{index}" for index in range(79) if index not in {2, 3, 4, 5, 6}
+    }
+    assert all(row["db_role"] == "replica" for row in states[:2])
+    assert all(row["db_role"] == "primary" for row in states[2:])
+    assert [row["generator_seed"] for row in states[:2]] == [
+        str(derive_worker_seed("11", "query", "query:0")),
+        str(derive_worker_seed("11", "query", "query:1")),
+    ]
+    assert states[2]["generator_seed"] == str(
+        derive_worker_seed("22", "dml", states[2]["worker_key"])
+    )
+    assert len({id(worker.db) for worker in task._workers}) == 76
+    assert primary_created and len(primary_created) == 73
+    assert len(replicas) == 2
+
+    task.step(0)
+    task.step(2)
+
+    assert any(_is_query_expression(sql) for sql in replicas[0].executed)
+    assert not any(sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql in replicas[0].executed)
+    assert any(sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")) for sql in primary.executed)
+
+
+def test_worker_断连保留原sql并独立指数退避且不改变全局状态(tmp_path: Path) -> None:
+    clock = FakeClock()
+    bundle = _in_memory_bundle()
+    primary = RoleDatabase("primary")
+    broken_replica = RoleDatabase(
+        "replica",
+        failures=[LostConnectionError("断连一次")],
+    )
+    healthy_replica = RoleDatabase("replica")
+    replicas = iter([broken_replica, healthy_replica])
+    task = FuzzTask(
+        task_id="task-worker-retry",
+        node=_node(),
+        base_sql_bundle=bundle,
+        db=primary,
+        replica_db_factory=lambda: next(replicas),
+        thread_count=2,
+        query_seed="33",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    task._workers[0].pending_sql = "SELECT 1"
+    task._workers[0].pending_operation = "SELECT"
+
+    assert task.step(0) == 0.1
+    pending_sql = task._workers[0].pending_sql
+    assert pending_sql is not None
+    assert task.status is TaskStatus.RUNNING
+    task.step(1)
+    assert task.success_query_total == 1
+
+    clock.advance(1)
+    assert task.step(0) == 0
+    assert task._workers[0].pending_sql is None
+    assert broken_replica.executed.count(pending_sql) == 1
+    assert task.worker_states[0]["reconnect_total"] == 1
+
+
+def test_尚未建立会话的角色worker不会被误判为被动断连(tmp_path: Path) -> None:
+    replica = RoleDatabase("replica")
+    task = FuzzTask(
+        task_id="task-role-before-first-connect",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: replica,
+        thread_count=1,
+        query_seed="34",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+
+    state_before_connect = task.worker_states[0]
+    assert state_before_connect["needs_reconnect"] is False
+    assert state_before_connect["reconnect_total"] == 0
+
+    task.step(0)
+
+    state_after_connect = task.worker_states[0]
+    assert state_after_connect["needs_reconnect"] is False
+    assert state_after_connect["reconnect_total"] == 0
+
+
+def test_复用初始化主连接的首个dml_worker第一次重连会计入主节点汇总(tmp_path: Path) -> None:
+    clock = FakeClock()
+    primary = RoleDatabase("primary")
+    task = FuzzTask(
+        task_id="task-first-dml-reconnect",
+        node=_node(),
+        base_sql_bundle=load_base_sql_bundle(BUILTIN_BASE_SQL_DIR),
+        db=primary,
+        primary_db_factory=lambda: RoleDatabase("primary"),
+        replica_db_factory=lambda: RoleDatabase("replica"),
+        thread_count=1,
+        enable_crud=True,
+        query_seed="35",
+        crud_seed="36",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    first_dml = task._workers[1]
+    assert first_dml.worker_key == "dml:t0"
+    assert first_dml.session_ready is True
+    assert first_dml.has_connected is True
+    primary.failures.append(LostConnectionError("主节点断连一次"))
+
+    assert task.step(first_dml.worker_id) == 0.1
+    clock.advance(1)
+    assert task.step(first_dml.worker_id) == 0
+
+    state = task.worker_states[first_dml.worker_id]
+    assert state["reconnect_total"] == 1
+    assert task.snapshot_counts()["primary_reconnect_total"] == 1
+
+
+def test_角色worker工厂部分失败会关闭已创建连接(tmp_path: Path) -> None:
+    bundle = load_base_sql_bundle(BUILTIN_BASE_SQL_DIR)
+    primary = RoleDatabase("primary")
+    created = [RoleDatabase("replica"), RoleDatabase("replica")]
+    calls = 0
+
+    def replica_factory() -> RoleDatabase:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("模拟备库工厂失败")
+        return created[calls - 1]
+
+    task = FuzzTask(
+        task_id="task-partial-factory",
+        node=_node(),
+        base_sql_bundle=bundle,
+        db=primary,
+        replica_db_factory=replica_factory,
+        thread_count=3,
+        query_seed="44",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    with pytest.raises(RuntimeError, match="模拟备库工厂失败"):
+        task.start()
+
+    assert task.status is TaskStatus.FAILED
+    assert [db.close_count for db in created] == [1, 1]
+
+
+def test_角色worker工厂返回前停止不会继续创建剩余客户端(tmp_path: Path) -> None:
+    first_factory_entered = threading.Event()
+    allow_first_factory = threading.Event()
+    created: list[RoleDatabase] = []
+
+    def replica_factory() -> RoleDatabase:
+        database = RoleDatabase("replica")
+        created.append(database)
+        if len(created) == 1:
+            first_factory_entered.set()
+            assert allow_first_factory.wait(timeout=3), "测试等待放行首个备库工厂超时"
+        return database
+
+    task = FuzzTask(
+        task_id="task-stop-during-role-factory",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=replica_factory,
+        thread_count=8,
+        query_seed="45",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    result: list[InitializationResult] = []
+    start_thread = threading.Thread(target=lambda: result.append(task.start()))
+    start_thread.start()
+    assert first_factory_entered.wait(timeout=3)
+
+    task.stop()
+    allow_first_factory.set()
+    start_thread.join(timeout=3)
+
+    assert not start_thread.is_alive()
+    assert result == [InitializationResult.STOPPED]
+    assert len(created) == 1
+    assert created[0].close_count >= 1
+    assert task.status is TaskStatus.STOPPED
+
+
+def test_覆盖率快照与查询生成并发时不会迭代变更中的字典(tmp_path: Path) -> None:
+    task = FuzzTask(
+        task_id="task-coverage-snapshot",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: RoleDatabase("replica"),
+        thread_count=1,
+        query_seed="46",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    generator = task._workers[0].generator
+
+    class MutatingCoverage(dict):
+        def items(self):
+            iterator = iter(super().items())
+            first = next(iterator)
+            self["late-key"] = 1
+            yield first
+            yield from iterator
+
+    generator.coverage_counts = MutatingCoverage({"first-key": 1})
+
+    assert task.coverage_counts == {"first-key": 1}
+
+
+def test_dml_已知冲突只计失败且不写sql日志或失败文件(tmp_path: Path) -> None:
+    bundle = load_base_sql_bundle(BUILTIN_BASE_SQL_DIR)
+    primary = RoleDatabase("primary")
+    task = FuzzTask(
+        task_id="task-silent-conflict",
+        node=_node(),
+        base_sql_bundle=bundle,
+        db=primary,
+        primary_db_factory=lambda: RoleDatabase("primary"),
+        replica_db_factory=lambda: RoleDatabase("replica"),
+        thread_count=1,
+        enable_crud=True,
+        query_seed="55",
+        crud_seed="66",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    dml_worker = task._workers[1]
+    conflict = RuntimeError(1062, "Duplicate entry")
+    original_execute = dml_worker.db.execute
+
+    def fail_dml(sql: str):
+        if sql.strip().upper().startswith(("INSERT", "UPDATE", "DELETE")):
+            raise conflict
+        return original_execute(sql)
+
+    dml_worker.db.execute = fail_dml  # type: ignore[method-assign]
+
+    assert task.step(dml_worker.worker_id) == 0
+
+    assert task.crud_failed_total == 1
+    assert not list((tmp_path / "logs").rglob("*.jsonl"))
+    assert not list((tmp_path / "logs" / "failed_sql").rglob("*.sql"))
+
+
+@pytest.mark.parametrize(
+    ("table_not_ready_code", "table_not_ready_message"),
+    [(1049, "Unknown database"), (1146, "Table doesn't exist")],
+)
+def test_同一pending_sql连续断连和表未就绪按指数退避(
+    tmp_path: Path,
+    table_not_ready_code: int,
+    table_not_ready_message: str,
+) -> None:
+    clock = FakeClock()
+    replica = RoleDatabase(
+        "replica",
+        failures=[
+            LostConnectionError("断连一"),
+            LostConnectionError("断连二"),
+            RuntimeError(table_not_ready_code, table_not_ready_message),
+        ],
+    )
+    task = FuzzTask(
+        task_id="task-backoff",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: replica,
+        thread_count=1,
+        query_seed="77",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    task._workers[0].pending_sql = "SELECT 1"
+    task._workers[0].pending_operation = "SELECT"
+
+    delays = []
+    pending_sql = None
+    for seconds in (0, 1, 1):
+        clock.advance(seconds)
+        delays.append(task.step(0))
+        pending_sql = pending_sql or task._workers[0].pending_sql
+
+    assert delays == [0.1, 0.2, 0.4]
+    assert task._workers[0].pending_sql == pending_sql
+    assert task.status is TaskStatus.RUNNING
+    assert task.lost_connection_total == 2
+
+    clock.advance(1)
+    assert task.step(0) == 0
+    assert task._workers[0].pending_sql is None
+
+
+def test_兼容主库查询路径消费query_seed并公开稳定worker身份(tmp_path: Path) -> None:
+    def build_task(task_id: str) -> FuzzTask:
+        databases = [FakeDatabase(), FakeDatabase()]
+        iterator = iter(databases[1:])
+        task = FuzzTask(
+            task_id=task_id,
+            node=_node(),
+            base_sql_bundle=_in_memory_bundle(),
+            db=databases[0],
+            db_factory=lambda: next(iterator),
+            thread_count=2,
+            query_seed="88",
+            query_generator_version="v1",
+            metric_store=MetricStore(tmp_path / f"{task_id}.db"),
+            log_dir=tmp_path / "logs",
+            clock=FakeClock(),
+        )
+        task.start()
+        return task
+
+    first = build_task("task-query-seed-a")
+    second = build_task("task-query-seed-b")
+
+    assert [row["worker_key"] for row in first.worker_states] == ["query:0", "query:1"]
+    assert all(row["target"] == _node().address for row in first.worker_states)
+    assert all(row["db_role"] == "replica" for row in first.worker_states)
+    assert all(row["generator_version"] == "v1" for row in first.worker_states)
+    assert [row["generator_seed"] for row in first.worker_states] == [
+        str(derive_worker_seed("88", "query", row["worker_key"]))
+        for row in first.worker_states
+    ]
+    for first_worker, second_worker in zip(first._workers, second._workers):
+        first_sql = first_worker.generator.generate(first.tables)
+        second_sql = second_worker.generator.generate(second.tables)
+        assert first_sql == second_sql
+
+
+def test_runtime_严格按query与crud请求版本调用注册派发(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import select_fuzz.runner.task as task_module
+
+    bundle = load_base_sql_bundle(BUILTIN_BASE_SQL_DIR)
+    query_versions: list[tuple[str, int | None]] = []
+    crud_versions: list[tuple[str, int | None, str]] = []
+    original_query_factory = task_module.create_query_generator
+    original_crud_factory = task_module.create_crud_generator
+
+    def create_query(version: str, seed: int | None, **kwargs):
+        query_versions.append((version, seed))
+        return original_query_factory("v1", seed, **kwargs)
+
+    def create_crud(version: str, seed: int | None, **kwargs):
+        crud_versions.append((version, seed, kwargs["base_table_seed"]))
+        return original_crud_factory("v1", seed, **kwargs)
+
+    monkeypatch.setattr(task_module, "create_query_generator", create_query)
+    monkeypatch.setattr(task_module, "create_crud_generator", create_crud)
+    task = FuzzTask(
+        task_id="task-version-dispatch",
+        node=_node(),
+        base_sql_bundle=bundle,
+        db=RoleDatabase("primary"),
+        primary_db_factory=lambda: RoleDatabase("primary"),
+        replica_db_factory=lambda: RoleDatabase("replica"),
+        thread_count=2,
+        enable_crud=True,
+        query_seed="88",
+        query_generator_version="v-query-requested",
+        crud_seed="99",
+        crud_generator_version="v-crud-requested",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    task.start()
+
+    assert [version for version, _seed in query_versions] == [
+        "v-query-requested",
+        "v-query-requested",
+    ]
+    assert len(crud_versions) == 74
+    assert {version for version, _seed, _base_seed in crud_versions} == {"v-crud-requested"}
+
+
+def test_角色worker被看门狗关闭后保留pending并进入独立重连(tmp_path: Path) -> None:
+    clock = FakeClock()
+    replica = RoleDatabase("replica")
+    task = FuzzTask(
+        task_id="task-role-stalled",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: replica,
+        thread_count=1,
+        query_seed="99",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    task.step(0)
+    worker = task._workers[0]
+    worker.pending_sql = "SELECT 42"
+    worker.pending_operation = "SELECT"
+    task.record_worker_sql_start(0, worker.pending_sql)
+    clock.advance(10)
+
+    assert task.interrupt_stalled_workers(5) == [0]
+
+    assert worker.session_ready is False
+    assert worker.pending_sql == "SELECT 42"
+    assert task.status is TaskStatus.RUNNING
+
+
+def test_角色worker登记sql后停止不会继续发送数据库请求(tmp_path: Path) -> None:
+    replica = RoleDatabase("replica")
+    task = FuzzTask(
+        task_id="task-stop-before-execute",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: replica,
+        thread_count=1,
+        query_seed="100",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    registered = threading.Event()
+    allow_execute = threading.Event()
+    original_record = task.record_worker_sql_start
+
+    def blocking_record(*args, **kwargs) -> None:
+        original_record(*args, **kwargs)
+        registered.set()
+        assert allow_execute.wait(timeout=3), "测试等待放行 SQL 执行超时"
+
+    task.record_worker_sql_start = blocking_record  # type: ignore[method-assign]
+    thread = threading.Thread(target=lambda: task.step(0))
+    thread.start()
+    assert registered.wait(timeout=3)
+
+    task.stop()
+    executed_before_release = list(replica.executed)
+    allow_execute.set()
+    thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    assert replica.executed == executed_before_release
+    assert task.status is TaskStatus.STOPPED
+
+
+def test_角色worker迟到完成use时终态会再次关闭且不复活会话(tmp_path: Path) -> None:
+    class BlockingUseDatabase(RoleDatabase):
+        def __init__(self) -> None:
+            super().__init__("replica")
+            self.use_started = threading.Event()
+            self.allow_use = threading.Event()
+
+        def execute(self, sql: str) -> int:
+            if sql.startswith("USE "):
+                self.use_started.set()
+                assert self.allow_use.wait(timeout=3), "测试等待放行 USE 超时"
+            return super().execute(sql)
+
+    replica = BlockingUseDatabase()
+    task = FuzzTask(
+        task_id="task-late-use",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: replica,
+        thread_count=1,
+        query_seed="101",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    thread = threading.Thread(target=lambda: task.step(0))
+    thread.start()
+    assert replica.use_started.wait(timeout=3)
+
+    task.stop()
+    replica.allow_use.set()
+    thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    assert task.status is TaskStatus.STOPPED
+    assert task._workers[0].session_ready is False
+    assert replica.connected is False
+    assert replica.close_count >= 2
+    assert not any(_is_query_expression(sql) for sql in replica.executed)
+
+
+def test_角色worker被动断开后下一轮按独立连接重连(tmp_path: Path) -> None:
+    class PassiveRoleDatabase(RoleDatabase):
+        def __init__(self) -> None:
+            super().__init__("replica")
+            self.connect_count = 0
+            self.connected = False
+
+        def connect(self) -> None:
+            self.connect_count += 1
+            self.connected = True
+
+        def execute(self, sql: str) -> int:
+            if not self.connected:
+                raise RuntimeError("数据库连接尚未显式建立")
+            return super().execute(sql)
+
+        def connection_diagnostics(self) -> dict:
+            return {
+                "connection_open": self.connected,
+                "connection_connect_count": self.connect_count,
+                # 模拟驱动/服务端被动关闭：本地没有调用 close()。
+                "connection_close_count": max(0, self.connect_count - 1),
+            }
+
+    replica = PassiveRoleDatabase()
+    task = FuzzTask(
+        task_id="task-passive-role",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: replica,
+        thread_count=1,
+        query_seed="110",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    task.step(0)
+    assert replica.connect_count == 1
+    replica.connected = False
+    task.worker_states
+
+    task.step(0)
+
+    state = task.worker_states[0]
+    assert replica.connect_count == 2
+    assert task.success_query_total == 2
+    assert state["needs_reconnect"] is False
+    assert state["reconnect_total"] == 1
+    assert task.snapshot_counts()["replica_reconnect_total"] == 1
+
+
+def test_角色worker看门狗中断后的成功重连会计入主备汇总(tmp_path: Path) -> None:
+    clock = FakeClock()
+    replica = RoleDatabase("replica")
+    task = FuzzTask(
+        task_id="task-watchdog-role-reconnect",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: replica,
+        thread_count=1,
+        query_seed="111",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    task.step(0)
+    reconnects_before_watchdog = task.worker_states[0]["reconnect_total"]
+    task.record_worker_sql_start(0, "SELECT SLEEP(999)", clock())
+    clock.advance(31)
+    assert task.interrupt_stalled_workers(30) == [0]
+    clock.advance(1)
+
+    task.step(0)
+
+    assert task.worker_states[0]["reconnect_total"] == reconnects_before_watchdog + 1
+    assert task.snapshot_counts()["replica_reconnect_total"] == reconnects_before_watchdog + 1
+
+
+def test_角色worker在use完成后登记会话前停止也不会复活连接(tmp_path: Path) -> None:
+    replica = RoleDatabase("replica")
+    task = FuzzTask(
+        task_id="task-stop-after-use",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: replica,
+        thread_count=1,
+        query_seed="109",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    use_finished = threading.Event()
+    allow_registration = threading.Event()
+    original_execute_initialization = task._execute_initialization_statement
+
+    def block_after_use(db: DatabaseClient, statement: str) -> None:
+        original_execute_initialization(db, statement)
+        if statement.startswith("USE "):
+            use_finished.set()
+            assert allow_registration.wait(timeout=3), "测试等待放行会话登记超时"
+
+    task._execute_initialization_statement = block_after_use  # type: ignore[method-assign]
+    thread = threading.Thread(target=lambda: task.step(0))
+    thread.start()
+    assert use_finished.wait(timeout=3)
+
+    task.stop()
+    allow_registration.set()
+    thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    assert task.status is TaskStatus.STOPPED
+    assert task._workers[0].session_ready is False
+    assert replica.connected is False
+    assert not any(_is_query_expression(sql) for sql in replica.executed)
+
+
+def test_只有角色查询禁用锁定读和临时表而legacy保留默认选项(tmp_path: Path) -> None:
+    class CapturingGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+        last_sql_validity = "合法"
+        last_risk_tags: list[str] = []
+        last_expected_error = False
+
+        def __init__(self) -> None:
+            self.options = []
+
+        def generate(self, _tables, options) -> str:
+            self.options.append(options)
+            return "SELECT 1"
+
+    legacy = FuzzTask(
+        task_id="task-options-legacy",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=FakeDatabase(),
+        query_seed="102",
+        metric_store=MetricStore(tmp_path / "legacy.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    legacy.start()
+    legacy_generator = CapturingGenerator()
+    legacy._workers[0].generator = legacy_generator
+    legacy.step(0)
+
+    role = FuzzTask(
+        task_id="task-options-role",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=FakeDatabase(),
+        replica_db_factory=lambda: FakeDatabase(),
+        query_seed="103",
+        metric_store=MetricStore(tmp_path / "role.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    role.start()
+    role_generator = CapturingGenerator()
+    role._workers[0].generator = role_generator
+    role.step(0)
+
+    assert legacy_generator.options[0].allow_locking is True
+    assert legacy_generator.options[0].allow_temporary_tables is True
+    assert role_generator.options[0].allow_locking is False
+    assert role_generator.options[0].allow_temporary_tables is False
+
+
+def test_主备worker断连分别记录角色事件且不写逐条sql失败日志(tmp_path: Path) -> None:
+    store = MetricStore(tmp_path / "metrics.db")
+    task = FuzzTask(
+        task_id="task-role-events",
+        node=_node(),
+        primary_target="172.18.4.12:3306",
+        replica_target="172.18.4.13:3307",
+        base_sql_bundle=load_base_sql_bundle(BUILTIN_BASE_SQL_DIR),
+        db=RoleDatabase("primary"),
+        primary_db_factory=lambda: RoleDatabase("primary"),
+        replica_db_factory=lambda: RoleDatabase("replica"),
+        thread_count=1,
+        enable_crud=True,
+        query_seed="104",
+        crud_seed="105",
+        metric_store=store,
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    query_worker = task._workers[0]
+    dml_worker = task._workers[1]
+    query_worker.db.failures = [LostConnectionError("备库断连")]
+    dml_worker.db.failures = [LostConnectionError("主库断连")]
+
+    task.step(query_worker.worker_id)
+    task.step(dml_worker.worker_id)
+
+    events = store.list_lost_connection_events(task.task_id)
+    by_role = {event["db_role"]: event for event in events}
+    assert set(by_role) == {"primary", "replica"}
+    assert by_role["replica"]["target"] == "172.18.4.13:3307"
+    assert by_role["replica"]["worker_type"] == "query"
+    assert by_role["replica"]["operation"] == "SELECT"
+    assert by_role["replica"]["generator_seed"] == task.worker_states[0]["generator_seed"]
+    assert by_role["primary"]["target"] == "172.18.4.12:3306"
+    assert by_role["primary"]["worker_type"] == "dml"
+    assert by_role["primary"]["table_name"] == dml_worker.table_name
+    assert by_role["primary"]["operation"] in {"INSERT", "UPDATE", "DELETE"}
+    assert not list((tmp_path / "logs").rglob("*.sql.jsonl"))
+    assert not list((tmp_path / "logs" / "failed_sql").rglob("*.sql"))
+
+
+def test_角色worker成功和普通错误只更新内存不逐条写sqlite指标(tmp_path: Path) -> None:
+    replica = RoleDatabase("replica")
+    task = FuzzTask(
+        task_id="task-role-memory-metrics",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: replica,
+        query_seed="106",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    metric_writes = 0
+    original_write_metrics = task._write_metrics
+
+    def count_metrics() -> None:
+        nonlocal metric_writes
+        metric_writes += 1
+        original_write_metrics()
+
+    task._write_metrics = count_metrics  # type: ignore[method-assign]
+    class FixedGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+        last_sql_validity = "合法"
+        last_risk_tags: list[str] = []
+        last_expected_error = False
+
+        def generate(self, *_args, **_kwargs) -> str:
+            return "SELECT 1"
+
+    task._workers[0].generator = FixedGenerator()
+    task.step(0)
+    replica.failures = [RuntimeError("普通 SQL 错误")]
+    task.step(0)
+
+    assert task.success_query_total == 1
+    assert task.failed_query_total == 1
+    assert metric_writes == 0
+
+
+def test_一个角色worker日志io阻塞不阻止另一个worker完成(tmp_path: Path) -> None:
+    replicas = [RoleDatabase("replica"), RoleDatabase("replica")]
+    iterator = iter(replicas)
+    task = FuzzTask(
+        task_id="task-role-log-lock",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: next(iterator),
+        thread_count=2,
+        query_seed="108",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+
+    class FixedGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+        last_sql_validity = "合法"
+        last_risk_tags: list[str] = []
+        last_expected_error = False
+
+        def generate(self, *_args, **_kwargs) -> str:
+            return "SELECT 1"
+
+    for worker in task._workers:
+        worker.generator = FixedGenerator()
+    log_started = threading.Event()
+    allow_log = threading.Event()
+    second_done = threading.Event()
+    original_write_log = task._write_sql_log
+
+    def blocking_write_log(status: str, sql: str, *args, **kwargs) -> None:
+        if kwargs.get("worker_key") == "query:0":
+            log_started.set()
+            assert allow_log.wait(timeout=3), "测试等待放行日志写入超时"
+        original_write_log(status, sql, *args, **kwargs)
+
+    task._write_sql_log = blocking_write_log  # type: ignore[method-assign]
+    first_thread = threading.Thread(target=lambda: task.step(0))
+    second_thread = threading.Thread(
+        target=lambda: (task.step(1), second_done.set())
+    )
+    first_thread.start()
+    assert log_started.wait(timeout=3)
+    second_thread.start()
+
+    assert second_done.wait(timeout=0.5), "另一个 worker 被日志 I/O 持有的 task 锁阻塞"
+    allow_log.set()
+    first_thread.join(timeout=3)
+    second_thread.join(timeout=3)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert task.success_query_total == 2
+
+
+def test_一个角色worker追加失败sql时不占用任务全局锁(tmp_path: Path) -> None:
+    replicas = [RoleDatabase("replica"), RoleDatabase("replica")]
+    iterator = iter(replicas)
+    task = FuzzTask(
+        task_id="task-role-failed-sql-lock",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=RoleDatabase("primary"),
+        replica_db_factory=lambda: next(iterator),
+        thread_count=2,
+        query_seed="110",
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+
+    class FixedGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+        last_sql_validity = "合法"
+        last_risk_tags: list[str] = []
+        last_expected_error = False
+
+        def generate(self, *_args, **_kwargs) -> str:
+            return "SELECT 1"
+
+    for worker in task._workers:
+        worker.generator = FixedGenerator()
+    replicas[0].failures = [RuntimeError("普通 SQL 错误")]
+    failed_sql_started = threading.Event()
+    allow_failed_sql = threading.Event()
+    second_done = threading.Event()
+    original_write_failed_sql = task._write_failed_sql
+
+    def blocking_write_failed_sql(sql: str) -> None:
+        failed_sql_started.set()
+        assert allow_failed_sql.wait(timeout=3), "测试等待放行失败 SQL 写入超时"
+        original_write_failed_sql(sql)
+
+    task._write_failed_sql = blocking_write_failed_sql  # type: ignore[method-assign]
+    first_thread = threading.Thread(target=lambda: task.step(0))
+    second_thread = threading.Thread(target=lambda: (task.step(1), second_done.set()))
+    first_thread.start()
+    assert failed_sql_started.wait(timeout=3)
+    second_thread.start()
+
+    try:
+        assert second_done.wait(timeout=0.5), "失败 SQL I/O 占用了任务全局锁"
+    finally:
+        allow_failed_sql.set()
+        first_thread.join(timeout=3)
+        second_thread.join(timeout=3)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert task.failed_query_total == 1
+    assert task.success_query_total == 1
 
 
 def _base_dir(tmp_path: Path) -> Path:

@@ -19,10 +19,10 @@
 - Test: `tests/test_dml.py`
 - Test: `tests/test_sqlgen.py`
 
-- [ ] 写失败测试：uint64 seed 规范化、SHA-256 worker 派生向量、同 seed DML 序列、三类操作、10 行上限、10/200 边界、永久表过滤、备查询无锁定读/临时表。
-- [ ] 运行聚焦测试并确认因模块/选项缺失而 RED。
-- [ ] 实现 `DML_GENERATOR_VERSION='v1'`、`QUERY_GENERATOR_VERSION='v1'`、`derive_worker_seed()`、`DMLGenerator.generate()` 和查询选项。
-- [ ] 运行 `pytest tests/test_dml.py tests/test_sqlgen.py -q` 并确认 GREEN。
+- [x] 写失败测试：uint64 seed 规范化、SHA-256 worker 派生向量、同 seed DML 序列、三类操作、10 行上限、10/200 边界、永久表过滤、备查询无锁定读/临时表。
+- [x] 运行聚焦测试并确认因模块/选项缺失而 RED。
+- [x] 实现 `DML_GENERATOR_VERSION='v1'`、`QUERY_GENERATOR_VERSION='v1'`、`derive_worker_seed()`、`DMLGenerator.generate()` 和查询选项。
+- [x] 运行 `pytest tests/test_dml.py tests/test_sqlgen.py -q` 并确认 GREEN。
 
 ### Task 2: 数据库返回影响行数与 worker 级运行时
 
@@ -31,10 +31,10 @@
 - Modify: `select_fuzz/runner/task.py`
 - Test: `tests/test_runner.py`
 
-- [ ] 写失败测试：`execute()` 返回 affected rows、74 永久表 DML worker + N 备查询 worker、角色路由、每 worker 独立客户端、普通错误静默继续、pending SQL断连原文重试、0.1～5 秒退避、单 worker 故障不改变全局 RUNNING、pause/resume/stop 资源清理。
-- [ ] 运行聚焦测试并确认 RED。
-- [ ] 扩展 `TaskWorker`/`WorkerRuntimeState`，实现 query/dml step 和独立重连，删除运行期全局 RECOVERING 依赖，保留初始化失败终态。
-- [ ] 运行 `pytest tests/test_runner.py -q` 并确认 GREEN。
+- [x] 写失败测试：`execute()` 返回 affected rows、74 永久表 DML worker + N 备查询 worker、角色路由、每 worker 独立客户端、普通错误静默继续、pending SQL断连原文重试、0.1～5 秒退避、单 worker 故障不改变全局 RUNNING、pause/resume/stop 资源清理。
+- [x] 运行聚焦测试并确认 RED。
+- [x] 扩展 `TaskWorker`/`WorkerRuntimeState`，实现 query/dml step 和独立重连，删除运行期全局 RECOVERING 依赖；初始化暂态错误后台无限重试，不可恢复错误保留失败终态。
+- [x] 运行 `pytest tests/test_runner.py -q` 并确认 GREEN。
 
 ### Task 3: API、服务双端点与双隧道生命周期
 
@@ -48,10 +48,10 @@
 - Test: `tests/test_jump.py`
 - Test: `tests/test_end_to_end.py`
 
-- [ ] 写失败测试：请求默认/校验、随机及显式 seed、主备节点继承、同地址允许、无 read_only 探针、自定义目录 CRUD 提前拒绝、74+N 工厂角色、双隧道、后台零成功等待、创建/停止竞态。
-- [ ] 运行聚焦测试并确认 RED。
-- [ ] 实现请求/响应字段、角色节点/工厂、双隧道和后台 worker 枚举；任务快照增加 CRUD、seed、路由与重连汇总。
-- [ ] 运行 `pytest tests/test_api.py tests/test_jump.py tests/test_end_to_end.py -q` 并确认 GREEN。
+- [x] 写失败测试：请求默认/校验、随机及显式 seed、主备节点继承、同地址允许、无 read_only 探针、自定义目录 CRUD 提前拒绝、74+N 工厂角色、双隧道、后台零成功等待、创建/停止竞态。
+- [x] 运行聚焦测试并确认 RED。
+- [x] 实现请求/响应字段、角色节点/工厂、双隧道、异步初始化重试和后台 worker 枚举；任务快照增加 CRUD、seed、路由与重连汇总。
+- [x] 运行 `pytest tests/test_api.py tests/test_jump.py tests/test_end_to_end.py -q` 并确认 GREEN。
 
 ### Task 4: 并发日志与指标
 
@@ -61,10 +61,10 @@
 - Modify: `select_fuzz/monitor/store.py`
 - Test: `tests/test_monitor.py`
 
-- [ ] 写失败测试：角色化日志字段、按路径并发 JSONL 完整性、主备重连分别去重、旧 SQLite schema 迁移和并发写入。
-- [ ] 运行聚焦测试并确认 RED。
-- [ ] 实现路径锁、角色事件字段、WAL/busy_timeout/写锁与兼容迁移。
-- [ ] 运行 `pytest tests/test_monitor.py -q` 并确认 GREEN。
+- [x] 写失败测试：角色化日志字段、按路径并发 JSONL 完整性、主备重连分别去重、旧 SQLite schema 迁移和并发写入。
+- [x] 运行聚焦测试并确认 RED。
+- [x] 实现路径锁、角色事件字段、WAL/busy_timeout/写锁与兼容迁移。
+- [x] 运行 `pytest tests/test_monitor.py -q` 并确认 GREEN。
 
 ### Task 5: 前端配置与任务卡
 
@@ -76,10 +76,10 @@
 - Modify: `web/src/App.tsx`
 - Modify: `web/src/styles.css`
 
-- [ ] 写失败测试：默认 16、CRUD 默认关、replica 端口继承、uint64 seed、旧响应规范化、主写备读/三组 seed/CRUD 汇总、74 worker 默认折叠、无复制延迟文案。
-- [ ] 运行 `node --test web/src/*.test.mjs` 并确认 RED。
-- [ ] 实现类型、纯函数、表单、卡片和响应式样式。
-- [ ] 运行 Node 测试和 `npm run build --prefix web` 并确认 GREEN。
+- [x] 写失败测试：默认 16、CRUD 默认关、replica 端口继承、uint64 seed、旧响应规范化、主写备读/三组 seed/CRUD 汇总、74 worker 默认折叠、无复制延迟文案。
+- [x] 运行 `node --test web/src/*.test.mjs` 并确认 RED。
+- [x] 实现类型、纯函数、表单、卡片和响应式样式。
+- [x] 运行 Node 测试和 `npm run build --prefix web` 并确认 GREEN。
 
 ### Task 6: 文档、回归与审查
 
@@ -88,7 +88,7 @@
 - Modify: `configs/示例运行参数.yaml`
 - Test: all relevant test files
 
-- [ ] 更新中文 README/示例，明确 74 主连接 + N 备连接、无只读检查/复制等待、无限独立重连、种子与停止语义。
-- [ ] 运行后端全量测试、前端测试和构建、`compileall`、validator、`git diff --check`。
-- [ ] 完成规格审查与代码质量审查，修复所有 Critical/Important。
-- [ ] 提交到集成 worktree，快进主分支并推送 `origin/main`，确认远端只保留 main。
+- [x] 更新中文 README/示例，明确 74 主连接 + N 备连接、无只读检查/复制等待、无限独立重连、种子与停止语义。
+- [x] 运行后端全量测试、前端测试和构建、`compileall`、validator、`git diff --check`。
+- [x] 完成规格审查与代码质量审查，修复所有 Critical/Important。
+- [x] 提交到集成 worktree，快进主分支并推送 `origin/main`，确认远端只保留 main。

@@ -107,28 +107,22 @@ def test_crud_v1_seed_101_前六条计划金标() -> None:
         (plan.operation.value, plan.requested_rows)
         for plan in plans
     ] == [
-        ("DELETE", 4),
+        ("INSERT", 5),
         ("UPDATE", 1),
-        ("UPDATE", 8),
-        ("UPDATE", 2),
-        ("INSERT", 2),
-        ("DELETE", 6),
+        ("INSERT", 9),
+        ("DELETE", 10),
+        ("INSERT", 1),
+        ("INSERT", 3),
     ]
-    assert plans[0].sql == "DELETE FROM `t0` ORDER BY RAND(1540496234) LIMIT 4"
+    assert "SELECT `n` + 12242 AS `n`" in (plans[0].sql or "")
     assert plans[1].sql == (
-        "UPDATE `t0` SET `binary_col` = IF(`binary_col` IS NULL, X'', NULL) "
-        "ORDER BY RAND(952178134) LIMIT 1"
+        "UPDATE `t0` SET `bool_col` = IF(`bool_col` IS NULL, 0, NULL) "
+        "ORDER BY RAND(334776529) LIMIT 1"
     )
-    assert plans[2].sql == (
-        "UPDATE `t0` SET `binary_col` = IF(`binary_col` IS NULL, X'', NULL) "
-        "ORDER BY RAND(1413205252) LIMIT 8"
-    )
-    assert plans[3].sql == (
-        "UPDATE `t0` SET `varbinary_col` = IF(`varbinary_col` IS NULL, X'', NULL) "
-        "ORDER BY RAND(830159750) LIMIT 2"
-    )
-    assert "SELECT `n` + 15588 AS `n`" in (plans[4].sql or "")
-    assert plans[5].sql == "DELETE FROM `t0` ORDER BY RAND(822964419) LIMIT 6"
+    assert "SELECT `n` + 12092 AS `n`" in (plans[2].sql or "")
+    assert plans[3].sql == "DELETE FROM `t0` ORDER BY RAND(1321591283) LIMIT 10"
+    assert "SELECT `n` + 22022 AS `n`" in (plans[4].sql or "")
+    assert "SELECT `n` + 5506 AS `n`" in (plans[5].sql or "")
 
 
 def test_软边界强制_insert_delete_且每次最多十行() -> None:

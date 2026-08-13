@@ -41,7 +41,7 @@ class RuntimeConfig:
     failed_sql_dir: Path = Path("logs/failed_sql")
     lost_connection_dedup_minutes: int = 10
     recovery_probe_seconds: int = 60
-    default_thread_count: int = 1
+    default_thread_count: int = 16
     jump_hosts: List[JumpHostConfig] = field(default_factory=list)
     target_nodes: List[TargetNodeConfig] = field(default_factory=list)
 

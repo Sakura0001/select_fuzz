@@ -28,7 +28,10 @@ def create_app(service: RuntimeService) -> FastAPI:
 
     @app.post("/api/tasks", response_model=TaskResponse)
     def create_task(request: TaskCreateRequest) -> dict:
-        return service.create_task(request).to_dict()
+        try:
+            return service.create_task(request).to_dict()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/tasks/{task_id}", response_model=TaskResponse)
     def get_task(task_id: str) -> dict:

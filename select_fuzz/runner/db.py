@@ -14,7 +14,7 @@ class DatabaseClient(Protocol):
     def connect(self) -> None:
         ...
 
-    def execute(self, sql: str) -> None:
+    def execute(self, sql: str) -> int:
         ...
 
     def query_scalar(self, sql: str) -> int:
@@ -55,12 +55,13 @@ class PyMySQLClient:
         self._connect_count += 1
         self._refresh_connection_id()
 
-    def execute(self, sql: str) -> None:
+    def execute(self, sql: str) -> int:
         if self._connection is None:
             raise RuntimeError("数据库连接尚未显式建立")
         try:
             with self._connection.cursor() as cursor:
                 cursor.execute(sql)
+                return int(cursor.rowcount or 0)
         except Exception as exc:
             if is_lost_connection_error(exc):
                 raise LostConnectionError(str(exc)) from exc

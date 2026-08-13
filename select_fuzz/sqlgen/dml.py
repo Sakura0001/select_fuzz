@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import random
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -11,6 +10,7 @@ from typing import Optional, Sequence
 from select_fuzz.base_tables import v1
 from select_fuzz.metadata.models import ColumnMetadata, ColumnTypeFamily, TableMetadata
 
+from .rng import FrozenRandomV1, RandomSource
 from .seeds import CURRENT_CRUD_GENERATOR_VERSION, normalize_uint64_seed
 
 
@@ -59,8 +59,16 @@ def eligible_v1_permanent_tables(tables: Sequence[TableMetadata]) -> tuple[Table
 class DMLGenerator:
     """使用独立随机序列为单个 v1 永久表生成有界 DML。"""
 
-    def __init__(self, random_seed: int | None = None, *, base_table_seed: str = "0") -> None:
-        self.random = random.Random(random_seed)
+    def __init__(
+        self,
+        random_seed: int | None = None,
+        *,
+        base_table_seed: str = "0",
+        rng: RandomSource | None = None,
+    ) -> None:
+        if random_seed is not None and rng is not None:
+            raise ValueError("random_seed 与 rng 不能同时传入")
+        self.random = rng if rng is not None else FrozenRandomV1(random_seed)
         self.base_table_seed = normalize_uint64_seed(base_table_seed)
         self.generator_version = CURRENT_CRUD_GENERATOR_VERSION
         self._insert_value_cache: dict[tuple[int, tuple[str, ...]], Optional[tuple[str, ...]]] = {}

@@ -3,21 +3,23 @@ from __future__ import annotations
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 from select_fuzz.api.app import create_app, create_default_app
 from select_fuzz.api.schemas import TaskCreateRequest
-from select_fuzz.api.service import BUILTIN_BASE_SQL_DIR, RuntimeService
+from select_fuzz.api.service import BUILTIN_BASE_SQL_DIR, RuntimeService, TaskSnapshot
 from select_fuzz.base_tables import build_base_sql_bundle
 from select_fuzz.base_tables import registry as base_table_registry
+from select_fuzz.config import TargetNodeConfig
 from select_fuzz.metadata.models import BaseSqlFile
 from select_fuzz.monitor.events import LostConnectionEvent
 from select_fuzz.monitor.logs import SqlLogRecord, append_jsonl
 from select_fuzz.monitor.store import MetricStore
 from select_fuzz.runner.db import DatabaseClient, LostConnectionError
-from select_fuzz.runner.task import TaskStatus
+from select_fuzz.runner.task import FuzzTask, TaskStatus
 
 
 class ApiFakeDatabase(DatabaseClient):
@@ -155,6 +157,671 @@ def _start_creating_task(
     return thread, result
 
 
+def test_生产模式post不等待首次主库连接且停止会关闭迟到连接(tmp_path: Path) -> None:
+    class BlockingInitialDatabase(ApiFakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_started = threading.Event()
+            self.allow_connect = threading.Event()
+            self.closed = threading.Event()
+
+        def connect(self) -> None:
+            self.connect_count += 1
+            self.connect_started.set()
+            assert self.allow_connect.wait(timeout=3), "测试等待放行首次连接超时"
+
+        def close(self) -> None:
+            self.closed.set()
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    database = BlockingInitialDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: database,
+        run_background=True,
+    )
+
+    response = TestClient(create_app(service)).post("/api/tasks", json=_task_payload(thread_count=3))
+
+    assert response.status_code == 200
+    assert database.connect_started.wait(timeout=3)
+    assert response.json()["status"] in {"新建", "连接实例"}
+    task_id = response.json()["task_id"]
+    assert service.get_task(task_id)["worker_total"] == 3
+    stopped = service.stop_task(task_id)
+    database.allow_connect.set()
+    initializer = service._initialization_threads.get(task_id)
+    if initializer is not None:
+        initializer.join(timeout=3)
+
+    assert stopped.status == "已停止"
+    assert database.executed == []
+    assert database.closed.is_set()
+    assert task_id not in service._real_tasks
+
+
+def test_initializer线程启动失败会收敛为失败快照且不残留登记(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: ApiFakeDatabase(),
+        run_background=True,
+    )
+    original_start = threading.Thread.start
+
+    def fail_initializer_start(thread: threading.Thread) -> None:
+        if thread.name.endswith("-initializer"):
+            raise RuntimeError("模拟 initializer 线程启动失败")
+        original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_initializer_start)
+
+    snapshot = service.create_task(TaskCreateRequest(**_task_payload()))
+
+    assert snapshot.status == "失败"
+    assert snapshot.phase == "连接实例"
+    assert "initializer 线程启动失败" in (snapshot.last_error or "")
+    assert snapshot.task_id not in service._initialization_threads
+    assert snapshot.task_id not in service._initialization_stop_events
+    assert snapshot.task_id not in service._initialization_wake_events
+    assert snapshot.task_id not in service._real_tasks
+
+
+def test_初始化重试退避可被pause中断且resume立即继续(tmp_path: Path) -> None:
+    class RetryConnectDatabase(ApiFakeDatabase):
+        def connect(self) -> None:
+            self.connect_count += 1
+            raise LostConnectionError("connection refused")
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    retry_wait_started = threading.Event()
+    paused_wait_started = threading.Event()
+    waits: list[float | None] = []
+
+    def controlled_wait(wake_event: threading.Event, delay: float | None) -> bool:
+        waits.append(delay)
+        if delay is None:
+            paused_wait_started.set()
+        else:
+            retry_wait_started.set()
+        result = wake_event.wait(timeout=3)
+        wake_event.clear()
+        return result
+
+    database = RetryConnectDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: database,
+        run_background=True,
+        initialization_wait=controlled_wait,
+    )
+    response = TestClient(create_app(service)).post("/api/tasks", json=_task_payload(thread_count=3))
+    task_id = response.json()["task_id"]
+    assert retry_wait_started.wait(timeout=3)
+    assert service.get_task(task_id)["worker_total"] == 3
+
+    paused = service.pause_task(task_id)
+
+    assert paused.status == "已暂停"
+    assert paused_wait_started.wait(timeout=3)
+    connect_count_while_paused = database.connect_count
+    resumed = service.resume_task(task_id)
+    assert resumed.status in {"连接实例", "准备基表"}
+    retry_wait_started.clear()
+    assert retry_wait_started.wait(timeout=3)
+    assert database.connect_count == connect_count_while_paused + 1
+    assert [delay for delay in waits if delay is not None][:2] == [0.1, 0.2]
+
+    service.stop_task(task_id)
+
+
+def test_initializer进入下一轮前收到pause不会覆盖暂停或继续连接(tmp_path: Path) -> None:
+    class RetryConnectDatabase(ApiFakeDatabase):
+        def connect(self) -> None:
+            self.connect_count += 1
+            raise LostConnectionError("connection refused")
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    next_attempt_entered = threading.Event()
+    allow_next_attempt = threading.Event()
+    database = RetryConnectDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: database,
+        run_background=True,
+        initialization_wait=lambda _event, _delay: False,
+    )
+    original_initialize = service._initialize_task_once
+    attempts = 0
+
+    def block_second_attempt(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            next_attempt_entered.set()
+            assert allow_next_attempt.wait(timeout=3), "测试等待放行下一轮初始化超时"
+        return original_initialize(**kwargs)
+
+    service._initialize_task_once = block_second_attempt  # type: ignore[method-assign]
+    snapshot = service.create_task(TaskCreateRequest(**_task_payload()))
+    assert next_attempt_entered.wait(timeout=3)
+
+    paused = service.pause_task(snapshot.task_id)
+    connect_count_at_pause = database.connect_count
+    allow_next_attempt.set()
+    initializer = service._initialization_threads.get(snapshot.task_id)
+    assert initializer is not None
+    # initializer 应在暂停等待中保持存活，但不能再进入 connect。
+    threading.Event().wait(0.05)
+
+    current = service.get_task(snapshot.task_id)
+    assert paused.status == "已暂停"
+    assert current["status"] == "已暂停"
+    assert database.connect_count == connect_count_at_pause
+    service.stop_task(snapshot.task_id)
+
+
+def test_initializer当轮db_factory暂态失败不会覆盖并发pause(tmp_path: Path) -> None:
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    first_factory_entered = threading.Event()
+    allow_first_failure = threading.Event()
+    paused_wait_started = threading.Event()
+    second_factory_entered = threading.Event()
+    calls = 0
+
+    def db_factory(_node):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_factory_entered.set()
+            assert allow_first_failure.wait(timeout=3), "测试等待放行首次工厂失败超时"
+            raise LostConnectionError("connection refused")
+        second_factory_entered.set()
+        return ApiFakeDatabase()
+
+    def controlled_wait(wake_event: threading.Event, delay: float | None) -> bool:
+        if delay is None:
+            paused_wait_started.set()
+        result = wake_event.wait(timeout=3)
+        wake_event.clear()
+        return result
+
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=db_factory,
+        run_background=True,
+        initialization_wait=controlled_wait,
+    )
+    snapshot = service.create_task(TaskCreateRequest(**_task_payload()))
+    assert first_factory_entered.wait(timeout=3)
+
+    paused = service.pause_task(snapshot.task_id)
+    allow_first_failure.set()
+    assert paused_wait_started.wait(timeout=3)
+
+    current = service.get_task(snapshot.task_id)
+    assert paused.status == "已暂停"
+    assert current["status"] == "已暂停"
+    assert calls == 1
+
+    service.resume_task(snapshot.task_id)
+    assert second_factory_entered.wait(timeout=3)
+    service.stop_task(snapshot.task_id)
+
+
+def test_基表包准备期间可暂停并恢复且不会误报实例不存在(tmp_path: Path) -> None:
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: ApiFakeDatabase(),
+        run_background=True,
+    )
+    prepare_entered = threading.Event()
+    allow_prepare = threading.Event()
+    initializer_started = threading.Event()
+    original_prepare = service._prepare_base_sql_bundle
+    original_start_initializer = service._start_initializer
+
+    def blocked_prepare(**kwargs):
+        prepare_entered.set()
+        assert allow_prepare.wait(timeout=3), "测试等待放行基表包准备超时"
+        return original_prepare(**kwargs)
+
+    def record_initializer(**kwargs):
+        initializer_started.set()
+        return original_start_initializer(**kwargs)
+
+    service._prepare_base_sql_bundle = blocked_prepare  # type: ignore[method-assign]
+    service._start_initializer = record_initializer  # type: ignore[method-assign]
+    created: list = []
+    create_thread = threading.Thread(
+        target=lambda: created.append(service.create_task(TaskCreateRequest(**_task_payload()))),
+    )
+    create_thread.start()
+    assert prepare_entered.wait(timeout=3)
+    task_id = service.list_tasks()[0]["task_id"]
+
+    paused = service.pause_task(task_id)
+    assert paused.status == "已暂停"
+    resumed = service.resume_task(task_id)
+    assert resumed.status == "连接实例"
+    allow_prepare.set()
+    create_thread.join(timeout=3)
+
+    assert not create_thread.is_alive()
+    assert initializer_started.wait(timeout=3)
+    assert created and created[0].status != "失败"
+    service.stop_task(task_id)
+
+
+def test_生产模式确定性ddl错误仍在准备基表阶段失败(tmp_path: Path) -> None:
+    class DeterministicDdlDatabase(ApiFakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed = threading.Event()
+
+        def execute(self, sql: str) -> None:
+            super().execute(sql)
+            if sql.startswith("CREATE TABLE"):
+                self.failed.set()
+                raise RuntimeError(1064, "SQL syntax error")
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    database = DeterministicDdlDatabase()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: database,
+        run_background=True,
+    )
+
+    response = TestClient(create_app(service)).post("/api/tasks", json=_task_payload(thread_count=1))
+    task_id = response.json()["task_id"]
+    assert database.failed.wait(timeout=3)
+    initializer = service._initialization_threads.get(task_id)
+    if initializer is not None:
+        initializer.join(timeout=3)
+
+    snapshot = service.get_task(task_id)
+    assert snapshot["status"] == "失败"
+    assert snapshot["phase"] == "准备基表"
+    assert "SQL syntax error" in snapshot["last_error"]
+
+
+def test_生产模式跳板隧道真实暂态异常按退避重试(tmp_path: Path, monkeypatch) -> None:
+    from sshtunnel import BaseSSHTunnelForwarderError
+
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    events: list[str] = []
+    waits: list[float | None] = []
+    attempts = 0
+    initialized = threading.Event()
+
+    class RetryTunnel:
+        local_host = "127.0.0.1"
+        local_port = 44001
+
+        def __init__(self, jump_host, target_node) -> None:
+            del jump_host, target_node
+
+        def start(self) -> tuple[str, int]:
+            nonlocal attempts
+            attempts += 1
+            events.append("start")
+            if attempts == 1:
+                raise BaseSSHTunnelForwarderError("Could not establish session to SSH gateway")
+            return self.local_host, self.local_port
+
+        def stop(self) -> None:
+            events.append("stop")
+
+    monkeypatch.setattr("select_fuzz.api.service.JumpTunnel", RetryTunnel)
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: ApiFakeDatabase(),
+        run_background=True,
+        initialization_wait=lambda _event, delay: waits.append(delay) or False,
+    )
+    service.add_jump_host(
+        {"name": "jump-prod", "host": "10.2.0.8", "port": 22, "username": "ops"}
+    )
+    service._start_background_loop = lambda _task: initialized.set()  # type: ignore[method-assign]
+
+    response = TestClient(create_app(service)).post(
+        "/api/tasks",
+        json=_task_payload(thread_count=1, jump_host="jump-prod"),
+    )
+    task_id = response.json()["task_id"]
+    assert initialized.wait(timeout=3)
+
+    assert waits == [0.1]
+    assert events == ["start", "stop", "start"]
+    assert service.get_task(task_id)["status"] == "执行 SQL"
+    service.stop_task(task_id)
+    assert events == ["start", "stop", "start", "stop"]
+
+
+@pytest.mark.parametrize(
+    ("case_name", "role_runtime", "expected_waits"),
+    [
+        ("legacy 成功", False, [0.37]),
+        ("legacy 普通错误", False, [0.37]),
+        ("role 成功", True, []),
+    ],
+)
+def test_后台循环仅legacy零延迟step等待查询间隔(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case_name: str,
+    role_runtime: bool,
+    expected_waits: list[float],
+) -> None:
+    del case_name
+
+    class FakeStopEvent:
+        def __init__(self) -> None:
+            self.waits: list[float] = []
+            self.stopped = False
+
+        def is_set(self) -> bool:
+            return self.stopped
+
+        def set(self) -> None:
+            self.stopped = True
+
+        def clear(self) -> None:
+            return None
+
+        def wait(self, seconds: float) -> bool:
+            self.waits.append(seconds)
+            return self.stopped
+
+    class FakeThread:
+        def __init__(self, *, target, args, name: str, daemon: bool) -> None:
+            del daemon
+            self.target = target
+            self.args = args
+            self.name = name
+            self.started = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def run(self) -> None:
+            self.target(*self.args)
+
+        def is_alive(self) -> bool:
+            return self.started
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    class FakeTask:
+        task_id = "task-loop-wait"
+        status = TaskStatus.RUNNING
+        worker_ids = [0]
+
+        def __init__(self) -> None:
+            self._role_runtime = role_runtime
+            self.terminal = False
+
+        @property
+        def is_terminal(self) -> bool:
+            return self.terminal
+
+        def interrupt_stalled_workers(self, _timeout: int) -> list[int]:
+            return []
+
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        run_background=False,
+        query_interval_seconds=0.37,
+    )
+    task = FakeTask()
+    service._tasks[task.task_id] = TaskSnapshot(
+        task_id=task.task_id,
+        node_name="node-a",
+        target="127.0.0.1:3306",
+    )
+    stop_event = FakeStopEvent()
+    monkeypatch.setattr("select_fuzz.api.service.threading.Event", lambda: stop_event)
+    monkeypatch.setattr("select_fuzz.api.service.threading.Thread", FakeThread)
+
+    def one_step(_task, _worker_id: int) -> float:
+        task.terminal = True
+        return 0
+
+    service._run_task_step = one_step  # type: ignore[method-assign]
+    service._start_background_loop(task)  # type: ignore[arg-type]
+    worker_thread = service._background_worker_threads[task.task_id][0]
+    worker_thread.run()
+
+    assert stop_event.waits == expected_waits
+
+
+def test_pause和resume会立即唤醒角色worker长退避且生命周期清理event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_event_class = threading.Event
+    real_thread_class = threading.Thread
+
+    class ControlledEvent:
+        def __init__(self) -> None:
+            self.inner = real_event_class()
+            self.wait_started = real_event_class()
+            self.waits: list[float | None] = []
+
+        def is_set(self) -> bool:
+            return self.inner.is_set()
+
+        def set(self) -> None:
+            self.inner.set()
+
+        def clear(self) -> None:
+            self.inner.clear()
+
+        def wait(self, seconds: float | None = None) -> bool:
+            self.waits.append(seconds)
+            self.wait_started.set()
+            return self.inner.wait(seconds)
+
+    class FakeThread:
+        def __init__(self, *, target, args, name: str, daemon: bool) -> None:
+            del daemon
+            self.target = target
+            self.args = args
+            self.name = name
+
+        def start(self) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    task = FuzzTask(
+        task_id="task-wake-retry",
+        node=TargetNodeConfig(
+            name="node-a",
+            host="172.18.4.12",
+            port=3306,
+            username="fuzz",
+            password="secret",
+        ),
+        base_sql_bundle=_small_bundle(),
+        db=ApiFakeDatabase(),
+        replica_db_factory=lambda: ApiFakeDatabase(),
+        query_seed="107",
+        metric_store=MetricStore(tmp_path / "task.db"),
+        log_dir=tmp_path / "logs",
+        clock=lambda: datetime.now(timezone.utc),
+    )
+    task.start()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "service.db"),
+        log_dir=tmp_path / "logs",
+        run_background=False,
+    )
+    service._tasks[task.task_id] = TaskSnapshot(
+        task_id=task.task_id,
+        node_name="node-a",
+        target="172.18.4.12:3306",
+    )
+    service._real_tasks[task.task_id] = task
+    events = [ControlledEvent(), ControlledEvent()]
+    event_iter = iter(events)
+    monkeypatch.setattr(
+        "select_fuzz.api.service.threading",
+        SimpleNamespace(
+            Event=lambda: next(event_iter),
+            Thread=FakeThread,
+            current_thread=threading.current_thread,
+        ),
+    )
+    steps = 0
+
+    def retry_then_stop(_task, _worker_id: int) -> float:
+        nonlocal steps
+        steps += 1
+        if steps == 1:
+            return 5.0
+        task.stop()
+        return 0
+
+    service._run_task_step = retry_then_stop  # type: ignore[method-assign]
+    service._start_background_loop(task)
+    fake_worker = service._background_worker_threads[task.task_id][0]
+    worker_thread = real_thread_class(target=lambda: fake_worker.target(*fake_worker.args))
+    worker_thread.start()
+    wake_event = service._background_wake_events[task.task_id][0]
+    assert wake_event.wait_started.wait(timeout=3)
+
+    service.pause_task(task.task_id)
+    deadline = real_event_class()
+    for _ in range(1000):
+        if len(wake_event.waits) >= 2:
+            break
+        deadline.wait(0.001)
+    assert len(wake_event.waits) >= 2
+    assert steps == 1
+    assert worker_thread.is_alive()
+
+    service.resume_task(task.task_id)
+    worker_thread.join(timeout=3)
+
+    assert not worker_thread.is_alive()
+    assert steps == 2
+    service._sync_snapshot_from_task(task)
+    service._background_worker_threads[task.task_id].clear()
+    service._creating_task_ids.discard(task.task_id)
+    service._try_finalize_terminal_task(task.task_id)
+    assert task.task_id not in service._background_wake_events
+
+
+def test_pause会广播唤醒全部角色worker且任一worker不能吞掉其他信号(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeThread:
+        def __init__(self, *, target, args, name: str, daemon: bool) -> None:
+            del daemon
+            self.target = target
+            self.args = args
+            self.name = name
+
+        def start(self) -> None:
+            return None
+
+        def is_alive(self) -> bool:
+            return False
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+
+    task = FuzzTask(
+        task_id="task-broadcast-wake",
+        node=TargetNodeConfig(
+            name="node-a",
+            host="172.18.4.12",
+            port=3306,
+            username="fuzz",
+            password="secret",
+        ),
+        base_sql_bundle=_small_bundle(),
+        db=ApiFakeDatabase(),
+        replica_db_factory=lambda: ApiFakeDatabase(),
+        thread_count=2,
+        query_seed="112",
+        metric_store=MetricStore(tmp_path / "task.db"),
+        log_dir=tmp_path / "logs",
+        clock=lambda: datetime.now(timezone.utc),
+    )
+    task.start()
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "service.db"),
+        log_dir=tmp_path / "logs",
+        run_background=False,
+    )
+    service._tasks[task.task_id] = TaskSnapshot(
+        task_id=task.task_id,
+        node_name="node-a",
+        target="172.18.4.12:3306",
+        status=TaskStatus.RUNNING.value,
+    )
+    service._real_tasks[task.task_id] = task
+    monkeypatch.setattr("select_fuzz.api.service.threading.Thread", FakeThread)
+
+    service._start_background_loop(task)
+    wake_events = service._background_wake_events[task.task_id]
+    assert set(wake_events) == {0, 1}
+    assert len({id(event) for event in wake_events.values()}) == 2
+
+    service.pause_task(task.task_id)
+
+    assert all(event.is_set() for event in wake_events.values())
+    wake_events[0].clear()
+    assert wake_events[1].is_set()
+    service.stop_task(task.task_id)
+
+
 def test_创建任务默认关闭扩列并返回空复现参数(tmp_path: Path) -> None:
     response = _client(tmp_path).post("/api/tasks", json=_task_payload())
 
@@ -162,6 +829,292 @@ def test_创建任务默认关闭扩列并返回空复现参数(tmp_path: Path) 
     assert response.json()["expand_base_table_columns"] is False
     assert response.json()["base_table_seed"] is None
     assert response.json()["base_table_generator_version"] is None
+
+
+def test_任务请求默认关闭crud并使用16个查询worker且生成查询种子(tmp_path: Path) -> None:
+    response = _client(tmp_path).post("/api/tasks", json=_task_payload())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["enable_crud"] is False
+    assert payload["thread_count"] == 16
+    assert payload["query_worker_total"] == 16
+    assert payload["crud_worker_total"] == 0
+    assert payload["worker_total"] == 16
+    assert payload["query_seed"].isdigit()
+    assert payload["query_generator_version"] == "v1"
+    assert payload["crud_seed"] is None
+    assert payload["crud_generator_version"] is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    (
+        ({"query_generator_version": "v999"}, "未知查询生成器版本"),
+        (
+            {"enable_crud": True, "crud_generator_version": "v999"},
+            "未知 CRUD 生成器版本",
+        ),
+    ),
+)
+def test_创建任务拒绝未知query与crud生成器版本(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    response = _client(tmp_path).post(
+        "/api/tasks",
+        json=_task_payload(**overrides),
+    )
+
+    assert response.status_code == 422
+    assert message in response.text
+
+
+def test_备库端口继承主端口且允许主备同地址并保留显式种子(tmp_path: Path) -> None:
+    response = _client(tmp_path).post(
+        "/api/tasks",
+        json=_task_payload(
+            replica_host="172.18.4.12",
+            enable_crud=True,
+            thread_count=1,
+            query_seed="0",
+            query_generator_version="v1",
+            crud_seed=str(2**64 - 1),
+            crud_generator_version="v1",
+        ),
+    )
+
+    assert response.status_code == 422  # 自定义基表目录必须先于任何连接拒绝 CRUD
+    assert "自定义基表目录不支持逐表 CRUD" in response.text
+
+
+def test_只有备库端口没有备库地址返回422(tmp_path: Path) -> None:
+    response = _client(tmp_path).post(
+        "/api/tasks",
+        json=_task_payload(replica_port=3307),
+    )
+
+    assert response.status_code == 422
+    assert "replica_host" in response.text
+
+
+@pytest.mark.parametrize("field", ["query_seed", "crud_seed"])
+@pytest.mark.parametrize("value", [1, True, "01", "-1", str(2**64)])
+def test_任务种子必须是规范uint64字符串(tmp_path: Path, field: str, value: object) -> None:
+    response = _client(tmp_path).post(
+        "/api/tasks",
+        json=_task_payload(**{field: value}),
+    )
+
+    assert response.status_code == 422
+
+
+def test_关闭crud时查询客户端路由到备库且主库只做初始化(tmp_path: Path) -> None:
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    created: list[tuple[str, int, ApiFakeDatabase]] = []
+
+    def factory(node):
+        db = ApiFakeDatabase()
+        created.append((node.host, node.port, db))
+        return db
+
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=factory,
+        run_background=False,
+    )
+    response = TestClient(create_app(service)).post(
+        "/api/tasks",
+        json=_task_payload(replica_host="172.18.4.13", replica_port=3307, thread_count=2),
+    )
+
+    assert response.status_code == 200
+    task = service._real_tasks[response.json()["task_id"]]
+    assert [(host, port) for host, port, _db in created] == [
+        ("172.18.4.12", 3306),
+        ("172.18.4.13", 3307),
+        ("172.18.4.13", 3307),
+    ]
+    task.step(0)
+    query_prefixes = ("SELECT", "WITH", "(", "TABLE", "VALUES")
+    assert any(sql.strip().upper().startswith(query_prefixes) for sql in created[1][2].executed)
+    assert not any(sql.strip().upper().startswith(query_prefixes) for sql in created[0][2].executed)
+
+
+def test_内置基表crud允许主备同地址并返回74加n汇总(tmp_path: Path) -> None:
+    created: list[tuple[str, int, ApiFakeDatabase]] = []
+
+    def factory(node):
+        db = ApiFakeDatabase()
+        created.append((node.host, node.port, db))
+        return db
+
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=BUILTIN_BASE_SQL_DIR,
+        db_factory=factory,
+        run_background=False,
+    )
+    response = TestClient(create_app(service)).post(
+        "/api/tasks",
+        json=_task_payload(
+            replica_host="172.18.4.12",
+            enable_crud=True,
+            thread_count=1,
+            query_seed="0",
+            query_generator_version="v1",
+            crud_seed=str(2**64 - 1),
+            crud_generator_version="v1",
+        ),
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status"] == "执行 SQL"
+    assert payload["primary_target"] == "172.18.4.12:3306"
+    assert payload["replica_target"] == "172.18.4.12:3306"
+    assert payload["replica_host"] == "172.18.4.12"
+    assert payload["replica_port"] == 3306
+    assert payload["query_seed"] == "0"
+    assert payload["crud_seed"] == str(2**64 - 1)
+    assert payload["query_worker_total"] == 1
+    assert payload["crud_worker_total"] == 74
+    assert payload["worker_total"] == 75
+    assert len(created) == 75
+    assert len({id(row[2]) for row in created}) == 75
+
+
+def test_未填写备节点时响应返回回退到主节点的replica_target(tmp_path: Path) -> None:
+    response = _client(tmp_path).post("/api/tasks", json=_task_payload(thread_count=1))
+
+    assert response.status_code == 200
+    assert response.json()["replica_target"] == "172.18.4.12:3306"
+
+
+def test_主备配置跳板机时分别建立并关闭两个隧道(tmp_path: Path, monkeypatch) -> None:
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    events: list[tuple[str, str]] = []
+
+    class FakeTunnel:
+        local_host = "127.0.0.1"
+        local_port = 44001
+
+        def __init__(self, jump_host, target_node) -> None:
+            del jump_host
+            self.target_node = target_node
+
+        def start(self):
+            events.append(("start", self.target_node.host))
+            return self.local_host, self.local_port
+
+        def stop(self):
+            events.append(("stop", self.target_node.host))
+
+    monkeypatch.setattr("select_fuzz.api.service.JumpTunnel", FakeTunnel)
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: ApiFakeDatabase(),
+        run_background=False,
+    )
+    service.add_jump_host(
+        {"name": "jump-prod", "host": "10.2.0.8", "port": 22, "username": "ops"}
+    )
+    client = TestClient(create_app(service))
+    response = client.post(
+        "/api/tasks",
+        json=_task_payload(
+            jump_host="jump-prod",
+            replica_host="172.18.4.13",
+            replica_port=3307,
+            thread_count=1,
+        ),
+    )
+    client.post(f"/api/tasks/{response.json()['task_id']}/stop")
+
+    assert events == [
+        ("start", "172.18.4.12"),
+        ("start", "172.18.4.13"),
+        ("stop", "172.18.4.12"),
+        ("stop", "172.18.4.13"),
+    ]
+
+
+def test_initializer成功后并发暂停不会关闭活动任务的主备隧道(tmp_path: Path, monkeypatch) -> None:
+    base_dir = tmp_path / "base"
+    base_dir.mkdir()
+    (base_dir / "t0.sql").write_text("CREATE TABLE t0 (id BIGINT);", encoding="utf-8")
+    tunnels: list = []
+
+    class FakeTunnel:
+        local_host = "127.0.0.1"
+
+        def __init__(self, jump_host, target_node) -> None:
+            del jump_host
+            self.target_node = target_node
+            self.local_port = 44001 + len(tunnels)
+            self.stop_count = 0
+            tunnels.append(self)
+
+        def start(self):
+            return self.local_host, self.local_port
+
+        def stop(self):
+            self.stop_count += 1
+
+    monkeypatch.setattr("select_fuzz.api.service.JumpTunnel", FakeTunnel)
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=base_dir,
+        db_factory=lambda _node: ApiFakeDatabase(),
+        run_background=True,
+    )
+    service.add_jump_host(
+        {"name": "jump-prod", "host": "10.2.0.8", "port": 22, "username": "ops"}
+    )
+    background_entered = threading.Event()
+    allow_background_return = threading.Event()
+
+    def blocked_background(_task) -> None:
+        background_entered.set()
+        assert allow_background_return.wait(timeout=3), "测试等待放行后台登记超时"
+
+    service._start_background_loop = blocked_background  # type: ignore[method-assign]
+    snapshot = service.create_task(
+        TaskCreateRequest(
+            **_task_payload(
+                jump_host="jump-prod",
+                replica_host="172.18.4.13",
+                replica_port=3307,
+                thread_count=1,
+            )
+        )
+    )
+    assert background_entered.wait(timeout=3)
+    assert len(tunnels) == 2
+
+    paused = service.pause_task(snapshot.task_id)
+    allow_background_return.set()
+    initializer = service._initialization_threads.get(snapshot.task_id)
+    if initializer is not None:
+        initializer.join(timeout=3)
+
+    assert paused.status == "已暂停"
+    assert [tunnel.stop_count for tunnel in tunnels] == [0, 0]
+    assert set(service._task_tunnels[snapshot.task_id]) == {"primary", "replica"}
+
+    service.stop_task(snapshot.task_id)
+    assert [tunnel.stop_count for tunnel in tunnels] == [1, 1]
 
 
 @pytest.mark.parametrize("value", [0, 1, "true", "false"])
@@ -517,10 +1470,8 @@ def test_扩展生成器返回非法结构时在准备基表阶段失败且数�
     assert database.executed == []
 
 
-@pytest.mark.parametrize("action", ("stop", "pause"))
-def test_准备基表包期间终态请求会阻止继续创建任何运行资源(
+def test_准备基表包期间停止会阻止继续创建任何运行资源(
     tmp_path: Path,
-    action: str,
 ) -> None:
     base_dir = tmp_path / "base"
     base_dir.mkdir()
@@ -553,9 +1504,9 @@ def test_准备基表包期间终态请求会阻止继续创建任何运行资�
     create_thread, result = _start_creating_task(service)
     assert prepare_started.wait(timeout=3)
 
-    terminal = service.stop_task("task-1") if action == "stop" else service.pause_task("task-1")
-    expected_status = "已停止" if action == "stop" else "失败"
-    expected_phase = "已停止" if action == "stop" else "执行 SQL"
+    terminal = service.stop_task("task-1")
+    expected_status = "已停止"
+    expected_phase = "已停止"
     assert terminal.status == expected_status
     assert terminal.phase == expected_phase
     allow_prepare.set()
@@ -566,10 +1517,7 @@ def test_准备基表包期间终态请求会阻止继续创建任何运行资�
     assert result["snapshot"] is terminal
     assert terminal.status == expected_status
     assert terminal.phase == expected_phase
-    if action == "stop":
-        assert terminal.last_error is None
-    else:
-        assert "任务运行实例不存在" in (terminal.last_error or "")
+    assert terminal.last_error is None
     assert factory_calls == 0
     assert database.connect_count == 0
     assert database.executed == []
@@ -976,7 +1924,7 @@ def test_停止发生在后台循环注册前不会启动或遗留任何后台�
         original_start_background_loop(task)
 
     def record_thread_start(thread: threading.Thread) -> None:
-        if thread.name.startswith("sql_fuzz-"):
+        if thread.name.startswith("sql_fuzz-") and not thread.name.endswith("-initializer"):
             started_sql_threads.append(thread)
         original_thread_start(thread)
 
@@ -990,6 +1938,9 @@ def test_停止发生在后台循环注册前不会启动或遗留任何后台�
     assert stopped.phase == "已停止"
     allow_background_registration.set()
     create_thread.join(timeout=3)
+    initializer = service._initialization_threads.get("task-1")
+    if initializer is not None:
+        initializer.join(timeout=3)
     for thread in started_sql_threads:
         thread.join(timeout=3)
 
@@ -1028,7 +1979,7 @@ def test_后台首个线程已启动时停止不会再启动其余线程或_join
     original_registered_start = service._start_registered_background_thread
 
     def record_thread_start(thread: threading.Thread) -> None:
-        if thread.name.startswith("sql_fuzz-"):
+        if thread.name.startswith("sql_fuzz-") and not thread.name.endswith("-initializer"):
             started_sql_thread_names.append(thread.name)
         original_thread_start(thread)
 
@@ -1048,6 +1999,9 @@ def test_后台首个线程已启动时停止不会再启动其余线程或_join
     stopped = service.stop_task("task-1")
     allow_remaining_thread_starts.set()
     create_thread.join(timeout=3)
+    initializer = service._initialization_threads.get("task-1")
+    if initializer is not None:
+        initializer.join(timeout=3)
 
     assert not create_thread.is_alive()
     assert "error" not in result
@@ -1333,27 +2287,29 @@ def test_暂停或恢复在终态检查后遇到停止清理不覆盖终态(
     service = client.app.state.runtime_service
     response = client.post("/api/tasks", json=_task_payload())
     task_id = response.json()["task_id"]
-    checked_non_terminal = threading.Event()
-    allow_lookup = threading.Event()
-    original_is_terminal = service._snapshot_is_terminal
+    action_entered = threading.Event()
+    allow_action = threading.Event()
     action_thread: threading.Thread | None = None
+    task = service._real_tasks[task_id]
+    original_action = task.pause if action == "pause" else task.resume
 
-    def blocking_is_terminal(snapshot) -> bool:
-        result = original_is_terminal(snapshot)
-        if threading.current_thread() is action_thread and not result:
-            checked_non_terminal.set()
-            assert allow_lookup.wait(timeout=3), "测试等待放行运行实例查找超时"
-        return result
+    def blocking_action() -> None:
+        action_entered.set()
+        assert allow_action.wait(timeout=3), "测试等待放行暂停/恢复超时"
+        original_action()
 
-    service._snapshot_is_terminal = blocking_is_terminal  # type: ignore[method-assign]
+    if action == "pause":
+        task.pause = blocking_action  # type: ignore[method-assign]
+    else:
+        task.resume = blocking_action  # type: ignore[method-assign]
     action_method = service.pause_task if action == "pause" else service.resume_task
     action_thread = threading.Thread(target=lambda: action_method(task_id))
     action_thread.start()
-    assert checked_non_terminal.wait(timeout=3)
+    assert action_entered.wait(timeout=3)
 
     service.stop_task(task_id)
     assert task_id not in service._real_tasks
-    allow_lookup.set()
+    allow_action.set()
     action_thread.join(timeout=3)
 
     assert not action_thread.is_alive()
@@ -1420,7 +2376,7 @@ def test_后台线程部分启动失败返回失败快照并收敛资源(tmp_pat
 
     def fail_second_sql_fuzz_start(thread: threading.Thread) -> None:
         nonlocal sql_fuzz_start_count
-        if thread.name.startswith("sql_fuzz-"):
+        if thread.name.startswith("sql_fuzz-") and not thread.name.endswith("-initializer"):
             sql_fuzz_start_count += 1
             if sql_fuzz_start_count == 2:
                 raise RuntimeError("模拟后台线程启动失败")
@@ -1436,9 +2392,13 @@ def test_后台线程部分启动失败返回失败快照并收敛资源(tmp_pat
     task_id = response.json()["task_id"]
 
     assert response.status_code == 200
-    assert response.json()["status"] == "失败"
-    assert "模拟后台线程启动失败" in response.json()["last_error"]
     assert first_thread_exited.wait(timeout=3)
+    initializer = service._initialization_threads.get(task_id)
+    if initializer is not None:
+        initializer.join(timeout=3)
+    snapshot = service.get_task(task_id)
+    assert snapshot["status"] == "失败"
+    assert "模拟后台线程启动失败" in snapshot["last_error"]
     assert tunnel_events == ["start", "stop"]
     assert all(database.closed for database in databases)
     assert task_id not in service._real_tasks

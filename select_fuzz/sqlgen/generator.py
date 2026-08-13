@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Set
 
 from select_fuzz.metadata.models import ColumnMetadata, ColumnTypeFamily, ForeignKeyMetadata, IndexMetadata, TableMetadata
 
 from .operators import build_operator_registry
+from .rng import FrozenRandomV1, RandomSource
+from .seeds import CURRENT_QUERY_GENERATOR_VERSION
 
 
 SQL_VALIDITY_VALID = "合法"
@@ -43,9 +44,18 @@ class Expr:
 
 
 class SQLGenerator:
-    def __init__(self, random_seed: int | None = None, max_sql_length: int = 8000) -> None:
-        self.random = random.Random(random_seed)
+    def __init__(
+        self,
+        random_seed: int | None = None,
+        max_sql_length: int = 8000,
+        *,
+        rng: RandomSource | None = None,
+    ) -> None:
+        if random_seed is not None and rng is not None:
+            raise ValueError("random_seed 与 rng 不能同时传入")
+        self.random = rng if rng is not None else FrozenRandomV1(random_seed)
         self.max_sql_length = max_sql_length
+        self.generator_version = CURRENT_QUERY_GENERATOR_VERSION
         self.registry = build_operator_registry()
         self.coverage_hits: Set[str] = set()
         self.coverage_counts: Dict[str, int] = {}
@@ -1387,7 +1397,8 @@ class SQLGenerator:
             candidates = [self._column_expr(refs, preferred=families)]
             if candidates[0].family in families:
                 return candidates[0]
-        family = self.random.choice(list(families))
+        # set 的迭代顺序受 PYTHONHASHSEED 影响；v1 必须先按枚举值稳定排序。
+        family = self.random.choice(sorted(families, key=lambda item: item.value))
         return self._literal_expr(family)
 
     def _literal_expr(self, family: ColumnTypeFamily) -> Expr:

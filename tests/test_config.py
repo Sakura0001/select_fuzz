@@ -21,7 +21,7 @@ def test_runtime_config_使用中文默认配置并解析基表目录(tmp_path: 
     assert config.failed_sql_dir == Path("logs/failed_sql")
     assert config.lost_connection_dedup_minutes == 10
     assert config.recovery_probe_seconds == 60
-    assert config.default_thread_count == 1
+    assert config.default_thread_count == 16
 
 
 def test_节点配置支持跳板机引用() -> None:

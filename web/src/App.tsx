@@ -4,7 +4,8 @@ import { ApiOutlined, ClusterOutlined, DatabaseOutlined, DeploymentUnitOutlined,
 import * as echarts from "echarts";
 import { addJumpHost, createTask, loadCoverage, loadJumpHosts, loadLostConnections, loadTasks, pauseTask, resumeTask, stopTask, summarize } from "./api";
 import { baseTableSeedValidationError, normalizeBaseTableFormFields } from "./baseTableForm";
-import type { CoverageItem, CreateTaskPayload, FuzzTask, JumpHost } from "./types";
+import { normalizeCrudRoutingFormFields } from "./crudRoutingForm";
+import type { CoverageItem, CreateTaskPayload, FuzzTask, JumpHost, WorkerState } from "./types";
 
 const { Sider, Content } = Layout;
 const { Title, Text } = Typography;
@@ -110,40 +111,54 @@ function baseTablePreparationDescription(task: FuzzTask) {
   return `${mode} · 每表 10～100 行`;
 }
 
-function BaseTableMode({ task }: { task: FuzzTask }) {
-  if (!task.expand_base_table_columns) {
-    return (
-      <div className="base-table-mode">
-        <Text type="secondary">基表模式：核心列（42 列）</Text>
-      </div>
-    );
+function GeneratorIdentity({
+  label,
+  version,
+  seed
+}: {
+  label: string;
+  version: string | null;
+  seed: string | null;
+}) {
+  if (!version || !seed) {
+    return null;
   }
+  const reproductionId = `${version}:${seed}`;
+  return (
+    <div className="generator-identity">
+      <Text type="secondary">{label}</Text>
+      <Text
+        type="secondary"
+        className="base-table-reproduction-id"
+        copyable={{ text: reproductionId, tooltips: ["复制复现标识", "已复制"] }}
+      >
+        <span className="base-table-seed">{reproductionId}</span>
+      </Text>
+    </div>
+  );
+}
 
-  const version = task.base_table_generator_version ?? "未知版本";
-  const seed = task.base_table_seed ?? "未返回";
-  const reproductionId = task.base_table_generator_version && task.base_table_seed
-    ? `${task.base_table_generator_version}:${task.base_table_seed}`
-    : null;
+function BaseTableMode({ task }: { task: FuzzTask }) {
   return (
     <div className="base-table-mode">
       <Text type="secondary" className="base-table-mode-text">
-        基表模式：扩展列（200～500 列）
+        {task.expand_base_table_columns
+          ? "基表模式：扩展列（200～500 列）"
+          : "基表模式：核心列（42 列）"}
       </Text>
-      <Text type="secondary" className="base-table-identity">
-        {version} · 种子 <span className="base-table-seed">{seed}</span>
-      </Text>
-      {reproductionId && (
-        <div className="base-table-reproduction">
-          <Text type="secondary">复现标识</Text>
-          <Text
-            type="secondary"
-            className="base-table-reproduction-id"
-            copyable={{ text: reproductionId, tooltips: ["复制复现标识", "已复制"] }}
-          >
-            {reproductionId}
-          </Text>
-        </div>
-      )}
+      <div className="generator-identities">
+        <GeneratorIdentity label="查询种子" version={task.query_generator_version} seed={task.query_seed} />
+        {task.enable_crud && (
+          <GeneratorIdentity label="CRUD 种子" version={task.crud_generator_version} seed={task.crud_seed} />
+        )}
+        {task.expand_base_table_columns && (
+          <GeneratorIdentity
+            label="基表种子"
+            version={task.base_table_generator_version}
+            seed={task.base_table_seed}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -178,6 +193,39 @@ function connectionTag(worker: FuzzTask["worker_states"][number]) {
   return <Tag>连接未知</Tag>;
 }
 
+function WorkerRows({ workers }: { workers: WorkerState[] }) {
+  if (workers.length === 0) {
+    return <div className="empty-event">暂无 worker 状态</div>;
+  }
+  return (
+    <div className="worker-grid">
+      {workers.map((worker) => (
+        <div className="worker-row" key={worker.worker_id}>
+          <span>{worker.worker_key ?? `worker ${worker.worker_id}`}</span>
+          <Tag color={worker.db_role === "primary" ? "blue" : "purple"}>
+            {worker.db_role === "primary" ? "主节点" : worker.db_role === "replica" ? "备节点" : "旧连接"}
+          </Tag>
+          <Tag color={workerStateColor(worker.state)}>{worker.state}</Tag>
+          {threadTag(worker)}
+          {connectionTag(worker)}
+          <b>{worker.sql_total} 条</b>
+          <div className="worker-diagnostics">
+            {worker.table_name && <span>表 {worker.table_name}</span>}
+            <span>目标 {worker.target ?? "-"}</span>
+            <span>连接 ID {worker.connection_id ?? "-"}</span>
+            <span>重连 {worker.reconnect_total ?? worker.connection_ping_reconnect_count ?? 0}</span>
+            {worker.reconnecting && <Tag color="warning">持续重连</Tag>}
+            {worker.needs_reconnect && <Tag color="warning">待重连</Tag>}
+          </div>
+          {(worker.last_error || worker.last_connection_close_reason) && (
+            <code className="worker-message">{worker.last_error ?? worker.last_connection_close_reason}</code>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function TaskCard({
   task,
   onPause,
@@ -191,28 +239,34 @@ function TaskCard({
 }) {
   const currentStep = stepIndexByPhase.get(task.phase) ?? 0;
   const isFailed = task.status === "失败";
-  const canPause = task.status === "执行 SQL" || task.status === "恢复检测";
+  const canPause = ["新建", "连接实例", "准备基表", "执行 SQL", "恢复检测"].includes(task.status);
   const canResume = task.status === "已暂停";
   const canStop = task.status !== "已停止" && task.status !== "失败";
   const [activeDetailKeys, setActiveDetailKeys] = useState<string[]>([]);
   const detailOpen = activeDetailKeys.includes("detail");
+  const dmlWorkers = task.worker_states.filter((worker) => worker.worker_type === "dml");
+  const queryWorkers = task.worker_states.filter((worker) => worker.worker_type !== "dml");
+  const replicaRoute = task.replica_target ?? task.target;
+  const runningWorkers = task.primary_reconnecting + task.replica_reconnecting;
   const items = [
     {
       key: "detail",
       label: detailOpen ? "收起详情" : "展开详情",
       children: (
-        <Row gutter={12}>
-          <Col span={9}>
+        <Row gutter={[12, 12]}>
+          <Col xs={24} lg={9}>
             <Card className="detail-card" bordered={false}>
-              <Text type="secondary">跳板机信息</Text>
+              <Text type="secondary">连接与路由</Text>
               <div className="kv-line"><span>配置名</span><b>{task.jump_host ?? "直连"}</b></div>
-              <div className="kv-line"><span>目标实例</span><b>{task.target}</b></div>
+              <div className="kv-line"><span>主写目标</span><b>{task.primary_target}</b></div>
+              <div className="kv-line"><span>备读目标</span><b>{replicaRoute}</b></div>
               <div className="kv-line"><span>复用范围</span><b>当前任务全部连接</b></div>
-              <div className="kv-line"><span>并发线程</span><b>{task.thread_count} 个 worker</b></div>
+              <div className="kv-line"><span>查询连接</span><b>{task.query_worker_total} 个独立连接</b></div>
+              <div className="kv-line"><span>DML 连接</span><b>{task.crud_worker_total} 个独立连接</b></div>
               <div className="kv-line"><span>任务编号</span><b>{task.task_id}</b></div>
             </Card>
           </Col>
-          <Col span={15}>
+          <Col xs={24} lg={15}>
             <Card className="detail-card" bordered={false}>
               <Text type="secondary">任务状态</Text>
               {task.last_error ? (
@@ -220,34 +274,24 @@ function TaskCard({
               ) : (
                 <div className="empty-event">当前无失败原因</div>
               )}
-              <div className="worker-grid">
-                {task.worker_states.length === 0 ? (
-                  <div className="empty-event">暂无 worker 状态</div>
-                ) : (
-                  task.worker_states.map((worker) => (
-                    <div className="worker-row" key={worker.worker_id}>
-                      <span>worker {worker.worker_id}</span>
-                      <Tag color={workerStateColor(worker.state)}>{worker.state}</Tag>
-                      {threadTag(worker)}
-                      {connectionTag(worker)}
-                      <b>{worker.sql_total} 条</b>
-                      <div className="worker-diagnostics">
-                        <span>连接 ID {worker.connection_id ?? "-"}</span>
-                        <span>连接 {worker.connection_connect_count ?? "-"}</span>
-                        <span>关闭 {worker.connection_close_count ?? "-"}</span>
-                        <span>ping 重连 {worker.connection_ping_reconnect_count ?? "-"}</span>
-                        {worker.needs_reconnect && <Tag color="warning">待重连</Tag>}
-                      </div>
-                      {(worker.last_error || worker.last_connection_close_reason) && (
-                        <code className="worker-message">{worker.last_error ?? worker.last_connection_close_reason}</code>
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
+              <Text type="secondary">查询 worker（{queryWorkers.length}）</Text>
+              <WorkerRows workers={queryWorkers} />
+              {task.enable_crud && (
+                <Collapse
+                  className="dml-worker-collapse"
+                  ghost
+                  items={[
+                    {
+                      key: "dml-workers",
+                      label: `逐表 DML worker（${dmlWorkers.length || task.crud_worker_total}，默认折叠）`,
+                      children: <WorkerRows workers={dmlWorkers} />
+                    }
+                  ]}
+                />
+              )}
             </Card>
           </Col>
-          <Col span={24}>
+          <Col xs={24}>
             <Card className="detail-card" bordered={false}>
               <Text type="secondary">最近 lost connection 事件</Text>
               <div className="event-scroll">
@@ -273,20 +317,38 @@ function TaskCard({
   return (
     <Card className={`task-card ${task.status === "恢复检测" || task.status === "失败" ? "task-card-alert" : ""}`} bordered={false}>
       <Row align="top" gutter={[14, 12]} className="task-card-header">
-        <Col span={9}>
+        <Col xs={24} md={9}>
           <div className="node-name">{task.node_name}</div>
-          <Text type="secondary">{task.target} · {task.jump_host ?? "直连"}</Text>
+          <div className="route-summary">
+            <span><b>主写</b> {task.primary_target}</span>
+            <span><b>备读</b> {replicaRoute}</span>
+          </div>
           <BaseTableMode task={task} />
         </Col>
-        <Col span={11}>
+        <Col xs={24} md={11}>
           <div className="query-summary">
             <div><span>成功查询</span><b>{task.success_query_total}</b></div>
             <div><span>失败查询</span><b className={task.failed_query_total > 0 ? "danger-text" : ""}>{task.failed_query_total}</b></div>
             <div><span>普通错误</span><b>{task.ordinary_error_total}</b></div>
             <div><span>lost connection 事件</span><b>{task.lost_connection_total}</b></div>
           </div>
+          {task.enable_crud && (
+            <div className="crud-summary-block">
+              <div className="crud-summary-heading"><span>CRUD 统计</span><b>成功 / 失败</b></div>
+              <div className="crud-summary">
+                <div><span>INSERT</span><b>{task.insert_success_total} / {task.insert_failed_total}</b></div>
+                <div><span>UPDATE</span><b>{task.update_success_total} / {task.update_failed_total}</b></div>
+                <div><span>DELETE</span><b>{task.delete_success_total} / {task.delete_failed_total}</b></div>
+              </div>
+            </div>
+          )}
+          <div className="reconnect-summary">
+            <span>主节点重连 {task.primary_reconnect_total}</span>
+            <span>备节点重连 {task.replica_reconnect_total}</span>
+            {runningWorkers > 0 && <Tag color="warning">{runningWorkers} 个连接持续重连</Tag>}
+          </div>
         </Col>
-        <Col span={4}>
+        <Col xs={24} md={4}>
           <Space direction="vertical" size={6}>
             {statusTag(task)}
             <Space size={6}>
@@ -317,7 +379,14 @@ function TaskCard({
           items={[
             { title: "连接实例", description: stepDescription(task, "连接实例", "完成") },
             { title: "准备基表", description: stepDescription(task, "准备基表", baseTablePreparationDescription(task)) },
-            { title: "执行 SQL", description: stepDescription(task, "执行 SQL", `${task.thread_count} 线程 · ${task.sql_rate} 条/秒`) }
+            {
+              title: "执行 SQL",
+              description: stepDescription(
+                task,
+                "执行 SQL",
+                `${task.query_worker_total} 查询${task.enable_crud ? ` + ${task.crud_worker_total} DML` : ""} · ${task.sql_rate} 条/秒`
+              )
+            }
           ]}
         />
       </div>
@@ -342,6 +411,8 @@ function App() {
   const [taskForm] = Form.useForm<CreateTaskPayload>();
   const [jumpForm] = Form.useForm<JumpHost>();
   const expandBaseTableColumns = Form.useWatch("expand_base_table_columns", taskForm) ?? false;
+  const enableCrud = Form.useWatch("enable_crud", taskForm) ?? false;
+  const replicaHost = Form.useWatch("replica_host", taskForm) ?? "";
   const metrics = useMemo(() => summarize(tasks), [tasks]);
   const taskIds = useMemo(() => tasks.map((task) => task.task_id).sort().join(","), [tasks]);
   const refreshTasks = async () => {
@@ -442,9 +513,11 @@ function App() {
   const handleStartTask = async (values: CreateTaskPayload) => {
     try {
       const baseTableFields = normalizeBaseTableFormFields(values);
+      const crudRoutingFields = normalizeCrudRoutingFormFields(values);
       const task = await createTask({
         ...values,
         ...baseTableFields,
+        ...crudRoutingFields,
         node_name: values.node_name || `${values.host}:${values.port}`,
         jump_host: values.jump_host || null
       });
@@ -510,7 +583,7 @@ function App() {
 
   return (
     <Layout className="app-shell">
-      <Sider width={248} className="side">
+      <Sider width={248} className="side" breakpoint="lg" collapsedWidth={0}>
         <div className="brand">
           <div className="brand-mark" />
           <div>
@@ -537,11 +610,11 @@ function App() {
           </Space>
         </div>
 
-        <Row gutter={12} className="metric-row">
-          <Col span={6}><Card bordered={false}><Statistic title="运行任务" value={metrics.activeTasks} suffix="个" /></Card></Col>
-          <Col span={6}><Card bordered={false}><Statistic title="成功查询" value={metrics.sqlTotal} /></Card></Col>
-          <Col span={6}><Card bordered={false}><Statistic title="lost connection 事件" value={metrics.lostConnection} valueStyle={{ color: "#ff7875" }} prefix={<WarningOutlined />} /></Card></Col>
-          <Col span={6}><Card bordered={false}><Statistic title="集群速率" value={metrics.clusterRate} suffix="条/秒" /></Card></Col>
+        <Row gutter={[12, 12]} className="metric-row">
+          <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="运行任务" value={metrics.activeTasks} suffix="个" /></Card></Col>
+          <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="成功查询" value={metrics.sqlTotal} /></Card></Col>
+          <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="lost connection 事件" value={metrics.lostConnection} valueStyle={{ color: "#ff7875" }} prefix={<WarningOutlined />} /></Card></Col>
+          <Col xs={24} sm={12} lg={6}><Card bordered={false}><Statistic title="集群速率" value={metrics.clusterRate} suffix="条/秒" /></Card></Col>
         </Row>
 
         {!backendConnected && (
@@ -554,8 +627,8 @@ function App() {
           />
         )}
 
-        <Row gutter={16}>
-          <Col span={16}>
+        <Row gutter={[16, 16]}>
+          <Col xs={24} xl={16}>
             <Space direction="vertical" size={12} className="task-list">
               {tasks.length === 0 ? (
                 <Card bordered={false}>
@@ -574,7 +647,7 @@ function App() {
               )}
             </Space>
           </Col>
-          <Col span={8}>
+          <Col xs={24} xl={8}>
             <Space direction="vertical" size={16} className="right-panel">
               <Card title="新建任务" bordered={false}>
                 <Form
@@ -587,7 +660,10 @@ function App() {
                     username: "root",
                     password: "",
                     jump_host: "",
-                    thread_count: 1,
+                    replica_host: "",
+                    replica_port: null,
+                    thread_count: 16,
+                    enable_crud: false,
                     expand_base_table_columns: false,
                     base_table_generator_version: "v1",
                     base_table_seed: ""
@@ -598,23 +674,58 @@ function App() {
                     <Select options={jumpOptions} />
                   </Form.Item>
                   <Row gutter={8}>
-                    <Col span={14}><Form.Item name="host" label="数据库地址" rules={[{ required: true, message: "请输入数据库地址" }]}><Input /></Form.Item></Col>
-                    <Col span={10}><Form.Item name="port" label="端口" rules={[{ required: true, message: "请输入端口" }]}><InputNumber min={1} max={65535} className="full-input" /></Form.Item></Col>
+                    <Col xs={24} sm={14}><Form.Item name="host" label="数据库地址" rules={[{ required: true, message: "请输入数据库地址" }]}><Input /></Form.Item></Col>
+                    <Col xs={24} sm={10}><Form.Item name="port" label="端口" rules={[{ required: true, message: "请输入端口" }]}><InputNumber min={1} max={65535} className="full-input" /></Form.Item></Col>
                   </Row>
                   <Row gutter={8}>
-                    <Col span={12}><Form.Item name="username" label="用户名" rules={[{ required: true, message: "请输入用户名" }]}><Input /></Form.Item></Col>
-                    <Col span={12}><Form.Item name="password" label="密码" rules={[{ required: true, message: "请输入密码" }]}><Input.Password /></Form.Item></Col>
+                    <Col xs={24} sm={14}>
+                      <Form.Item
+                        name="replica_host"
+                        label="备节点 IP / 地址（可选）"
+                        extra="填写后，所有随机查询只走备节点。"
+                      >
+                        <Input placeholder="例如 10.0.0.12" />
+                      </Form.Item>
+                    </Col>
+                    <Col xs={24} sm={10}>
+                      <Form.Item name="replica_port" label="备节点端口" extra="留空继承主节点端口">
+                        <InputNumber min={1} max={65535} className="full-input" placeholder="继承" />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                  <Row gutter={8}>
+                    <Col xs={24} sm={12}><Form.Item name="username" label="用户名" rules={[{ required: true, message: "请输入用户名" }]}><Input /></Form.Item></Col>
+                    <Col xs={24} sm={12}><Form.Item name="password" label="密码" rules={[{ required: true, message: "请输入密码" }]}><Input.Password /></Form.Item></Col>
                   </Row>
                   <Form.Item name="node_name" label="任务名称" rules={[{ required: true, message: "请输入任务名称" }]}>
                     <Input />
                   </Form.Item>
                   <Form.Item
                     name="thread_count"
-                    label="并发线程数"
-                    rules={[{ required: true, message: "请输入并发线程数" }]}
+                    label="备节点查询线程数"
+                    rules={[{ required: true, message: "请输入查询线程数" }]}
                   >
                     <InputNumber min={1} max={128} className="full-input" />
                   </Form.Item>
+                  <Form.Item
+                    name="enable_crud"
+                    label="启用逐表 CRUD"
+                    valuePropName="checked"
+                    extra="开启后，74 张永久基表各启动 1 个主节点 DML 线程。"
+                  >
+                    <Switch checkedChildren="已开启" unCheckedChildren="已关闭" />
+                  </Form.Item>
+                  {enableCrud && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message="主写备读并发已开启"
+                      description={replicaHost.trim()
+                        ? "INSERT / UPDATE / DELETE 只走主节点；查询线程只走备节点，每个 worker 独占一个连接。"
+                        : "INSERT / UPDATE / DELETE 只走主节点；尚未填写备节点，查询暂时复用主节点，每个 worker 仍独占连接。"}
+                      className="form-note"
+                    />
+                  )}
                   <Form.Item
                     name="expand_base_table_columns"
                     label="扩展基表列（每表 200～500 列）"
@@ -662,12 +773,12 @@ function App() {
                   onFinish={handleSaveJumpHost}
                 >
                   <Row gutter={8}>
-                    <Col span={12}><Form.Item name="name" label="配置名" rules={[{ required: true, message: "请输入配置名" }]}><Input /></Form.Item></Col>
-                    <Col span={12}><Form.Item name="username" label="SSH 用户" rules={[{ required: true, message: "请输入 SSH 用户" }]}><Input /></Form.Item></Col>
+                    <Col xs={24} sm={12}><Form.Item name="name" label="配置名" rules={[{ required: true, message: "请输入配置名" }]}><Input /></Form.Item></Col>
+                    <Col xs={24} sm={12}><Form.Item name="username" label="SSH 用户" rules={[{ required: true, message: "请输入 SSH 用户" }]}><Input /></Form.Item></Col>
                   </Row>
                   <Row gutter={8}>
-                    <Col span={16}><Form.Item name="host" label="跳板机地址" rules={[{ required: true, message: "请输入跳板机地址" }]}><Input /></Form.Item></Col>
-                    <Col span={8}><Form.Item name="port" label="SSH 端口" rules={[{ required: true, message: "请输入 SSH 端口" }]}><InputNumber min={1} max={65535} className="full-input" /></Form.Item></Col>
+                    <Col xs={24} sm={16}><Form.Item name="host" label="跳板机地址" rules={[{ required: true, message: "请输入跳板机地址" }]}><Input /></Form.Item></Col>
+                    <Col xs={24} sm={8}><Form.Item name="port" label="SSH 端口" rules={[{ required: true, message: "请输入 SSH 端口" }]}><InputNumber min={1} max={65535} className="full-input" /></Form.Item></Col>
                   </Row>
                   <Form.Item name="password" label="SSH 密码">
                     <Input.Password placeholder="推荐填写账号密码；使用私钥时可留空" />

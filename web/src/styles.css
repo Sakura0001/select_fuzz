@@ -4,7 +4,6 @@
 
 body {
   margin: 0;
-  min-width: 1180px;
   background:
     radial-gradient(circle at 18% 0%, rgba(32, 201, 151, 0.18), transparent 28%),
     radial-gradient(circle at 82% 8%, rgba(37, 99, 235, 0.24), transparent 32%),
@@ -12,6 +11,7 @@ body {
 }
 
 .app-shell {
+  min-width: 0;
   min-height: 100vh;
   background: transparent;
   color: #e7edf7;
@@ -54,6 +54,7 @@ body {
 }
 
 .main {
+  min-width: 0;
   padding: 22px 24px 26px;
 }
 
@@ -91,14 +92,15 @@ body {
   margin-bottom: 12px;
 }
 
-.task-card {
+.ant-card.task-card {
+  min-width: 0;
   background: rgba(15, 23, 42, 0.74) !important;
   border: 1px solid rgba(148, 163, 184, 0.16);
   box-shadow: 0 16px 60px rgba(0, 0, 0, 0.24);
 }
 
-.task-card-alert {
-  border-color: rgba(248, 113, 113, 0.42);
+.ant-card.task-card.task-card-alert {
+  border-color: rgba(248, 113, 113, 0.42) !important;
   background: rgba(48, 12, 18, 0.48) !important;
 }
 
@@ -141,6 +143,19 @@ body {
   gap: 4px;
 }
 
+.generator-identities {
+  display: grid;
+  gap: 4px;
+}
+
+.generator-identity {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
 .base-table-mode .base-table-seed,
 .base-table-mode .base-table-reproduction-id {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -148,9 +163,28 @@ body {
   white-space: nowrap;
 }
 
-.detail-card {
+.ant-card.detail-card {
   min-height: 172px;
   background: rgba(2, 6, 23, 0.42) !important;
+}
+
+.route-summary {
+  display: grid;
+  gap: 3px;
+  color: #9fb1cc;
+  font-size: 12px;
+}
+
+.route-summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.route-summary b {
+  margin-right: 4px;
+  color: #dce8f8;
 }
 
 .kv-line {
@@ -163,6 +197,12 @@ body {
 
 .kv-line span {
   color: #8ea0bb;
+}
+
+.kv-line b {
+  min-width: 0;
+  word-break: break-word;
+  text-align: right;
 }
 
 .event-scroll {
@@ -223,8 +263,8 @@ body {
 }
 
 .worker-row {
-  display: grid;
-  grid-template-columns: 78px 86px 84px 84px 56px minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   align-items: center;
   padding: 8px;
@@ -234,16 +274,22 @@ body {
   font-size: 12px;
 }
 
+.dml-worker-collapse {
+  margin-top: 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
 .worker-diagnostics {
   display: flex;
-  min-width: 0;
+  min-width: 160px;
+  flex: 1 1 180px;
   flex-wrap: wrap;
   gap: 6px;
   color: #b9c6d8;
 }
 
 .worker-message {
-  grid-column: 1 / -1;
+  flex: 1 0 100%;
   overflow: hidden;
   color: #fca5a5;
   text-overflow: ellipsis;
@@ -271,6 +317,57 @@ body {
   color: #dce8f8;
 }
 
+.crud-summary-block {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.crud-summary-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+  color: #8ea0bb;
+  font-size: 11px;
+}
+
+.crud-summary-heading b {
+  color: #b9c6d8;
+  font-weight: 600;
+}
+
+.crud-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  font-size: 12px;
+}
+
+.crud-summary div {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.crud-summary span,
+.reconnect-summary span {
+  color: #8ea0bb;
+}
+
+.crud-summary b {
+  color: #dce8f8;
+}
+
+.reconnect-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 7px;
+  font-size: 12px;
+}
+
 .danger-text {
   color: #ff7875 !important;
 }
@@ -287,4 +384,41 @@ body {
 
 .ant-collapse-header {
   color: #9fb1cc !important;
+}
+
+@media (max-width: 767px) {
+  .main {
+    padding: 14px 12px 20px;
+  }
+
+  .topbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .topbar > .ant-space {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .ant-card.task-card > .ant-card-body {
+    padding: 16px;
+  }
+
+  .crud-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .event-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .event-row code {
+    grid-column: 1 / -1;
+  }
+
+  .worker-diagnostics {
+    min-width: 0;
+    flex-basis: 100%;
+  }
 }

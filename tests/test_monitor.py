@@ -53,6 +53,28 @@ def test_sql_日志可写入生成合法性和风险标签(tmp_path: Path) -> No
     assert rows[0]["expected_error"] is True
 
 
+def test_sql_日志始终包含基表模式版本和种子(tmp_path: Path) -> None:
+    path = tmp_path / "sql.jsonl"
+    record = SqlLogRecord(
+        timestamp=datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc),
+        task_id="task-expanded",
+        node_name="node-a",
+        status="成功",
+        sql="SELECT 1",
+        expand_base_table_columns=True,
+        base_table_seed="12345",
+        base_table_generator_version="v1",
+    )
+
+    append_jsonl(path, record.to_dict())
+
+    row = read_jsonl(path)[0]
+    assert row["expand_base_table_columns"] is True
+    assert row["base_table_seed"] == "12345"
+    assert row["base_table_generator_version"] == "v1"
+    assert "CREATE TABLE" not in row["sql"]
+
+
 def test_lost_connection_错误识别() -> None:
     assert is_lost_connection_error(Exception("Lost connection to MySQL server during query"))
     assert is_lost_connection_error(Exception("MySQL server has gone away"))

@@ -1,10 +1,17 @@
+from __future__ import annotations
+
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
+from select_fuzz.base_tables import build_base_sql_bundle
 from select_fuzz.config import TargetNodeConfig
+from select_fuzz.metadata.models import BaseSqlFile
 from select_fuzz.monitor.logs import read_jsonl
 from select_fuzz.monitor.store import MetricStore
-from select_fuzz.runner.db import DatabaseClient, LostConnectionError
+from select_fuzz.runner.db import DatabaseClient, LostConnectionError, PyMySQLClient
 from select_fuzz.runner.task import FuzzTask, TaskStatus
 
 
@@ -113,6 +120,279 @@ def _node() -> TargetNodeConfig:
         database="select_fuzz",
         jump_host="jump-prod",
     )
+
+
+def _in_memory_bundle(*, expanded: bool = False, seed: str | None = None):
+    return build_base_sql_bundle(
+        (
+            BaseSqlFile(
+                path=Path("t0.sql"),
+                sql="CREATE TABLE t0 (id BIGINT NOT NULL, PRIMARY KEY (id));\n",
+            ),
+            BaseSqlFile(
+                path=Path("t2.sql"),
+                sql="CREATE TEMPORARY TABLE t2 (id BIGINT NOT NULL, PRIMARY KEY (id));\n",
+            ),
+            BaseSqlFile(
+                path=Path("zz_seed_fk_data.sql"),
+                sql="INSERT INTO t0 (id) VALUES (1);\nINSERT INTO t2 (id) VALUES (2);\n",
+            ),
+        ),
+        expand_base_table_columns=expanded,
+        generator_version="v1" if expanded else None,
+        seed=seed if expanded else None,
+    )
+
+
+def test_无效基表目录在数据库连接前失败(tmp_path: Path) -> None:
+    directory = tmp_path / "invalid_base"
+    directory.mkdir()
+    (directory / "seed.sql").write_text("INSERT INTO missing VALUES (1);", encoding="utf-8")
+
+    class CountingDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_count = 0
+
+        def connect(self) -> None:
+            self.connect_count += 1
+            super().connect()
+
+    db = CountingDatabase()
+    task = FuzzTask(
+        task_id="task-invalid",
+        node=_node(),
+        base_sql_dir=directory,
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+
+    try:
+        task.start()
+    except RuntimeError as exc:
+        assert "至少需要一张可解析的基表" in str(exc)
+    else:
+        raise AssertionError("无效基表必须在连接前失败")
+
+    assert db.connect_count == 0
+    assert db.executed == []
+    assert task.phase == "准备基表"
+
+
+def test_注入内存包时无需基表目录且所有_worker_使用同一对象(tmp_path: Path) -> None:
+    bundle = _in_memory_bundle(expanded=True, seed="12345")
+    databases = [FakeDatabase(), FakeDatabase(), FakeDatabase()]
+    database_iter = iter(databases[1:])
+    task = FuzzTask(
+        task_id="task-bundle",
+        node=_node(),
+        base_sql_bundle=bundle,
+        db=databases[0],
+        db_factory=lambda: next(database_iter),
+        thread_count=3,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    consumed_bundles = []
+    original_prepare = task._prepare_worker_session
+
+    def record_prepare(db: DatabaseClient, prepared_bundle) -> None:
+        consumed_bundles.append(prepared_bundle)
+        original_prepare(db, prepared_bundle)
+
+    task._prepare_worker_session = record_prepare
+
+    task.start()
+
+    assert task.base_sql_bundle is bundle
+    assert consumed_bundles == [bundle, bundle]
+    assert task.expand_base_table_columns is True
+    assert task.base_table_seed == "12345"
+    assert task.base_table_generator_version == "v1"
+
+
+def test_目录删除后恢复检测和_worker_重连仍复用启动时内存包(tmp_path: Path) -> None:
+    clock = FakeClock()
+    directory = _base_dir_with_temporary_table(tmp_path)
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-reuse",
+        node=_node(),
+        base_sql_dir=directory,
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=clock,
+    )
+    task.start()
+    original_bundle = task.base_sql_bundle
+    assert original_bundle is not None
+    for path in directory.iterdir():
+        path.unlink()
+    directory.rmdir()
+    consumed_bundles = []
+    original_prepare = task._prepare_worker_session
+
+    def record_prepare(db_arg: DatabaseClient, prepared_bundle) -> None:
+        consumed_bundles.append(prepared_bundle)
+        original_prepare(db_arg, prepared_bundle)
+
+    task._prepare_worker_session = record_prepare
+
+    task._handle_lost_connection("SELECT 1", "Lost connection")
+    clock.advance(60)
+    task.probe_recovery()
+    task.record_worker_sql_start(0, "SELECT SLEEP(999)", clock())
+    clock.advance(31)
+    task.interrupt_stalled_workers(30)
+    assert task._ensure_worker_session(0, task._workers[0]) is True
+
+    assert task.status is TaskStatus.RUNNING
+    assert task.base_sql_bundle is original_bundle
+    assert consumed_bundles == [original_bundle, original_bundle]
+
+
+def test_目录删除后被动断连也使用原内存包重建临时会话(tmp_path: Path) -> None:
+    class PassiveDiagnosticDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connect_count = 0
+            self.close_count = 0
+
+        def connect(self) -> None:
+            self.connect_count += 1
+            super().connect()
+
+        def close(self) -> None:
+            self.close_count += 1
+            super().close()
+
+        def connection_diagnostics(self) -> dict:
+            return {
+                "connection_open": self.connected,
+                "connection_connect_count": self.connect_count,
+                "connection_close_count": self.close_count,
+            }
+
+    directory = _base_dir_with_temporary_table(tmp_path)
+    db = PassiveDiagnosticDatabase()
+    task = FuzzTask(
+        task_id="task-passive-reuse",
+        node=_node(),
+        base_sql_dir=directory,
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    original_bundle = task.base_sql_bundle
+    assert original_bundle is not None
+    for path in directory.iterdir():
+        path.unlink()
+    directory.rmdir()
+    prepared_bundles = []
+    original_prepare = task._prepare_worker_session
+
+    def record_prepare(db_arg: DatabaseClient, prepared_bundle) -> None:
+        prepared_bundles.append(prepared_bundle)
+        original_prepare(db_arg, prepared_bundle)
+
+    task._prepare_worker_session = record_prepare
+    db.connected = False
+    task.worker_states
+
+    assert task._ensure_worker_session(0, task._workers[0]) is True
+    assert db.connected is True
+    assert prepared_bundles == [original_bundle]
+    assert task.base_sql_bundle is original_bundle
+
+
+def test_暂停保留内存包而停止后释放_sql_引用(tmp_path: Path) -> None:
+    bundle = _in_memory_bundle()
+    task = FuzzTask(
+        task_id="task-release",
+        node=_node(),
+        base_sql_bundle=bundle,
+        db=FakeDatabase(),
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+
+    task.pause()
+    assert task.base_sql_bundle is bundle
+
+    task.stop()
+    assert task.base_sql_bundle is None
+    assert task.snapshot_counts()["base_table_seed"] is None
+
+
+def test_任务停止或失败后迟到恢复入口不会改写终态(tmp_path: Path) -> None:
+    stopped = FuzzTask(
+        task_id="task-stopped-terminal",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=FakeDatabase(),
+        metric_store=MetricStore(tmp_path / "stopped.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    stopped.start()
+    stopped.stop()
+    stopped._handle_lost_connection("SELECT 1", "Lost connection")
+    stopped.probe_recovery()
+    assert stopped._ensure_worker_session(0, stopped._workers[0]) is False
+    stopped.fail(RuntimeError("迟到失败"))
+    assert stopped.status is TaskStatus.STOPPED
+    assert stopped.phase == "已停止"
+
+    failed = FuzzTask(
+        task_id="task-failed-terminal",
+        node=_node(),
+        base_sql_bundle=_in_memory_bundle(),
+        db=FakeDatabase(),
+        metric_store=MetricStore(tmp_path / "failed.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    failed.start()
+    failed.fail(RuntimeError("先失败"), phase="执行 SQL")
+    failed.stop()
+    failed.pause()
+    failed.resume()
+    failed._handle_lost_connection("SELECT 1", "Lost connection")
+    assert failed.status is TaskStatus.FAILED
+    assert failed.phase == "执行 SQL"
+    assert failed.last_error == "执行 SQL失败: 先失败"
+
+
+def test_扩展任务_sql_jsonl_只记录复现元数据而不记录初始化_sql(tmp_path: Path) -> None:
+    bundle = _in_memory_bundle(expanded=True, seed="18446744073709551615")
+    task = FuzzTask(
+        task_id="task-expanded-log",
+        node=_node(),
+        base_sql_bundle=bundle,
+        db=FakeDatabase(),
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+        random_seed=7,
+    )
+
+    task.start()
+    task.step()
+
+    log_path = tmp_path / "logs" / "2026-06-04" / "task-expanded-log.sql.jsonl"
+    rows = read_jsonl(log_path)
+    assert rows[0]["expand_base_table_columns"] is True
+    assert rows[0]["base_table_seed"] == "18446744073709551615"
+    assert rows[0]["base_table_generator_version"] == "v1"
+    assert "CREATE TABLE t0" not in log_path.read_text(encoding="utf-8")
 
 
 def test_任务启动时按顺序执行基表目录全部_sql(tmp_path: Path) -> None:
@@ -350,6 +630,232 @@ def test_每次执行查询前设置_session_最大执行时间为_5_秒(tmp_pat
 
     assert db.executed[startup_sql_count] == "SET SESSION max_execution_time = 5000"
     assert _is_query_expression(db.executed[startup_sql_count + 1])
+
+
+@pytest.mark.parametrize("method_name", ("execute", "query_scalar"))
+def test_pymysql_未显式连接时不会由_sql_操作隐式重连(method_name: str) -> None:
+    client = PyMySQLClient(_node())
+    connect_calls = 0
+
+    def unexpected_connect() -> None:
+        nonlocal connect_calls
+        connect_calls += 1
+        raise AssertionError("SQL 操作不应隐式调用 connect")
+
+    client.connect = unexpected_connect  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="数据库连接尚未显式建立"):
+        getattr(client, method_name)("SELECT 1")
+
+    assert connect_calls == 0
+
+
+def test_step_在记录_sql_后被停止不再发送_set_或查询(tmp_path: Path) -> None:
+    class FixedGenerator:
+        coverage_counts: dict[str, int] = {}
+        recent_hits: list[str] = []
+
+        def generate(self, *_args, **_kwargs) -> str:
+            return "SELECT 1"
+
+    db = FakeDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    task._workers[0].generator = FixedGenerator()
+    startup_sql_count = len(db.executed)
+    sql_recorded = threading.Event()
+    allow_dispatch = threading.Event()
+    original_record = task.record_worker_sql_start
+
+    def blocking_record(*args, **kwargs) -> None:
+        original_record(*args, **kwargs)
+        sql_recorded.set()
+        assert allow_dispatch.wait(timeout=3), "测试等待放行 SQL 派发超时"
+
+    task.record_worker_sql_start = blocking_record  # type: ignore[method-assign]
+    worker = threading.Thread(target=task.step)
+    worker.start()
+    assert sql_recorded.wait(timeout=3)
+
+    task.stop()
+    allow_dispatch.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert task.status is TaskStatus.STOPPED
+    assert db.executed[startup_sql_count:] == []
+
+
+def test_worker_迟到重连在任务停止后会关闭新连接(tmp_path: Path) -> None:
+    class DelayedReconnectDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delay_next_connect = False
+            self.reconnect_started = threading.Event()
+            self.allow_reconnect = threading.Event()
+            self.close_count = 0
+
+        def connect(self) -> None:
+            if self.delay_next_connect:
+                self.reconnect_started.set()
+                assert self.allow_reconnect.wait(timeout=3), "测试等待放行重连超时"
+            self.connected = True
+
+        def close(self) -> None:
+            self.close_count += 1
+            self.connected = False
+
+        def connection_diagnostics(self) -> dict:
+            return {"connection_open": self.connected}
+
+    db = DelayedReconnectDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    db.delay_next_connect = True
+    with task._lock:
+        task._worker_states[0].needs_reconnect = True
+    worker = threading.Thread(target=task.step)
+    worker.start()
+    assert db.reconnect_started.wait(timeout=3)
+
+    task.stop()
+    db.allow_reconnect.set()
+    worker.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert task.status is TaskStatus.STOPPED
+    assert db.connected is False
+    assert db.close_count >= 3
+
+
+def test_worker_重连返回时已停止不再准备会话_sql(tmp_path: Path) -> None:
+    class StopWhileReconnectDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.delay_next_connect = False
+            self.reconnect_started = threading.Event()
+            self.allow_reconnect = threading.Event()
+            self.stop_close_started = threading.Event()
+            self.allow_stop_close = threading.Event()
+            self.sql_after_stop = threading.Event()
+            self.stop_thread: threading.Thread | None = None
+            self.task: FuzzTask | None = None
+
+        def connect(self) -> None:
+            if self.delay_next_connect:
+                self.reconnect_started.set()
+                assert self.allow_reconnect.wait(timeout=3), "测试等待放行重连超时"
+            self.connected = True
+
+        def close(self) -> None:
+            if threading.current_thread() is self.stop_thread:
+                self.stop_close_started.set()
+                assert self.allow_stop_close.wait(timeout=3), "测试等待放行停止关闭超时"
+            self.connected = False
+
+        def execute(self, sql: str) -> None:
+            if self.task is not None and self.task.status is TaskStatus.STOPPED:
+                self.sql_after_stop.set()
+            super().execute(sql)
+
+        def connection_diagnostics(self) -> dict:
+            return {"connection_open": self.connected}
+
+    db = StopWhileReconnectDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    db.task = task
+    task.start()
+    db.delay_next_connect = True
+    with task._lock:
+        task._worker_states[0].needs_reconnect = True
+    worker = threading.Thread(target=task.step)
+    worker.start()
+    assert db.reconnect_started.wait(timeout=3)
+
+    stop_thread = threading.Thread(target=task.stop)
+    db.stop_thread = stop_thread
+    stop_thread.start()
+    assert db.stop_close_started.wait(timeout=3)
+
+    db.allow_reconnect.set()
+    worker.join(timeout=3)
+    db.allow_stop_close.set()
+    stop_thread.join(timeout=3)
+
+    assert not worker.is_alive()
+    assert not stop_thread.is_alive()
+    assert db.sql_after_stop.is_set() is False
+    assert db.connected is False
+
+
+def test_恢复探测迟到_ping_在任务停止后会关闭新连接(tmp_path: Path) -> None:
+    class DelayedPingDatabase(FakeDatabase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ping_started = threading.Event()
+            self.allow_ping = threading.Event()
+            self.close_count = 0
+
+        def ping(self) -> bool:
+            self.ping_started.set()
+            assert self.allow_ping.wait(timeout=3), "测试等待放行 ping 超时"
+            self.connected = True
+            return True
+
+        def close(self) -> None:
+            self.close_count += 1
+            self.connected = False
+
+    db = DelayedPingDatabase()
+    task = FuzzTask(
+        task_id="task-1",
+        node=_node(),
+        base_sql_dir=_base_dir(tmp_path),
+        db=db,
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        clock=FakeClock(),
+    )
+    task.start()
+    with task._lock:
+        task._set_status_locked(TaskStatus.RECOVERING)
+        task._next_probe_at = None
+    probe = threading.Thread(target=task.probe_recovery)
+    probe.start()
+    assert db.ping_started.wait(timeout=3)
+
+    task.stop()
+    db.allow_ping.set()
+    probe.join(timeout=3)
+
+    assert not probe.is_alive()
+    assert task.status is TaskStatus.STOPPED
+    assert db.connected is False
+    assert db.close_count >= 2
 
 
 def test_运行时生成选项不包含向量强制开关(tmp_path: Path) -> None:

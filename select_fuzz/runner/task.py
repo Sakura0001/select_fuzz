@@ -8,9 +8,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from select_fuzz.base_tables import BaseSqlBundle, load_base_sql_bundle
 from select_fuzz.config import TargetNodeConfig
-from select_fuzz.metadata.base_sql import is_base_table_definition_file, load_base_sql_files, split_sql_statements
-from select_fuzz.metadata.ddl_parser import parse_create_table
+from select_fuzz.metadata.base_sql import split_sql_statements
 from select_fuzz.metadata.models import BaseSqlFile, TableMetadata
 from select_fuzz.monitor.events import LostConnectionDeduplicator, LostConnectionEvent, is_lost_connection_error
 from select_fuzz.monitor.logs import SqlLogRecord, append_jsonl
@@ -21,6 +21,10 @@ from .db import DatabaseClient, LostConnectionError
 
 
 QUERY_MAX_EXECUTION_TIME_MS = 5000
+
+
+class _TaskInitializationStopped(Exception):
+    """任务初始化期间收到终态请求；用于立即退出未完成的外部调用序列。"""
 
 
 class TaskStatus(str, Enum):
@@ -79,17 +83,21 @@ class WorkerRuntimeState:
 class FuzzTask:
     task_id: str
     node: TargetNodeConfig
-    base_sql_dir: Path
     db: DatabaseClient
     metric_store: MetricStore
     log_dir: Path
     clock: Callable[[], datetime]
+    base_sql_dir: Path | None = None
+    base_sql_bundle: BaseSqlBundle | None = None
     failed_sql_dir: Path | None = None
     db_factory: Optional[Callable[[], DatabaseClient]] = None
     thread_count: int = 1
     random_seed: Optional[int] = None
     recovery_probe_seconds: int = 60
     lost_connection_dedup_minutes: int = 10
+    expand_base_table_columns: bool = False
+    base_table_seed: Optional[str] = None
+    base_table_generator_version: Optional[str] = None
     status: TaskStatus = TaskStatus.NEW
     phase: str = TaskStatus.NEW.value
     last_error: Optional[str] = None
@@ -103,6 +111,7 @@ class FuzzTask:
     _workers: List[TaskWorker] = field(default_factory=list, init=False)
     _worker_states: List[WorkerRuntimeState] = field(default_factory=list, init=False)
     _status_before_pause: TaskStatus = field(default=TaskStatus.NEW, init=False)
+    _base_sql_bundle_released: bool = field(default=False, init=False)
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False)
 
     def __post_init__(self) -> None:
@@ -110,7 +119,15 @@ class FuzzTask:
             raise ValueError("线程数必须大于等于 1")
         if self.thread_count > 1 and self.db_factory is None:
             raise ValueError("多线程任务必须提供 db_factory 以创建独立连接")
-        self.base_sql_dir = Path(self.base_sql_dir)
+        if self.base_sql_dir is None and self.base_sql_bundle is None:
+            raise ValueError("必须提供 base_sql_dir 或 base_sql_bundle")
+        if self.base_sql_dir is not None:
+            self.base_sql_dir = Path(self.base_sql_dir)
+        if self.base_sql_bundle is not None:
+            self.expand_base_table_columns = self.base_sql_bundle.expand_base_table_columns
+            self.base_table_seed = self.base_sql_bundle.seed
+            self.base_table_generator_version = self.base_sql_bundle.generator_version
+            self.tables = list(self.base_sql_bundle.tables)
         self.log_dir = Path(self.log_dir)
         self.failed_sql_dir = Path(self.failed_sql_dir) if self.failed_sql_dir is not None else self.log_dir / "failed_sql"
         self._dedup = LostConnectionDeduplicator(timedelta(minutes=self.lost_connection_dedup_minutes))
@@ -119,29 +136,22 @@ class FuzzTask:
 
     def start(self) -> None:
         try:
-            self._set_status(TaskStatus.CONNECTING)
-            self._set_all_worker_states("连接实例")
+            self._set_initialization_state(TaskStatus.SEEDING, "准备基表")
+            base_sql_bundle = self._require_base_sql_bundle()
+            self._raise_if_initialization_stopped()
+            self._set_initialization_state(TaskStatus.CONNECTING, "连接实例")
             self.db.connect()
-            self._set_status(TaskStatus.SEEDING)
-            self._set_all_worker_states("准备基表")
+            self._raise_if_initialization_stopped()
+            self._set_initialization_state(TaskStatus.SEEDING, "准备基表")
             self._recreate_database()
-            self.tables.clear()
-            sql_files = load_base_sql_files(self.base_sql_dir)
-            for sql_file in sql_files:
-                if not is_base_table_definition_file(sql_file.path):
-                    continue
-                try:
-                    self.tables.append(parse_create_table(sql_file.sql))
-                except ValueError:
-                    continue
-            if not self.tables:
-                raise RuntimeError("至少需要一张可解析的基表才能启动任务")
-            for sql_file in sql_files:
+            for sql_file in base_sql_bundle.files:
                 self._execute_statements(sql_file, self.db)
             self._verify_seed_data(self.db)
-            self._prepare_additional_workers(sql_files)
-            self._set_status(TaskStatus.RUNNING)
-            self._set_all_worker_states("空闲")
+            self._prepare_additional_workers(base_sql_bundle)
+            self._set_initialization_state(TaskStatus.RUNNING, "空闲")
+        except _TaskInitializationStopped:
+            self._close_worker_connections("任务初始化已停止")
+            return
         except Exception as exc:
             self.fail(exc)
             raise
@@ -177,16 +187,27 @@ class FuzzTask:
         except Exception as exc:
             self.fail(exc, phase=TaskStatus.RUNNING.value)
             return
+        with self._lock:
+            if self._is_terminal_locked():
+                return
         self.record_worker_sql_start(worker_id, sql, sql_metadata=sql_metadata)
+        with self._lock:
+            if self.status is not TaskStatus.RUNNING or self._base_sql_bundle_released:
+                return
         try:
             self._set_query_execution_timeout(worker.db)
             worker.db.execute(sql)
         except Exception as exc:
+            with self._lock:
+                if self._is_terminal_locked():
+                    return
             if isinstance(exc, LostConnectionError) or is_lost_connection_error(exc):
                 self._finish_worker_sql(worker_id, "恢复检测", str(exc))
                 self._handle_lost_connection(sql, str(exc), sql_metadata)
                 return
             with self._lock:
+                if self._is_terminal_locked():
+                    return
                 self.ordinary_error_total += 1
                 self.failed_query_total += 1
                 self._finish_worker_sql_locked(worker_id, "空闲", str(exc))
@@ -195,6 +216,8 @@ class FuzzTask:
                 self._write_metrics()
             return
         with self._lock:
+            if self._is_terminal_locked():
+                return
             self.sql_total += 1
             self._finish_worker_sql_locked(worker_id, "空闲", None, increment_sql_total=True)
             self._write_sql_log("成功", sql, **sql_metadata)
@@ -209,18 +232,41 @@ class FuzzTask:
                 return
             workers = list(self._workers)
 
-        if all(worker.db.ping() for worker in workers):
+        all_connections_alive = all(worker.db.ping() for worker in workers)
+        with self._lock:
+            if self.status is not TaskStatus.RECOVERING:
+                should_close = True
+            else:
+                should_close = False
+        if should_close:
+            self._close_databases(workers)
+            return
+
+        with self._lock:
+            if self.status is not TaskStatus.RECOVERING:
+                return
+
+        if all_connections_alive:
             try:
-                sql_files = load_base_sql_files(self.base_sql_dir)
+                base_sql_bundle = self._require_base_sql_bundle()
                 for worker in workers:
-                    self._prepare_worker_session(worker.db, sql_files)
+                    self._prepare_worker_session(worker.db, base_sql_bundle)
+                    with self._lock:
+                        should_close = self.status is not TaskStatus.RECOVERING
+                    if should_close:
+                        self._close_databases(workers)
+                        return
             except Exception:
                 with self._lock:
+                    if self.status is not TaskStatus.RECOVERING:
+                        return
                     self._next_probe_at = now + timedelta(seconds=self.recovery_probe_seconds)
                     self._set_all_worker_states_locked("恢复检测")
                     self._write_metrics()
                 return
             with self._lock:
+                if self.status is not TaskStatus.RECOVERING:
+                    return
                 self._set_status_locked(TaskStatus.RUNNING)
                 self._next_probe_at = None
                 self._set_all_worker_states_locked("空闲")
@@ -228,16 +274,21 @@ class FuzzTask:
             return
 
         with self._lock:
+            if self.status is not TaskStatus.RECOVERING:
+                return
             self._next_probe_at = now + timedelta(seconds=self.recovery_probe_seconds)
             self._set_all_worker_states_locked("恢复检测")
             self._write_metrics()
 
     def stop(self) -> None:
-        self._close_worker_connections("停止任务")
         with self._lock:
+            if self._is_terminal_locked():
+                return
             self._set_status_locked(TaskStatus.STOPPED)
             self._set_all_worker_states_locked("已停止")
             self._write_metrics()
+        self._close_worker_connections("停止任务")
+        self._release_base_sql_bundle()
 
     def pause(self) -> None:
         with self._lock:
@@ -260,8 +311,10 @@ class FuzzTask:
             self._write_metrics()
 
     def fail(self, exc: Exception, phase: Optional[str] = None) -> None:
-        self._mark_failed(exc, phase)
+        if not self._mark_failed(exc, phase):
+            return
         self._close_worker_connections("任务失败")
+        self._release_base_sql_bundle()
 
     @property
     def is_terminal(self) -> bool:
@@ -285,6 +338,9 @@ class FuzzTask:
                 "ordinary_error_total": self.ordinary_error_total,
                 "lost_connection_total": self.lost_connection_total,
                 "worker_states": self._worker_state_dicts_locked(),
+                "expand_base_table_columns": self.expand_base_table_columns,
+                "base_table_seed": self.base_table_seed,
+                "base_table_generator_version": self.base_table_generator_version,
             }
 
     def record_worker_sql_start(
@@ -295,6 +351,8 @@ class FuzzTask:
         sql_metadata: Optional[dict] = None,
     ) -> None:
         with self._lock:
+            if self._is_terminal_locked():
+                return
             state = self._worker_state(worker_id)
             if state is None:
                 return
@@ -313,6 +371,8 @@ class FuzzTask:
         stalled_workers: list[TaskWorker] = []
         stalled_records: list[tuple[str, str, dict]] = []
         with self._lock:
+            if self._is_terminal_locked():
+                return []
             for worker, state in zip(self._workers, self._worker_states):
                 if state.state != "执行 SQL" or state.current_sql_started_at is None:
                     continue
@@ -342,6 +402,8 @@ class FuzzTask:
 
     def _handle_lost_connection(self, sql: str, error_message: str, sql_metadata: Optional[dict] = None) -> None:
         with self._lock:
+            if self._is_terminal_locked():
+                return
             now = self.clock()
             self.failed_query_total += 1
             self._write_sql_log("lost connection", sql, error_message, **(sql_metadata or {}))
@@ -364,29 +426,26 @@ class FuzzTask:
             self._next_probe_at = now + timedelta(seconds=self.recovery_probe_seconds)
             self._write_metrics()
 
-    def _set_status(self, status: TaskStatus) -> None:
-        with self._lock:
-            self._set_status_locked(status)
-            self._write_metrics()
-
-    def _set_status_locked(self, status: TaskStatus) -> None:
+    def _set_status_locked(self, status: TaskStatus) -> bool:
+        if self._is_terminal_locked():
+            return self.status is status
         self.status = status
         self.phase = status.value
         if status is not TaskStatus.FAILED:
             self.last_error = None
+        return True
 
-    def _mark_failed(self, exc: Exception, phase: Optional[str] = None) -> None:
+    def _mark_failed(self, exc: Exception, phase: Optional[str] = None) -> bool:
         with self._lock:
+            if self._is_terminal_locked():
+                return False
             failed_phase = phase or self.phase or self.status.value
             self.status = TaskStatus.FAILED
             self.phase = failed_phase
             self.last_error = f"{failed_phase}失败: {exc}"
             self._set_all_worker_states_locked("失败", self.last_error)
             self._write_metrics()
-
-    def _set_all_worker_states(self, state: str, error: Optional[str] = None) -> None:
-        with self._lock:
-            self._set_all_worker_states_locked(state, error)
+            return True
 
     def _set_all_worker_states_locked(self, state: str, error: Optional[str] = None) -> None:
         now = self.clock()
@@ -413,6 +472,8 @@ class FuzzTask:
 
     def _set_worker_state(self, worker_id: int, state: str, error: Optional[str] = None) -> None:
         with self._lock:
+            if self._is_terminal_locked():
+                return
             worker_state = self._worker_state(worker_id)
             if worker_state is None:
                 return
@@ -441,6 +502,8 @@ class FuzzTask:
         error: Optional[str],
         increment_sql_total: bool = False,
     ) -> None:
+        if self._is_terminal_locked():
+            return
         worker_state = self._worker_state(worker_id)
         if worker_state is None:
             return
@@ -519,11 +582,16 @@ class FuzzTask:
             sql_validity=sql_validity,
             risk_tags=risk_tags,
             expected_error=expected_error,
+            expand_base_table_columns=self.expand_base_table_columns,
+            base_table_seed=self.base_table_seed,
+            base_table_generator_version=self.base_table_generator_version,
         )
         append_jsonl(self._sql_log_path(), record.to_dict())
 
     def _ensure_worker_session(self, worker_id: int, worker: TaskWorker) -> bool:
         with self._lock:
+            if self._is_terminal_locked() or self._base_sql_bundle_released:
+                return False
             state = self._worker_state(worker_id)
             diagnostics = self._connection_diagnostics(worker.db)
             if state is not None:
@@ -536,23 +604,49 @@ class FuzzTask:
         try:
             worker.db.close()
             worker.db.connect()
-            self._prepare_worker_session(worker.db, load_base_sql_files(self.base_sql_dir))
+            with self._lock:
+                terminal_after_connect = self._is_terminal_locked() or self._base_sql_bundle_released
+            if terminal_after_connect:
+                worker.db.close()
+                return False
+            self._prepare_worker_session(worker.db, self._require_base_sql_bundle())
         except Exception as exc:
+            with self._lock:
+                terminal = self._is_terminal_locked() or self._base_sql_bundle_released
+            if terminal:
+                worker.db.close()
+                return False
             self.fail(exc, phase="恢复 worker 会话")
             return False
 
         with self._lock:
-            state = self._worker_state(worker_id)
-            if state is not None:
-                state.needs_reconnect = False
-                state.state = "空闲"
-                state.current_sql = None
-                state.current_sql_started_at = None
-                state.current_sql_metadata = None
-                state.last_error = None
-                state.last_heartbeat = self.clock()
-            self._write_metrics()
+            if self._is_terminal_locked() or self._base_sql_bundle_released:
+                terminal = True
+            else:
+                terminal = False
+            if not terminal:
+                state = self._worker_state(worker_id)
+                if state is not None:
+                    state.needs_reconnect = False
+                    state.state = "空闲"
+                    state.current_sql = None
+                    state.current_sql_started_at = None
+                    state.current_sql_metadata = None
+                    state.last_error = None
+                    state.last_heartbeat = self.clock()
+                self._write_metrics()
+        if terminal:
+            worker.db.close()
+            return False
         return True
+
+    @staticmethod
+    def _close_databases(workers: list[TaskWorker]) -> None:
+        for worker in workers:
+            worker.db.close()
+
+    def _is_terminal_locked(self) -> bool:
+        return self.status in {TaskStatus.STOPPED, TaskStatus.FAILED}
 
     def _generator_sql_metadata(self, generator: SQLGenerator) -> dict:
         return {
@@ -613,44 +707,62 @@ class FuzzTask:
 
     def _recreate_database(self) -> None:
         database = self._database_name()
-        self.db.execute(f"DROP DATABASE IF EXISTS {_quote_identifier(database)}")
-        self.db.execute(f"CREATE DATABASE {_quote_identifier(database)}")
-        self.db.execute(f"USE {_quote_identifier(database)}")
+        for statement in (
+            f"DROP DATABASE IF EXISTS {_quote_identifier(database)}",
+            f"CREATE DATABASE {_quote_identifier(database)}",
+            f"USE {_quote_identifier(database)}",
+        ):
+            self._execute_initialization_statement(self.db, statement)
 
-    def _prepare_additional_workers(self, sql_files: List[BaseSqlFile]) -> None:
+    def _prepare_additional_workers(self, base_sql_bundle: BaseSqlBundle) -> None:
         for worker_id in range(1, self.thread_count):
             assert self.db_factory is not None
             db = self.db_factory()
             try:
+                self._raise_if_initialization_stopped()
                 db.connect()
-                self._prepare_worker_session(db, sql_files)
+                self._raise_if_initialization_stopped()
+                self._prepare_worker_session(db, base_sql_bundle)
+                self._raise_if_initialization_stopped()
             except Exception:
                 db.close()
                 raise
-            self._workers.append(TaskWorker(worker_id=worker_id, db=db, generator=self._new_generator(worker_id)))
-            self._worker_states.append(WorkerRuntimeState(worker_id=worker_id, state="空闲", last_heartbeat=self.clock()))
+            with self._lock:
+                if self._is_terminal_locked() or self._base_sql_bundle_released:
+                    should_append = False
+                else:
+                    should_append = True
+                    self._workers.append(TaskWorker(worker_id=worker_id, db=db, generator=self._new_generator(worker_id)))
+                    self._worker_states.append(
+                        WorkerRuntimeState(worker_id=worker_id, state="空闲", last_heartbeat=self.clock())
+                    )
+            if not should_append:
+                db.close()
+                raise _TaskInitializationStopped
 
-    def _prepare_worker_session(self, db: DatabaseClient, sql_files: List[BaseSqlFile]) -> None:
-        db.execute(f"USE {_quote_identifier(self._database_name())}")
+    def _prepare_worker_session(self, db: DatabaseClient, base_sql_bundle: BaseSqlBundle) -> None:
+        self._execute_initialization_statement(db, f"USE {_quote_identifier(self._database_name())}")
         temporary_names = {table.name for table in self.tables if table.is_temporary}
         if not temporary_names:
             return
-        for sql_file in sql_files:
+        for sql_file in base_sql_bundle.files:
             if self._is_temporary_table_file(sql_file):
                 self._execute_statements(sql_file, db)
-        self._execute_temporary_seed_statements(sql_files, temporary_names, db)
+        self._execute_temporary_seed_statements(base_sql_bundle.files, temporary_names, db)
         self._verify_seed_data(db, temporary_names)
 
     def _verify_seed_data(self, db: DatabaseClient, table_names: set[str] | None = None) -> None:
         targets = [table for table in self.tables if table_names is None or table.name in table_names]
         for table in targets:
+            self._raise_if_initialization_stopped()
             count = db.query_scalar(f"SELECT COUNT(*) FROM {_quote_identifier(table.name)}")
+            self._raise_if_initialization_stopped()
             if count <= 0:
                 raise RuntimeError(f"基表初始化未插入数据: {table.name}")
 
     def _execute_statements(self, sql_file: BaseSqlFile, db: DatabaseClient) -> None:
         for statement in split_sql_statements(sql_file.sql):
-            db.execute(statement)
+            self._execute_initialization_statement(db, statement)
 
     def _set_query_execution_timeout(self, db: DatabaseClient) -> None:
         db.execute(f"SET SESSION max_execution_time = {QUERY_MAX_EXECUTION_TIME_MS}")
@@ -660,7 +772,7 @@ class FuzzTask:
 
     def _execute_temporary_seed_statements(
         self,
-        sql_files: List[BaseSqlFile],
+        sql_files: tuple[BaseSqlFile, ...],
         temporary_names: set[str],
         db: DatabaseClient,
     ) -> None:
@@ -670,11 +782,51 @@ class FuzzTask:
             for statement in split_sql_statements(sql_file.sql):
                 target = self._insert_target_table(statement)
                 if target in temporary_names:
-                    db.execute(statement)
+                    self._execute_initialization_statement(db, statement)
+
+    def _execute_initialization_statement(self, db: DatabaseClient, statement: str) -> None:
+        self._raise_if_initialization_stopped()
+        db.execute(statement)
+        self._raise_if_initialization_stopped()
+
+    def _raise_if_initialization_stopped(self) -> None:
+        with self._lock:
+            stopped = self._is_terminal_locked() or self._base_sql_bundle_released
+        if stopped:
+            raise _TaskInitializationStopped
+
+    def _set_initialization_state(self, status: TaskStatus, worker_state: str) -> None:
+        with self._lock:
+            if self._is_terminal_locked() or self._base_sql_bundle_released:
+                raise _TaskInitializationStopped
+            self._set_status_locked(status)
+            self._set_all_worker_states_locked(worker_state)
+            self._write_metrics()
 
     def _insert_target_table(self, statement: str) -> Optional[str]:
         match = re.match(r"\s*INSERT\s+INTO\s+`?(?P<table>[\w$]+)`?", statement, re.IGNORECASE)
         return match.group("table") if match else None
+
+    def _require_base_sql_bundle(self) -> BaseSqlBundle:
+        with self._lock:
+            if self.base_sql_bundle is not None:
+                return self.base_sql_bundle
+            if self._base_sql_bundle_released:
+                raise RuntimeError("任务已结束，基表 SQL 内存包已释放")
+            if self.base_sql_dir is None:
+                raise RuntimeError("未提供可加载的基表目录")
+            bundle = load_base_sql_bundle(self.base_sql_dir)
+            self.base_sql_bundle = bundle
+            self.tables = list(bundle.tables)
+            self.expand_base_table_columns = bundle.expand_base_table_columns
+            self.base_table_seed = bundle.seed
+            self.base_table_generator_version = bundle.generator_version
+            return bundle
+
+    def _release_base_sql_bundle(self) -> None:
+        with self._lock:
+            self.base_sql_bundle = None
+            self._base_sql_bundle_released = True
 
     def _worker(self, worker_id: int) -> TaskWorker | None:
         if worker_id < 0 or worker_id >= len(self._workers):

@@ -1,4 +1,5 @@
 export type TaskStatus = "新建" | "连接实例" | "准备基表" | "执行 SQL" | "恢复检测" | "已暂停" | "失败" | "已停止";
+export type BaseTableGeneratorVersion = "v1";
 
 export interface LostConnectionEvent {
   timestamp: string;
@@ -19,6 +20,9 @@ export interface FuzzTask {
   last_error?: string | null;
   jump_host?: string | null;
   thread_count: number;
+  expand_base_table_columns: boolean;
+  base_table_seed: string | null;
+  base_table_generator_version: BaseTableGeneratorVersion | null;
   sql_total: number;
   success_query_total: number;
   failed_query_total: number;
@@ -71,6 +75,9 @@ export interface CreateTaskPayload {
   password: string;
   jump_host?: string | null;
   thread_count: number;
+  expand_base_table_columns: boolean;
+  base_table_seed: string | null;
+  base_table_generator_version: BaseTableGeneratorVersion | null;
 }
 
 export interface SummaryMetric {

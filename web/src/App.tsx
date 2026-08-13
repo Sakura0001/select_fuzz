@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { Alert, Button, Card, Col, Collapse, Empty, Form, Input, InputNumber, Layout, Progress, Row, Select, Space, Statistic, Steps, Tag, Tooltip, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Collapse, Empty, Form, Input, InputNumber, Layout, Progress, Row, Select, Space, Statistic, Steps, Switch, Tag, Tooltip, Typography, message } from "antd";
 import { ApiOutlined, ClusterOutlined, DatabaseOutlined, DeploymentUnitOutlined, PauseCircleOutlined, PlayCircleOutlined, StopOutlined, WarningOutlined } from "@ant-design/icons";
 import * as echarts from "echarts";
 import { addJumpHost, createTask, loadCoverage, loadJumpHosts, loadLostConnections, loadTasks, pauseTask, resumeTask, stopTask, summarize } from "./api";
+import { baseTableSeedValidationError, normalizeBaseTableFormFields } from "./baseTableForm";
 import type { CoverageItem, CreateTaskPayload, FuzzTask, JumpHost } from "./types";
 
 const { Sider, Content } = Layout;
@@ -86,9 +87,11 @@ function stepDescription(task: FuzzTask, phase: string, runningDescription: stri
   }
   if (phase === "准备基表") {
     if (stepIndexByPhase.get(task.phase) === 1 && task.status !== "失败") {
-      return "进行中";
+      return `进行中 · ${runningDescription}`;
     }
-    return (stepIndexByPhase.get(task.phase) ?? 0) > 1 ? "完成" : "等待";
+    return (stepIndexByPhase.get(task.phase) ?? 0) > 1
+      ? `完成 · ${runningDescription}`
+      : `等待 · ${runningDescription}`;
   }
   if (task.status === "已暂停") {
     return "已暂停";
@@ -100,6 +103,49 @@ function stepDescription(task: FuzzTask, phase: string, runningDescription: stri
     return "未开始";
   }
   return runningDescription;
+}
+
+function baseTablePreparationDescription(task: FuzzTask) {
+  const mode = task.expand_base_table_columns ? "扩展列" : "核心列";
+  return `${mode} · 每表 10～100 行`;
+}
+
+function BaseTableMode({ task }: { task: FuzzTask }) {
+  if (!task.expand_base_table_columns) {
+    return (
+      <div className="base-table-mode">
+        <Text type="secondary">基表模式：核心列（42 列）</Text>
+      </div>
+    );
+  }
+
+  const version = task.base_table_generator_version ?? "未知版本";
+  const seed = task.base_table_seed ?? "未返回";
+  const reproductionId = task.base_table_generator_version && task.base_table_seed
+    ? `${task.base_table_generator_version}:${task.base_table_seed}`
+    : null;
+  return (
+    <div className="base-table-mode">
+      <Text type="secondary" className="base-table-mode-text">
+        基表模式：扩展列（200～500 列）
+      </Text>
+      <Text type="secondary" className="base-table-identity">
+        {version} · 种子 <span className="base-table-seed">{seed}</span>
+      </Text>
+      {reproductionId && (
+        <div className="base-table-reproduction">
+          <Text type="secondary">复现标识</Text>
+          <Text
+            type="secondary"
+            className="base-table-reproduction-id"
+            copyable={{ text: reproductionId, tooltips: ["复制复现标识", "已复制"] }}
+          >
+            {reproductionId}
+          </Text>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function workerStateColor(state: string) {
@@ -226,24 +272,21 @@ function TaskCard({
 
   return (
     <Card className={`task-card ${task.status === "恢复检测" || task.status === "失败" ? "task-card-alert" : ""}`} bordered={false}>
-      <Row align="middle" gutter={14}>
-        <Col span={5}>
+      <Row align="top" gutter={[14, 12]} className="task-card-header">
+        <Col span={9}>
           <div className="node-name">{task.node_name}</div>
           <Text type="secondary">{task.target} · {task.jump_host ?? "直连"}</Text>
+          <BaseTableMode task={task} />
         </Col>
-        <Col span={12}>
-          <Steps
-            size="small"
-            current={currentStep}
-            status={isFailed || task.status === "恢复检测" ? "error" : task.status === "已暂停" ? "wait" : "process"}
-            items={[
-              { title: "连接实例", description: stepDescription(task, "连接实例", "完成") },
-              { title: "准备基表", description: stepDescription(task, "准备基表", "每表 10 行") },
-              { title: "执行 SQL", description: stepDescription(task, "执行 SQL", `${task.thread_count} 线程 · ${task.sql_rate} 条/秒`) }
-            ]}
-          />
+        <Col span={11}>
+          <div className="query-summary">
+            <div><span>成功查询</span><b>{task.success_query_total}</b></div>
+            <div><span>失败查询</span><b className={task.failed_query_total > 0 ? "danger-text" : ""}>{task.failed_query_total}</b></div>
+            <div><span>普通错误</span><b>{task.ordinary_error_total}</b></div>
+            <div><span>lost connection 事件</span><b>{task.lost_connection_total}</b></div>
+          </div>
         </Col>
-        <Col span={3}>
+        <Col span={4}>
           <Space direction="vertical" size={6}>
             {statusTag(task)}
             <Space size={6}>
@@ -265,15 +308,19 @@ function TaskCard({
             </Space>
           </Space>
         </Col>
-        <Col span={4}>
-          <div className="query-summary">
-            <div><span>成功查询</span><b>{task.success_query_total}</b></div>
-            <div><span>失败查询</span><b className={task.failed_query_total > 0 ? "danger-text" : ""}>{task.failed_query_total}</b></div>
-            <div><span>普通错误</span><b>{task.ordinary_error_total}</b></div>
-            <div><span>lost connection 事件</span><b>{task.lost_connection_total}</b></div>
-          </div>
-        </Col>
       </Row>
+      <div className="task-card-steps">
+        <Steps
+          size="small"
+          current={currentStep}
+          status={isFailed || task.status === "恢复检测" ? "error" : task.status === "已暂停" ? "wait" : "process"}
+          items={[
+            { title: "连接实例", description: stepDescription(task, "连接实例", "完成") },
+            { title: "准备基表", description: stepDescription(task, "准备基表", baseTablePreparationDescription(task)) },
+            { title: "执行 SQL", description: stepDescription(task, "执行 SQL", `${task.thread_count} 线程 · ${task.sql_rate} 条/秒`) }
+          ]}
+        />
+      </div>
       <Collapse
         ghost
         activeKey={activeDetailKeys}
@@ -294,6 +341,7 @@ function App() {
   const [backendConnected, setBackendConnected] = useState(true);
   const [taskForm] = Form.useForm<CreateTaskPayload>();
   const [jumpForm] = Form.useForm<JumpHost>();
+  const expandBaseTableColumns = Form.useWatch("expand_base_table_columns", taskForm) ?? false;
   const metrics = useMemo(() => summarize(tasks), [tasks]);
   const taskIds = useMemo(() => tasks.map((task) => task.task_id).sort().join(","), [tasks]);
   const refreshTasks = async () => {
@@ -393,8 +441,10 @@ function App() {
 
   const handleStartTask = async (values: CreateTaskPayload) => {
     try {
+      const baseTableFields = normalizeBaseTableFormFields(values);
       const task = await createTask({
         ...values,
+        ...baseTableFields,
         node_name: values.node_name || `${values.host}:${values.port}`,
         jump_host: values.jump_host || null
       });
@@ -537,7 +587,10 @@ function App() {
                     username: "root",
                     password: "",
                     jump_host: "",
-                    thread_count: 1
+                    thread_count: 1,
+                    expand_base_table_columns: false,
+                    base_table_generator_version: "v1",
+                    base_table_seed: ""
                   }}
                   onFinish={handleStartTask}
                 >
@@ -562,6 +615,41 @@ function App() {
                   >
                     <InputNumber min={1} max={128} className="full-input" />
                   </Form.Item>
+                  <Form.Item
+                    name="expand_base_table_columns"
+                    label="扩展基表列（每表 200～500 列）"
+                    valuePropName="checked"
+                  >
+                    <Switch checkedChildren="已开启" unCheckedChildren="已关闭" />
+                  </Form.Item>
+                  {expandBaseTableColumns && (
+                    <>
+                      <Form.Item
+                        name="base_table_generator_version"
+                        label="生成器版本"
+                        rules={[{ required: true, message: "请选择生成器版本" }]}
+                      >
+                        <Select options={[{ label: "v1", value: "v1" }]} />
+                      </Form.Item>
+                      <Form.Item
+                        name="base_table_seed"
+                        label="复现种子"
+                        extra="留空时由后端生成；填写时仅支持规范的无符号 64 位十进制整数。"
+                        rules={[
+                          {
+                            validator: async (_, value: unknown) => {
+                              const error = baseTableSeedValidationError(value);
+                              if (error) {
+                                throw new Error(error);
+                              }
+                            }
+                          }
+                        ]}
+                      >
+                        <Input inputMode="numeric" autoComplete="off" maxLength={20} placeholder="留空自动生成，例如 12345" />
+                      </Form.Item>
+                    </>
+                  )}
                   <Alert type="info" showIcon message="后台会自动创建并使用 test 库，任务表单无需填写目标库。" className="form-note" />
                   <Button type="primary" block icon={<PlayCircleOutlined />} htmlType="submit">启动任务</Button>
                 </Form>

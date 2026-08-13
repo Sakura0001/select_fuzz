@@ -10,8 +10,8 @@ from fastapi.responses import StreamingResponse
 from select_fuzz.monitor.store import MetricStore
 from select_fuzz.runner.db import PyMySQLClient
 
-from .schemas import JumpHostRequest, TaskCreateRequest
-from .service import RuntimeService
+from .schemas import JumpHostRequest, TaskCreateRequest, TaskResponse
+from .service import BUILTIN_BASE_SQL_DIR, RuntimeService
 
 
 def create_app(service: RuntimeService) -> FastAPI:
@@ -22,15 +22,15 @@ def create_app(service: RuntimeService) -> FastAPI:
     def health() -> dict:
         return {"状态": "正常"}
 
-    @app.get("/api/tasks")
+    @app.get("/api/tasks", response_model=list[TaskResponse])
     def list_tasks() -> list:
         return service.list_tasks()
 
-    @app.post("/api/tasks")
+    @app.post("/api/tasks", response_model=TaskResponse)
     def create_task(request: TaskCreateRequest) -> dict:
         return service.create_task(request).to_dict()
 
-    @app.get("/api/tasks/{task_id}")
+    @app.get("/api/tasks/{task_id}", response_model=TaskResponse)
     def get_task(task_id: str) -> dict:
         try:
             return service.get_task(task_id)
@@ -101,7 +101,7 @@ def create_default_app() -> FastAPI:
         metric_store=MetricStore(log_dir / "metrics.db"),
         log_dir=log_dir,
         failed_sql_dir=log_dir / "failed_sql",
-        base_sql_dir=Path("sql_base_tables"),
+        base_sql_dir=BUILTIN_BASE_SQL_DIR,
         db_factory=lambda node: PyMySQLClient(node),
     )
     return create_app(service)

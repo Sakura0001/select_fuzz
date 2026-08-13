@@ -1,3 +1,6 @@
+# 配置结构示例；README 中直接启动 uvicorn 的方式不会自动加载本文件。
+# base_sql_dir 供核心模式加载；若改为自定义目录，任务级扩展模式不受支持，
+# 开启扩列的任务会在“准备基表”阶段失败。
 project_name: sql_fuzz
 display_name: SQL 模糊测试控制台
 base_sql_dir: sql_base_tables

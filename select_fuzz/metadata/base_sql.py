@@ -27,7 +27,13 @@ def is_base_table_definition_file(path: Path) -> bool:
         sql = path.read_text(encoding="utf-8")
     except OSError:
         return True
-    return not is_generated_seed_sql(sql)
+    return is_base_table_definition(BaseSqlFile(path=path, sql=sql))
+
+
+def is_base_table_definition(sql_file: BaseSqlFile) -> bool:
+    """仅依据内存中的 SQL 内容判断是否应作为基表定义解析。"""
+
+    return not is_generated_seed_sql(sql_file.sql)
 
 
 def is_generated_seed_sql(sql: str) -> bool:

@@ -18,6 +18,9 @@ class SqlLogRecord:
     sql_validity: Optional[str] = None
     risk_tags: Optional[List[str]] = None
     expected_error: Optional[bool] = None
+    expand_base_table_columns: bool = False
+    base_table_seed: Optional[str] = None
+    base_table_generator_version: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         row = {
@@ -26,6 +29,9 @@ class SqlLogRecord:
             "node_name": self.node_name,
             "status": self.status,
             "sql": self.sql,
+            "expand_base_table_columns": self.expand_base_table_columns,
+            "base_table_seed": self.base_table_seed,
+            "base_table_generator_version": self.base_table_generator_version,
         }
         if self.error_message is not None:
             row["error_message"] = self.error_message

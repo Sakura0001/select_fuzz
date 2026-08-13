@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import itertools
+import secrets
 import threading
+import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from select_fuzz.base_tables import (
+    CURRENT_BASE_TABLE_GENERATOR_VERSION,
+    BaseSqlBundle,
+    generate_base_sql_bundle,
+    load_base_sql_bundle,
+)
 from select_fuzz.config import JumpHostConfig, TargetNodeConfig
 from select_fuzz.monitor.logs import read_jsonl
 from select_fuzz.monitor.store import MetricStore
@@ -16,6 +24,10 @@ from select_fuzz.runner.task import FuzzTask, TaskStatus
 from select_fuzz.sqlgen.operators import build_operator_registry
 
 from .schemas import TaskCreateRequest
+
+
+BUILTIN_BASE_SQL_DIR = Path(__file__).resolve().parents[2] / "sql_base_tables"
+BACKGROUND_JOIN_TIMEOUT_SECONDS = 0.2
 
 
 @dataclass
@@ -36,6 +48,9 @@ class TaskSnapshot:
     lost_connection_total: int = 0
     sql_rate: float = 0
     worker_states: list[dict] = field(default_factory=list)
+    expand_base_table_columns: bool = False
+    base_table_seed: Optional[str] = None
+    base_table_generator_version: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -48,6 +63,7 @@ class RuntimeService:
         log_dir: Path | str,
         failed_sql_dir: Path | str | None = None,
         base_sql_dir: Path | str | None = None,
+        use_builtin_base_tables: bool = False,
         db_factory: Optional[Callable[[TargetNodeConfig], DatabaseClient]] = None,
         run_background: bool = True,
         query_interval_seconds: float = 0.05,
@@ -57,6 +73,12 @@ class RuntimeService:
         self.log_dir = Path(log_dir)
         self.failed_sql_dir = Path(failed_sql_dir) if failed_sql_dir is not None else self.log_dir / "failed_sql"
         self.base_sql_dir = Path(base_sql_dir) if base_sql_dir is not None else None
+        # 仅保留旧构造调用兼容；内置来源必须由规范化后的实际目录身份确认。
+        self.use_builtin_base_tables = use_builtin_base_tables
+        self._uses_builtin_base_tables = (
+            self.base_sql_dir is not None
+            and self.base_sql_dir.resolve() == BUILTIN_BASE_SQL_DIR.resolve()
+        )
         self.db_factory = db_factory
         self.run_background = run_background
         self.query_interval_seconds = query_interval_seconds
@@ -66,10 +88,19 @@ class RuntimeService:
         self._task_tunnels: Dict[str, JumpTunnel] = {}
         self._background_stop_events: Dict[str, threading.Event] = {}
         self._background_worker_threads: Dict[str, Dict[int, threading.Thread]] = {}
+        self._creating_task_ids: set[str] = set()
         self._jump_hosts: List[dict] = []
         self._counter = itertools.count(1)
+        self._lifecycle_lock = threading.RLock()
 
     def create_task(self, request: TaskCreateRequest) -> TaskSnapshot:
+        expand_base_table_columns = request.expand_base_table_columns
+        base_table_seed = request.base_table_seed
+        base_table_generator_version = request.base_table_generator_version
+        if expand_base_table_columns:
+            base_table_generator_version = base_table_generator_version or CURRENT_BASE_TABLE_GENERATOR_VERSION
+            base_table_seed = base_table_seed or str(secrets.randbits(64))
+
         task_id = f"task-{next(self._counter)}"
         snapshot = TaskSnapshot(
             task_id=task_id,
@@ -80,9 +111,35 @@ class RuntimeService:
             database=request.database or "test",
             jump_host=request.jump_host,
             thread_count=request.thread_count,
+            expand_base_table_columns=expand_base_table_columns,
+            base_table_seed=base_table_seed,
+            base_table_generator_version=base_table_generator_version,
         )
-        self._tasks[task_id] = snapshot
-        if self.base_sql_dir is not None and self.db_factory is not None:
+        with self._lifecycle_lock:
+            self._tasks[task_id] = snapshot
+            self._creating_task_ids.add(task_id)
+        try:
+            try:
+                base_sql_bundle = self._prepare_base_sql_bundle(
+                    expand_base_table_columns=expand_base_table_columns,
+                    generator_version=base_table_generator_version,
+                    seed=base_table_seed,
+                )
+            except Exception as exc:
+                self._mark_snapshot_failed(snapshot, exc, TaskStatus.SEEDING)
+                return snapshot
+
+            if self._snapshot_is_terminal_for_task(task_id):
+                return snapshot
+
+            if self.db_factory is None:
+                self._mark_snapshot_failed(
+                    snapshot,
+                    RuntimeError("未配置数据库客户端工厂"),
+                    TaskStatus.CONNECTING,
+                )
+                return snapshot
+
             node = TargetNodeConfig(
                 name=request.node_name,
                 host=request.host,
@@ -96,10 +153,10 @@ class RuntimeService:
             try:
                 tunnel = self._start_jump_tunnel(task_id, node)
             except Exception as exc:
-                snapshot.status = TaskStatus.FAILED.value
-                snapshot.phase = TaskStatus.CONNECTING.value
-                snapshot.last_error = f"{TaskStatus.CONNECTING.value}失败: {exc}"
-                self.metric_store.upsert_task_metric(task_id, request.node_name, snapshot.status, 0, 0)
+                self._mark_snapshot_failed(snapshot, exc, TaskStatus.CONNECTING)
+                return snapshot
+            if self._snapshot_is_terminal_for_task(task_id):
+                self._stop_jump_tunnel(task_id)
                 return snapshot
             if tunnel is not None:
                 assert tunnel.local_port is not None
@@ -109,6 +166,7 @@ class RuntimeService:
                     task_id=task_id,
                     node=node,
                     base_sql_dir=self.base_sql_dir,
+                    base_sql_bundle=base_sql_bundle,
                     db=self.db_factory(db_node),
                     db_factory=lambda: self.db_factory(db_node),
                     metric_store=self.metric_store,
@@ -116,37 +174,90 @@ class RuntimeService:
                     failed_sql_dir=self.failed_sql_dir,
                     clock=lambda: datetime.now(timezone.utc),
                     thread_count=request.thread_count,
+                    expand_base_table_columns=expand_base_table_columns,
+                    base_table_seed=base_table_seed,
+                    base_table_generator_version=base_table_generator_version,
                 )
             except Exception as exc:
                 self._stop_jump_tunnel(task_id)
-                snapshot.status = TaskStatus.FAILED.value
-                snapshot.phase = TaskStatus.CONNECTING.value
-                snapshot.last_error = f"{TaskStatus.CONNECTING.value}失败: {exc}"
-                self.metric_store.upsert_task_metric(task_id, request.node_name, snapshot.status, 0, 0)
+                self._mark_snapshot_failed(snapshot, exc, TaskStatus.CONNECTING)
                 return snapshot
-            self._real_tasks[task_id] = real_task
+            with self._lifecycle_lock:
+                if self._snapshot_is_terminal(snapshot):
+                    should_start = False
+                else:
+                    self._real_tasks[task_id] = real_task
+                    should_start = True
+            if not should_start:
+                real_task.stop()
+                self._stop_jump_tunnel(task_id)
+                return snapshot
             try:
                 real_task.start()
             except Exception:
-                self._stop_jump_tunnel(task_id)
+                pass
             self._sync_snapshot_from_task(real_task)
-            if self.run_background and not real_task.is_terminal:
+            if real_task.is_terminal:
+                self._finalize_terminal_task(task_id)
+            elif self.run_background:
                 self._start_background_loop(real_task)
-        else:
-            snapshot.status = TaskStatus.RUNNING.value
-            snapshot.phase = TaskStatus.RUNNING.value
-            self.metric_store.upsert_task_metric(task_id, request.node_name, snapshot.status, 0, 0)
-        return snapshot
+            return snapshot
+        finally:
+            self._finish_task_creation(task_id)
+
+    def _snapshot_is_terminal_for_task(self, task_id: str) -> bool:
+        with self._lifecycle_lock:
+            return self._snapshot_is_terminal(self._tasks[task_id])
+
+    def _finish_task_creation(self, task_id: str) -> None:
+        with self._lifecycle_lock:
+            self._creating_task_ids.discard(task_id)
+        self._try_finalize_terminal_task(task_id)
+
+    def _prepare_base_sql_bundle(
+        self,
+        *,
+        expand_base_table_columns: bool,
+        generator_version: str | None,
+        seed: str | None,
+    ) -> BaseSqlBundle:
+        if expand_base_table_columns:
+            if not self._uses_builtin_base_tables:
+                raise RuntimeError("自定义基表目录不支持扩展列")
+            if generator_version is None or seed is None:
+                raise RuntimeError("扩展基表列缺少生成器版本或种子")
+            return generate_base_sql_bundle(generator_version, seed)
+        if self.base_sql_dir is None:
+            raise RuntimeError("未配置基表目录")
+        return load_base_sql_bundle(self.base_sql_dir)
+
+    def _mark_snapshot_failed(self, snapshot: TaskSnapshot, exc: Exception, phase: TaskStatus) -> None:
+        with self._lifecycle_lock:
+            if self._snapshot_is_terminal(snapshot):
+                return
+            snapshot.status = TaskStatus.FAILED.value
+            snapshot.phase = phase.value
+            snapshot.last_error = f"{phase.value}失败: {exc}"
+            metric_values = (snapshot.task_id, snapshot.node_name, snapshot.status)
+        self.metric_store.upsert_task_metric(*metric_values, 0, 0)
 
     def stop_task(self, task_id: str) -> TaskSnapshot:
         task = self._tasks[task_id]
-        real_task = self._real_tasks.get(task_id)
+        with self._lifecycle_lock:
+            real_task = self._real_tasks.get(task_id)
+            is_creating = task_id in self._creating_task_ids
+            stop_event = self._background_stop_events.get(task_id)
+            if stop_event is not None:
+                stop_event.set()
+            if real_task is None and is_creating and not self._snapshot_is_terminal(task):
+                task.status = TaskStatus.STOPPED.value
+                task.phase = TaskStatus.STOPPED.value
+                task.last_error = None
         if real_task is not None:
             real_task.stop()
             self._sync_snapshot_from_task(real_task)
-        else:
-            task.status = TaskStatus.STOPPED.value
-            task.phase = TaskStatus.STOPPED.value
+        elif not is_creating and not self._snapshot_is_terminal(task):
+            self._mark_snapshot_failed(task, RuntimeError("任务运行实例不存在"), TaskStatus.RUNNING)
         self.metric_store.upsert_task_metric(
             task.task_id,
             task.node_name,
@@ -154,43 +265,49 @@ class RuntimeService:
             task.sql_total,
             task.lost_connection_total,
         )
-        stop_event = self._background_stop_events.get(task_id)
-        if stop_event is not None:
-            stop_event.set()
-        self._stop_jump_tunnel(task_id)
+        self._finalize_terminal_task(task_id)
+        self._join_background_threads(task_id)
+        self._try_finalize_terminal_task(task_id)
         return task
 
     def pause_task(self, task_id: str) -> TaskSnapshot:
         task = self._tasks[task_id]
-        real_task = self._real_tasks.get(task_id)
+        if self._snapshot_is_terminal(task):
+            return task
+        with self._lifecycle_lock:
+            real_task = self._real_tasks.get(task_id)
         if real_task is not None:
             real_task.pause()
             self._sync_snapshot_from_task(real_task)
             return task
-        task.status = TaskStatus.PAUSED.value
-        task.phase = TaskStatus.PAUSED.value
-        self.metric_store.upsert_task_metric(task.task_id, task.node_name, task.status, task.sql_total, task.lost_connection_total)
+        self._mark_snapshot_failed(task, RuntimeError("任务运行实例不存在"), TaskStatus.RUNNING)
+        self._finalize_terminal_task(task_id)
         return task
 
     def resume_task(self, task_id: str) -> TaskSnapshot:
         task = self._tasks[task_id]
-        real_task = self._real_tasks.get(task_id)
+        if self._snapshot_is_terminal(task):
+            return task
+        with self._lifecycle_lock:
+            real_task = self._real_tasks.get(task_id)
         if real_task is not None:
             real_task.resume()
             self._sync_snapshot_from_task(real_task)
             return task
-        task.status = TaskStatus.RUNNING.value
-        task.phase = TaskStatus.RUNNING.value
-        self.metric_store.upsert_task_metric(task.task_id, task.node_name, task.status, task.sql_total, task.lost_connection_total)
+        self._mark_snapshot_failed(task, RuntimeError("任务运行实例不存在"), TaskStatus.RUNNING)
+        self._finalize_terminal_task(task_id)
         return task
 
     def list_tasks(self) -> List[dict]:
-        for task in self._real_tasks.values():
+        with self._lifecycle_lock:
+            real_tasks = list(self._real_tasks.values())
+        for task in real_tasks:
             self._sync_snapshot_from_task(task)
         return [task.to_dict() for task in self._tasks.values()]
 
     def get_task(self, task_id: str) -> dict:
-        real_task = self._real_tasks.get(task_id)
+        with self._lifecycle_lock:
+            real_task = self._real_tasks.get(task_id)
         if real_task is not None:
             self._sync_snapshot_from_task(real_task)
         return self._tasks[task_id].to_dict()
@@ -204,7 +321,9 @@ class RuntimeService:
         registry = build_operator_registry()
         hit_counts: Dict[str, int] = {}
         recent_hits = set()
-        for task in self._real_tasks.values():
+        with self._lifecycle_lock:
+            real_tasks = list(self._real_tasks.values())
+        for task in real_tasks:
             for name, count in task.coverage_counts.items():
                 hit_counts[name] = hit_counts.get(name, 0) + count
             recent_hits.update(task.recent_coverage_hits)
@@ -237,8 +356,6 @@ class RuntimeService:
 
     def _start_background_loop(self, task: FuzzTask) -> None:
         stop_event = threading.Event()
-        self._background_stop_events[task.task_id] = stop_event
-        self._background_worker_threads[task.task_id] = {}
 
         def run(worker_id: int) -> None:
             while not stop_event.is_set() and not task.is_terminal:
@@ -257,12 +374,81 @@ class RuntimeService:
                     self._sync_snapshot_from_task(task)
                 stop_event.wait(interval)
 
+        def run_registered(thread_key: int, target: Callable[[], None]) -> None:
+            try:
+                target()
+            finally:
+                self._background_thread_exited(task.task_id, thread_key)
+
+        candidate_threads: Dict[int, threading.Thread] = {}
         for worker_id in range(task.thread_count):
-            thread = threading.Thread(target=run, args=(worker_id,), name=f"sql_fuzz-{task.task_id}-{worker_id}", daemon=True)
-            self._background_worker_threads[task.task_id][worker_id] = thread
-            thread.start()
-        watcher = threading.Thread(target=watchdog, name=f"sql_fuzz-{task.task_id}-watchdog", daemon=True)
-        watcher.start()
+            thread = threading.Thread(
+                target=run_registered,
+                args=(worker_id, lambda worker_id=worker_id: run(worker_id)),
+                name=f"sql_fuzz-{task.task_id}-{worker_id}",
+                daemon=True,
+            )
+            candidate_threads[worker_id] = thread
+        candidate_threads[-1] = threading.Thread(
+            target=run_registered,
+            args=(-1, watchdog),
+            name=f"sql_fuzz-{task.task_id}-watchdog",
+            daemon=True,
+        )
+        with self._lifecycle_lock:
+            snapshot = self._tasks.get(task.task_id)
+            should_start = snapshot is not None and not self._snapshot_is_terminal(snapshot)
+            if should_start:
+                self._background_stop_events[task.task_id] = stop_event
+                self._background_worker_threads[task.task_id] = {}
+        if not should_start:
+            self._try_finalize_terminal_task(task.task_id)
+            return
+        start_error: Exception | None = None
+        for thread_key, thread in candidate_threads.items():
+            started, start_error = self._start_registered_background_thread(
+                task.task_id,
+                stop_event,
+                thread_key,
+                thread,
+            )
+            if not started:
+                break
+        if start_error is not None:
+            task.fail(start_error, phase=TaskStatus.RUNNING.value)
+            self._sync_snapshot_from_task(task)
+            self._finalize_terminal_task(task.task_id)
+            self._join_background_threads(task.task_id)
+        self._try_finalize_terminal_task(task.task_id)
+
+    def _start_registered_background_thread(
+        self,
+        task_id: str,
+        stop_event: threading.Event,
+        thread_key: int,
+        thread: threading.Thread,
+    ) -> tuple[bool, Exception | None]:
+        """原子登记并启动一个后台线程，确保 stop 只会看见已经启动的线程。"""
+
+        with self._lifecycle_lock:
+            snapshot = self._tasks.get(task_id)
+            tracked_threads = self._background_worker_threads.get(task_id)
+            may_start = (
+                snapshot is not None
+                and not self._snapshot_is_terminal(snapshot)
+                and not stop_event.is_set()
+                and tracked_threads is not None
+            )
+            if not may_start:
+                return False, None
+            tracked_threads[thread_key] = thread
+            try:
+                thread.start()
+            except Exception as exc:
+                tracked_threads.pop(thread_key, None)
+                stop_event.set()
+                return False, exc
+            return True, None
 
     def _run_task_step(self, task: FuzzTask, worker_id: int) -> None:
         try:
@@ -270,19 +456,74 @@ class RuntimeService:
         except Exception as exc:
             task.fail(exc, phase=task.phase or TaskStatus.RUNNING.value)
         self._sync_snapshot_from_task(task)
+        if task.is_terminal:
+            self._finalize_terminal_task(task.task_id)
+
+    def _finalize_terminal_task(self, task_id: str) -> None:
+        with self._lifecycle_lock:
+            stop_event = self._background_stop_events.get(task_id)
+        if stop_event is not None:
+            stop_event.set()
+        self._stop_jump_tunnel(task_id)
+        self._try_finalize_terminal_task(task_id)
+
+    def _background_thread_exited(self, task_id: str, thread_key: int) -> None:
+        with self._lifecycle_lock:
+            threads = self._background_worker_threads.get(task_id)
+            if threads is not None:
+                threads.pop(thread_key, None)
+        self._try_finalize_terminal_task(task_id)
+
+    def _join_background_threads(self, task_id: str) -> None:
+        with self._lifecycle_lock:
+            threads = list(self._background_worker_threads.get(task_id, {}).values())
+        current_thread = threading.current_thread()
+        deadline = time.monotonic() + BACKGROUND_JOIN_TIMEOUT_SECONDS
+        for thread in threads:
+            if thread is current_thread:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            thread.join(timeout=remaining)
+
+    def _try_finalize_terminal_task(self, task_id: str) -> bool:
+        with self._lifecycle_lock:
+            snapshot = self._tasks.get(task_id)
+            if snapshot is None or not self._snapshot_is_terminal(snapshot):
+                return False
+            if task_id in self._creating_task_ids:
+                return False
+            if self._background_worker_threads.get(task_id):
+                return False
+            self._background_worker_threads.pop(task_id, None)
+            self._background_stop_events.pop(task_id, None)
+            self._real_tasks.pop(task_id, None)
+            return True
+
+    @staticmethod
+    def _snapshot_is_terminal(snapshot: TaskSnapshot) -> bool:
+        return snapshot.status in {TaskStatus.STOPPED.value, TaskStatus.FAILED.value}
 
     def _sync_snapshot_from_task(self, task: FuzzTask) -> None:
-        snapshot = self._tasks[task.task_id]
         state = task.snapshot_counts()
-        snapshot.status = state["status"].value
-        snapshot.phase = state["phase"]
-        snapshot.last_error = state["last_error"]
-        snapshot.sql_total = state["sql_total"]
-        snapshot.success_query_total = state["success_query_total"]
-        snapshot.failed_query_total = state["failed_query_total"]
-        snapshot.ordinary_error_total = state["ordinary_error_total"]
-        snapshot.lost_connection_total = state["lost_connection_total"]
-        snapshot.worker_states = self._worker_states_with_thread_diagnostics(task.task_id, state["worker_states"])
+        with self._lifecycle_lock:
+            snapshot = self._tasks[task.task_id]
+            incoming_terminal = state["status"] in {TaskStatus.STOPPED, TaskStatus.FAILED}
+            if self._snapshot_is_terminal(snapshot) and not incoming_terminal:
+                return
+            snapshot.status = state["status"].value
+            snapshot.phase = state["phase"]
+            snapshot.last_error = state["last_error"]
+            snapshot.sql_total = state["sql_total"]
+            snapshot.success_query_total = state["success_query_total"]
+            snapshot.failed_query_total = state["failed_query_total"]
+            snapshot.ordinary_error_total = state["ordinary_error_total"]
+            snapshot.lost_connection_total = state["lost_connection_total"]
+            snapshot.worker_states = self._worker_states_with_thread_diagnostics(task.task_id, state["worker_states"])
+            snapshot.expand_base_table_columns = state["expand_base_table_columns"]
+            snapshot.base_table_seed = state["base_table_seed"]
+            snapshot.base_table_generator_version = state["base_table_generator_version"]
 
     def _worker_states_with_thread_diagnostics(self, task_id: str, worker_states: list[dict]) -> list[dict]:
         threads = self._background_worker_threads.get(task_id, {})
@@ -301,11 +542,13 @@ class RuntimeService:
         jump_host = self._find_jump_host(node.jump_host)
         tunnel = JumpTunnel(jump_host=jump_host, target_node=node)
         tunnel.start()
-        self._task_tunnels[task_id] = tunnel
+        with self._lifecycle_lock:
+            self._task_tunnels[task_id] = tunnel
         return tunnel
 
     def _stop_jump_tunnel(self, task_id: str) -> None:
-        tunnel = self._task_tunnels.pop(task_id, None)
+        with self._lifecycle_lock:
+            tunnel = self._task_tunnels.pop(task_id, None)
         if tunnel is not None:
             tunnel.stop()
 

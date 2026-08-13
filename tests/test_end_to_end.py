@@ -1,8 +1,13 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
+from select_fuzz.api.app import create_app
 from select_fuzz.api.service import RuntimeService
+from select_fuzz.base_tables import build_base_sql_bundle
 from select_fuzz.config import TargetNodeConfig
+from select_fuzz.metadata.models import BaseSqlFile
 from select_fuzz.monitor.store import MetricStore
 from select_fuzz.runner.db import DatabaseClient, LostConnectionError
 from select_fuzz.runner.task import FuzzTask, TaskStatus
@@ -96,3 +101,60 @@ def test_端到端任务执行日志去重和_api_查询(tmp_path: Path) -> None
     assert len([row for row in logs if row["status"] == "lost connection"]) == 2
     assert store.summary()["lost connection"] == 1
     assert any(sql.startswith("CREATE TABLE parent_table") for sql in task.db.executed)
+
+
+def test_扩列请求从_api_到运行日志共享同一复现凭据且不持久化初始化_sql(tmp_path: Path, monkeypatch) -> None:
+    builtin_dir = tmp_path / "builtin"
+    builtin_dir.mkdir()
+    bundle = build_base_sql_bundle(
+        (
+            BaseSqlFile(
+                path=Path("t0.sql"),
+                sql="CREATE TABLE t0 (id BIGINT NOT NULL, PRIMARY KEY (id));\n",
+            ),
+        ),
+        expand_base_table_columns=True,
+        generator_version="v1",
+        seed="12345",
+    )
+    database = EndToEndDatabase()
+    monkeypatch.setattr("select_fuzz.api.service.generate_base_sql_bundle", lambda version, seed: bundle)
+    monkeypatch.setattr("select_fuzz.api.service.BUILTIN_BASE_SQL_DIR", builtin_dir)
+    service = RuntimeService(
+        metric_store=MetricStore(tmp_path / "metrics.db"),
+        log_dir=tmp_path / "logs",
+        base_sql_dir=builtin_dir,
+        db_factory=lambda _node: database,
+        run_background=False,
+    )
+    client = TestClient(create_app(service))
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "node_name": "node-e2e",
+            "host": "172.18.4.12",
+            "port": 3306,
+            "username": "fuzz",
+            "password": "secret",
+            "expand_base_table_columns": True,
+            "base_table_seed": "12345",
+        },
+    )
+    task = service._real_tasks[response.json()["task_id"]]
+
+    task.step()
+
+    rows = service.list_sql_logs(task.task_id)
+    assert response.status_code == 200
+    assert response.json()["base_table_seed"] == "12345"
+    assert response.json()["base_table_generator_version"] == "v1"
+    assert task.base_sql_bundle is bundle
+    assert rows[0]["base_table_seed"] == "12345"
+    assert rows[0]["base_table_generator_version"] == "v1"
+    persisted = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (tmp_path / "logs").rglob("*")
+        if path.is_file() and path.suffix in {".jsonl", ".sql"}
+    )
+    assert "CREATE TABLE t0" not in persisted

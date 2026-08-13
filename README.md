@@ -50,11 +50,47 @@ npm run dev -- --port 5173
 
 前端会读取 `/api/tasks` 获取真实任务。若本地后端未启动，页面只显示“后端未连接”和空任务状态，不会展示内置示例任务。
 
+## 任务级基表模式
+
+新建任务时，“扩展基表列（每表 200～500 列）”开关默认关闭，关闭时每张内置基表使用 42 个核心列。开启后会显示生成器版本和复现种子；首个版本为 `v1`。种子使用 `0`～`18446744073709551615` 范围内的规范无符号 64 位十进制字符串，留空时由后端生成。
+
+模式、最终版本和种子在任务创建后不可修改。任务卡片会始终展示完整基表模式；扩展模式可直接复制 `v1:种子` 复现标识。即使任务在“准备基表”或“连接实例”阶段失败，卡片也会保留这些信息。
+
 ## 基表 SQL 目录
 
-项目默认使用 `sql_base_tables/`。每个任务启动时，程序会读取配置中的 `base_sql_dir`，按文件名排序读取所有 `.sql` 文件，并在目标数据库上全部执行。启动阶段会执行 `DROP DATABASE IF EXISTS test`、`CREATE DATABASE test`、`USE test`，随后创建基表和插入种子数据，并对每张解析到的表执行 `SELECT COUNT(*)` 校验，发现 0 行会直接失败。
+项目默认使用内置 `sql_base_tables/`。核心模式会在连接数据库前从配置目录一次性加载并校验不可变内存包；扩展模式则由版本化生成器在内存生成并校验。启动、附加 worker、lost connection 恢复和 worker 重连全部复用同一份内存 SQL，不会在任务运行期间重读目录或重新随机生成。
 
-`sql_base_tables/` 包含 79 张基表：2 张普通表、5 张临时表、8 张一级分区表和 64 张二级分区表，不包含向量类型、向量索引或向量函数。默认二级分区表面向内网扩展 MySQL 内核，覆盖 `RANGE`、`RANGE COLUMNS`、`LIST`、`LIST COLUMNS`、`HASH`、`LINEAR HASH`、`KEY`、`LINEAR KEY` 的 8 x 8 组合；`RANGE/LIST` 子分区使用显式 `SUBPARTITION ... VALUES LESS THAN/IN (...)` 定义。每张基表保留分区键、父表引用和常用索引核心列后，会按固定随机种子补齐到 200 到 500 列，扩展列随机覆盖整数、浮点、DECIMAL、日期时间、字符串、二进制、ENUM、SET、BIT 和 JSON 等类型；列类型参数也会随机，例如 `char_col` 和 `varchar_col` 会覆盖 `1` 到 `255` 的长度范围，相关索引前缀和种子值会同步适配列长度。种子数据由固定随机种子生成，每张表插入 10 到 100 行合法数据，分区表使用 `tenant_id` 1 到 8、二级分区表使用 `subpart_id` 1 到 8 保证路由覆盖，并尽量把可安全唯一化的索引生成为 `UNIQUE KEY`；二级分区表会保守处理唯一索引，避免违反唯一键必须包含全部分区列和子分区列的限制。由于临时表是 session 级对象，多线程任务会在每个 worker 连接中单独创建临时表并插入临时表种子数据。lost connection 恢复后也只重建临时表并重新插入临时表数据，不重建永久表。
+核心模式仍支持配置自定义 `base_sql_dir`：系统会在连接前按文件名顺序一次性加载并校验其 `.sql` 文件。扩展算法只适用于项目内置的 79 张表，不会对自定义 DDL 自动加列；自定义目录下开启扩展模式时，任务会在“准备基表”阶段失败，且不会启动跳板机、连接数据库或执行 SQL。
+
+基表包校验通过后，启动阶段会执行 `DROP DATABASE IF EXISTS test`、`CREATE DATABASE test`、`USE test`，随后创建基表和插入种子数据，并对每张解析到的表执行 `SELECT COUNT(*)` 校验，发现 0 行会直接失败。
+
+`sql_base_tables/` 包含 79 张基表：2 张普通表、5 张临时表、8 张一级分区表和 64 张二级分区表，不包含向量类型、向量索引或向量函数。默认二级分区表面向内网扩展 MySQL 内核，覆盖 `RANGE`、`RANGE COLUMNS`、`LIST`、`LIST COLUMNS`、`HASH`、`LINEAR HASH`、`KEY`、`LINEAR KEY` 的 8 x 8 组合；`RANGE/LIST` 子分区使用显式 `SUBPARTITION ... VALUES LESS THAN/IN (...)` 定义。
+
+仓库提交的静态目录和离线生成器默认使用核心模式：每张表恰好 42 列，不包含 `extra_tN_NNN` 扩展列。79 份核心列类型参数、索引顺序和每表 10 到 100 行的种子数量均已冻结；例如 `char_col` 和 `varchar_col` 仍覆盖 `1` 到 `255` 的长度边界，相关索引前缀和核心种子值会同步适配。分区表使用 `tenant_id` 1 到 8、二级分区表使用 `subpart_id` 1 到 8 保证路由覆盖，并尽量把可安全唯一化的索引生成为 `UNIQUE KEY`；二级分区表会保守处理唯一索引，避免违反唯一键必须包含全部分区列和子分区列的限制。由于临时表是 session 级对象，多线程任务会在每个 worker 连接中单独创建临时表并插入临时表种子数据。lost connection 恢复后也只重建临时表并重新插入临时表数据，不重建永久表。
+
+离线重生并校验默认核心目录：
+
+```bash
+.venv/bin/python tools/generate_sql_base_tables.py --output-dir sql_base_tables
+.venv/bin/python tools/validate_sql_base_tables.py --sql-dir sql_base_tables
+```
+
+需要覆盖宽表场景时，必须显式选择扩展模式、生成器版本和复现种子。`v1` 使用规范 uint64 十进制种子；不接受符号、空白、Unicode 数字或前导零。同一个 `v1 + seed` 固定生成 80 个逻辑 SQL 文件，其中 79 张表各有 200 到 500 列，`t0` 和 `t1` 分别固定为 200、500 列；扩展列数量、类型参数和值表达式都由带用途隔离的 SHA-256 派生。运行时包入口只在内存返回 SQL，不写完整的任务级基表初始化 SQL；运行中的 fuzz 查询、失败查询和 lost connection 事件仍按日志规则记录。下面的离线 CLI 才会写入指定目录：
+
+```bash
+.venv/bin/python tools/generate_sql_base_tables.py \
+  --output-dir /tmp/select_fuzz_expanded_12345 \
+  --expand-columns \
+  --generator-version v1 \
+  --seed 12345
+.venv/bin/python tools/validate_sql_base_tables.py \
+  --sql-dir /tmp/select_fuzz_expanded_12345 \
+  --expanded-columns \
+  --generator-version v1 \
+  --seed 12345
+```
+
+`v1` 的文件顺序、UTF-8/LF 渲染和长度前缀 bundle 序列化由固定摘要金标保护。项目升级后复现旧任务时，仍使用任务卡片中的完整 `v1:种子`；以后若需要改变扩展算法或 SQL 格式，应登记新的生成器版本，不能修改既有 `v1` 输出。
 
 可以生成不含二级分区的本地 MySQL 兼容目录，用于普通 MySQL 建表和插入验证：
 
@@ -62,6 +98,8 @@ npm run dev -- --port 5173
 .venv/bin/python tools/generate_sql_base_tables.py --output-dir /tmp/select_fuzz_mysql_compatible --without-subpartition
 .venv/bin/python tools/validate_sql_base_tables.py --sql-dir /tmp/select_fuzz_mysql_compatible --without-subpartition
 ```
+
+`--without-subpartition` 是离线兼容变体，不属于标准 `v1 + seed` bundle 或其金标身份。
 
 查询生成器按 MySQL 8.0.22 兼容范围生成查询表达式。集合运算只生成 `UNION` 和 `UNION ALL`，不生成 MySQL 8.0.31 才支持的 `INTERSECT`、`INTERSECT ALL`、`EXCEPT`、`EXCEPT ALL`，也不生成 MySQL 不支持的 `MINUS`。`SQL_CACHE` 已在 MySQL 8.0 移除，`SQL_NO_CACHE` 在 MySQL 8.0 中已废弃且无实际效果，因此也不会生成。
 

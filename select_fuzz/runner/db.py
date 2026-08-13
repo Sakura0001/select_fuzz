@@ -57,7 +57,7 @@ class PyMySQLClient:
 
     def execute(self, sql: str) -> None:
         if self._connection is None:
-            self.connect()
+            raise RuntimeError("数据库连接尚未显式建立")
         try:
             with self._connection.cursor() as cursor:
                 cursor.execute(sql)
@@ -68,7 +68,7 @@ class PyMySQLClient:
 
     def query_scalar(self, sql: str) -> int:
         if self._connection is None:
-            self.connect()
+            raise RuntimeError("数据库连接尚未显式建立")
         try:
             with self._connection.cursor() as cursor:
                 cursor.execute(sql)

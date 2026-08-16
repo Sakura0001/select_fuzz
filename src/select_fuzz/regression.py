@@ -51,7 +51,7 @@ def build_seed_corpus(seed: int) -> dict[str, object]:
             for production_name in sorted(grammar.productions)
         ],
         "grammar_sha256": grammar.sha256,
-        "mysql_version": "8.0.41",
+        "mysql_version": "8.0.22",
         "root_seed": seed,
         "schema_profiles": [
             {

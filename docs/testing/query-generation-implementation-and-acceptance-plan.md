@@ -406,11 +406,11 @@
 
 验收：同一组 operand 生成带括号和不带括号两类 SQL；两类结果符合预期。
 
-### 7.30 49 个有序 set pair
+### 7.30 9 个 UNION 族有序 set pair
 
-要求：7×7 的 set operator 有序 pair 全部定向生成。
+要求：UNION、UNION ALL、UNION DISTINCT 的 3×3 有序 pair 全部定向生成。
 
-验收：49 个 pair 每个都有实际 SQL、EXPLAIN、三节点执行、结果/warning 比较和 replay artifact。
+验收：9 个 pair 每个都有实际 SQL、EXPLAIN、三节点执行、结果/warning 比较和 replay artifact。
 
 ## 8. 阶段 4：窗口函数和 frame
 
@@ -880,7 +880,7 @@ artifact: 可 replay
 1. 完成阶段 0，先打通三节点实际测试入口。
 2. 执行 5.1 至 5.7，确认新 grammar 主路径和安全边界没有问题。
 3. 执行 6.1 至 6.12，完成表、JOIN、modifier、index、partition 验证。
-4. 执行 7.1 至 7.30，优先完成 NOT EXISTS/NOT IN 矩阵，再完成 49 个 set pair。
+4. 执行 7.1 至 7.30，优先完成 NOT EXISTS/NOT IN 矩阵，再完成 9 个 UNION 族 set pair。
 5. 执行 8.1 至 8.20，逐项完成 frame 和窗口函数见证。
 6. 执行 9.1 至 9.11，完成 CAST、INTERVAL 和聚合见证。
 7. 执行 10.1 至 10.9，重新运行当前工作树的 335 个函数 witness。

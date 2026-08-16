@@ -22,6 +22,7 @@ def test_seed_corpus_covers_every_schema_and_grammar_entry() -> None:
         len(production.alternatives) for production in grammar.productions.values()
     )
     assert corpus["grammar_sha256"] == grammar.sha256
+    assert corpus["mysql_version"] == "8.0.22"
     assert {
         item["expected_tag"].split(":", 1)[0]
         for item in corpus["grammar_alternatives"]

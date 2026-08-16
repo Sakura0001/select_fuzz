@@ -10,6 +10,8 @@ from zipfile import ZipFile
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CATALOG_MEMBER = "select_fuzz/data/mysql-8.0.41-query-shapes.yaml"
+GRAMMAR_MEMBER = "select_fuzz/data/mysql-8.0.22-select.grammar.yy"
+LEGACY_GRAMMAR_MEMBER = "select_fuzz/data/mysql-8.0.41-select.grammar.yy"
 FORBIDDEN_ANYWHERE = frozenset(
     {
         ".git",
@@ -57,12 +59,16 @@ def _build_distribution(output: Path, target: str, suffix: str) -> Path:
     return next(output.glob(suffix))
 
 
-def test_wheel_contains_the_canonical_catalog_as_package_data(tmp_path: Path) -> None:
+def test_wheel_contains_the_canonical_catalog_and_grammar_as_package_data(
+    tmp_path: Path,
+) -> None:
     wheel = _build_distribution(tmp_path, "wheel", "*.whl")
 
     with ZipFile(wheel) as archive:
         members = set(archive.namelist())
         assert CATALOG_MEMBER in members
+        assert GRAMMAR_MEMBER in members
+        assert LEGACY_GRAMMAR_MEMBER not in members
         assert archive.read(CATALOG_MEMBER).startswith(b"schema_version: 2\n")
 
 

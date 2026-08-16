@@ -226,6 +226,18 @@ def test_canonical_grammar_targets_mysql_8022() -> None:
     assert "TABLE _query_table" in text
     assert "UNION ALL" in text
 
+    grammar = SelectGrammar.from_path(path)
+    set_operators = {
+        " ".join(symbol.value for symbol in alternative.symbols)
+        for alternative in grammar.productions["set_operator"].alternatives
+    }
+    select_modifiers = {
+        " ".join(symbol.value for symbol in alternative.symbols)
+        for alternative in grammar.productions["select_modifier_list"].alternatives
+    }
+    assert set_operators == {"UNION", "UNION ALL", "UNION DISTINCT"}
+    assert select_modifiers == {"row_qualifier", "_optimizer_hint"}
+
 
 def test_default_grammar_is_the_packaged_mysql_8022_asset() -> None:
     checkout = (
@@ -380,7 +392,7 @@ query:
     assert original.stable_alternative_id(original_trace).startswith("v1:query:")
 
 
-def test_mysql_8041_grammar_exposes_every_registered_function_and_null_lane() -> None:
+def test_mysql_8022_grammar_exposes_every_registered_function_and_null_lane() -> None:
     grammar = SelectGrammar.default()
     alternatives = grammar.productions["registered_scalar_function"].alternatives
     actual = {
@@ -434,7 +446,7 @@ def test_safety_rejection_keeps_rendered_candidate_for_opt_in_diagnostics() -> N
 
 
 def test_nested_scope_avoids_mysql_unsupported_repeated_grandparent_reference() -> None:
-    """MySQL 8.0.41 rejects one ancestor binding used at two nesting levels."""
+    """MySQL rejects one ancestor binding used at two nesting levels."""
 
     generator = GrammarQueryGenerator(SelectGrammar.from_text("query:\n    SELECT 1"))
     grandparent = _ColumnBinding("r1", GrammarColumn("s", "VARCHAR(20)"))

@@ -1,4 +1,4 @@
-"""Closed registry of deterministic MySQL 8.0.41 scalar function signatures."""
+"""Closed registry of deterministic MySQL 8.0.22 scalar function signatures."""
 
 from __future__ import annotations
 

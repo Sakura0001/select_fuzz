@@ -531,7 +531,7 @@ quantifier:
     | ALL
     | SOME
 
-# MySQL 8.0.41 only accepts the IN-equivalent row quantified forms.  Other
+# MySQL 8.0.22 only accepts the IN-equivalent row quantified forms.  Other
 # operator/quantifier cross-products raise ER_OPERAND_COLUMNS even at EXPLAIN.
 row_quantified_operator:
     = ANY

@@ -48,7 +48,7 @@ RUN set -eux; \
     mkdir -p "$site/select_fuzz/data"; \
     cp -a /src/src/select_fuzz/. "$site/select_fuzz/"; \
     cp /src/catalog/mysql-8.0.41-query-shapes.yaml "$site/select_fuzz/data/"; \
-    cp /src/catalog/mysql-8.0.41-select.grammar.yy "$site/select_fuzz/data/"; \
+    cp /src/catalog/mysql-8.0.22-select.grammar.yy "$site/select_fuzz/data/"; \
     mkdir -p "$bundle/config"; \
     cp /src/config/intranet-fuzz.example.yaml "$bundle/config/"; \
     cp /src/config/replica-parameters.example.yaml "$bundle/config/"; \

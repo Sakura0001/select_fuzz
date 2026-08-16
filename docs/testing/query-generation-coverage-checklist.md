@@ -1,10 +1,10 @@
 # 查询 SQL 生成覆盖清单
 
-本清单定义 `select-fuzz` 的查询生成范围。它以 MySQL 8.0.41、只读单语句
-query expression 为边界；correctness 生产路径默认由版本化 `.grammar.yy` 文法驱动，
+本清单保留 MySQL 8.0.41 的历史查询生成证据；当前 canonical grammar 以 MySQL 8.0.22、只读单语句
+query expression 为边界。correctness 生产路径默认由版本化 `.grammar.yy` 文法驱动，
 语义绑定器接收表名、列名、列类型，以及经过安全过滤的可见索引名和分区名。覆盖必须
 同时具备可达文法、真实作用域绑定、安全校验、自动化测试，并在可用时取得精确
-MySQL 8.0.41 见证。仅存在 catalog 行或固定模板不算覆盖。
+MySQL 8.0.41 见证。除明确标注为当前 8.0.22 的条目外，既有完成状态均为历史证据；仅存在 catalog 行或固定模板不算覆盖。
 
 状态：`[x]` 已实现并有本地测试，`[~]` 已部分实现或仍需扩大精确 MySQL 见证，
 `[ ]` 尚未闭环，`[-]` 明确排除。
@@ -75,7 +75,7 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
 
 ## 2026-07-16 文法生成迁移快照
 
-- correctness 生产路径使用 `catalog/mysql-8.0.41-select.grammar.yy`；重复 alternative
+- correctness 生产路径使用 `catalog/mysql-8.0.22-select.grammar.yy`；重复 alternative
   直接形成权重，修改文法文件即可调整结构和概率。
 - 关系先绑定、表达式后展开；每层 query block 维护独立 symbol table，普通 derived
   table 隔离外层，LATERAL/相关子查询显式继承外层可见列，CTE/derived 输出列注册后
@@ -132,8 +132,8 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
 
 - [x] 无 FROM 标量、普通表投影、表达式投影、别名、`DISTINCT`。
 - [x] WHERE、多列表达式/位置 GROUP BY、HAVING、WINDOW、更长最终 ORDER BY、ASC/DESC。
-- [x] 合法 SELECT modifier 有序栈；ALL/DISTINCT 和 SQL_NO_CACHE/SQL_CALC_FOUND_ROWS
-  分别走互斥安全 lane。
+- [x] 当前 8.0.22 grammar 的 SELECT modifier 仅保留 ALL/DISTINCT（含 DISTINCTROW）和
+  optimizer hint；SQL_NO_CACHE、SQL_CALC_FOUND_ROWS 及其旧 modifier 组合已移除。
 - [x] LIMIT、OFFSET、LIMIT 0、无符号 BIGINT 边界与确定性总序证明。
 - [x] 单层/多层 parenthesized query expression、分支局部 ORDER BY + LIMIT。
 - [x] `SELECT`、`TABLE`、`VALUES` query primary。
@@ -173,11 +173,11 @@ overflow）、3513（binary bit operand length）和 3854（binary-to-utf8mb4 co
 
 ## 集合运算
 
-- [x] UNION DISTINCT/ALL、INTERSECT、EXCEPT、等操作链、分支局部 Top-N。
+- [x] 当前 8.0.22 grammar 生成 UNION DISTINCT/ALL、等操作链和分支局部 Top-N。
 - [x] SELECT/TABLE/VALUES 分支和括号改变结合顺序。
-- [x] INTERSECT ALL、EXCEPT ALL，以及 numeric/text/binary/temporal 四类跨类型集合叶。
-- [x] 混合集合优先级、括号反转和 7×7=49 个 UNION/UNION ALL/UNION DISTINCT/
-  INTERSECT/INTERSECT ALL/EXCEPT/EXCEPT ALL 有序运算符对均有定向三节点见证。
+- [-] INTERSECT/EXCEPT（含 ALL）是 MySQL 8.0.31+ 语法，已从当前 8.0.22 grammar 移除；既有
+  MySQL 8.0.41 定向见证仅作历史记录。
+- [x] 当前集合优先级和括号反转仅覆盖 UNION、UNION ALL、UNION DISTINCT 的有序组合。
 - [x] 负向列数不一致使用精确 `1222/21000` 契约。
 
 ## 聚合与窗口

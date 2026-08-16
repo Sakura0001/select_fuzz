@@ -1,4 +1,4 @@
-"""Grammar-driven, schema-aware MySQL 8.0.41 SELECT candidate generation.
+"""Grammar-driven, schema-aware MySQL 8.0.22 SELECT candidate generation.
 
 The grammar owns structural randomness.  Semantic hooks are deliberately small:
 they bind real tables/columns, maintain nested query scopes, and create deterministic
@@ -180,15 +180,15 @@ class SelectGrammar:
 
     @classmethod
     def default(cls) -> SelectGrammar:
-        packaged = resources.files("select_fuzz").joinpath("data", "mysql-8.0.41-select.grammar.yy")
+        packaged = resources.files("select_fuzz").joinpath("data", "mysql-8.0.22-select.grammar.yy")
         if packaged.is_file():
             with resources.as_file(packaged) as grammar_path:
                 return cls.from_path(grammar_path)
         checkout = (
-            Path(__file__).resolve().parents[3] / "catalog" / "mysql-8.0.41-select.grammar.yy"
+            Path(__file__).resolve().parents[3] / "catalog" / "mysql-8.0.22-select.grammar.yy"
         )
         if not checkout.is_file():
-            raise GrammarError("canonical MySQL 8.0.41 SELECT grammar is unavailable")
+            raise GrammarError("canonical MySQL 8.0.22 SELECT grammar is unavailable")
         return cls.from_path(checkout)
 
     def _compute_minimum_depths(self) -> Mapping[str, int]:

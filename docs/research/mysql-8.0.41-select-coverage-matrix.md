@@ -1,12 +1,12 @@
-# MySQL 8.0.41 SELECT 查询能力与项目覆盖矩阵
+# MySQL 8.0.41 SELECT 查询能力与项目覆盖矩阵（历史快照）
 
-> 审计日期：2026-07-17；目标：MySQL Community Server 8.0.41；项目：select-fuzz。
+> 审计日期：2026-07-17；目标：MySQL Community Server 8.0.41；项目：select-fuzz。此报告记录当时的 8.0.41 覆盖，不描述当前 canonical grammar。
 
 ## 结论
 
-项目已经形成一个覆盖面较宽、可绑定真实 schema、默认只读且强调确定性的 SELECT 查询子集，但不是 MySQL 8.0.41 全语法/全函数实现。当前生产文法包含 **105 个 production、1026 个 alternative**；官方内建函数/运算符表拆分为 **496 个名称或语法项**后，项目按“至少一个安全签名可生成”的口径实现 **223 项**，默认生产范围可达 **204 项**。
+本报告记录一个覆盖面较宽、可绑定真实 schema、默认只读且强调确定性的 MySQL 8.0.41 SELECT 子集，但不是完整语法/函数实现。下列 grammar 计数、SHA 和覆盖结论均对应当时的 8.0.41 快照；当前生产 grammar 已切换为 MySQL 8.0.22，且明确不生成 INTERSECT、EXCEPT、旧 SELECT modifier 或固定 `utf8mb4_0900_ai_ci` 谓词。
 
-| 指标 | 当前值 |
+| 指标 | 历史值 |
 | --- | ---: |
 | 当前 SELECT 文法 production | 105 |
 | 当前 SELECT 文法 alternative | 1026 |
@@ -22,8 +22,8 @@
 
 状态口径：
 
-- **实现**：当前 `GrammarQueryGenerator` 能从版本化文法或确定性函数注册表生成该结构，并经过作用域绑定与只读安全校验。
-- **默认**：在 `DEFAULT_QUERY_SCOPE` 下能够进入 correctness 生产轮次。JSON、FULLTEXT、SPATIAL 即使已有生成器也统一记为默认 ❌。
+- **实现**：2026-07-17 的 `GrammarQueryGenerator` 能从版本化文法或确定性函数注册表生成该结构，并经过作用域绑定与只读安全校验。
+- **默认**：当时在 `DEFAULT_QUERY_SCOPE` 下能够进入 correctness 生产轮次。JSON、FULLTEXT、SPATIAL 即使已有生成器也统一记为默认 ❌。
 - 函数表的 ✅ 是**函数名级至少一个安全签名**，不是所有 overload、所有参数组合或所有 SQL mode 的完全覆盖。
 - ❌ 同时包含真实缺口和有意排除；有意排除原因在文末集中说明。
 
@@ -37,12 +37,12 @@
 - [MySQL 8.0 内建函数与运算符总表](https://dev.mysql.com/doc/refman/8.0/en/built-in-function-reference.html)
 - [MySQL Server 函数版本矩阵](https://dev.mysql.com/doc/mysqld-version-reference/en/built-in-functions.html)
 - [MySQL 8.0 优化器提示总表](https://dev.mysql.com/doc/refman/8.0/en/optimizer-hints.html)
-- 本地版本化文法：[`catalog/mysql-8.0.41-select.grammar.yy`](../../catalog/mysql-8.0.41-select.grammar.yy)
+- 当前版本化文法：[`catalog/mysql-8.0.22-select.grammar.yy`](../../catalog/mysql-8.0.22-select.grammar.yy)
 - 本地安全函数注册表：[`src/select_fuzz/generation/function_registry.py`](../../src/select_fuzz/generation/function_registry.py)
 - 本地默认排除范围：[`src/select_fuzz/generation/query_scope.py`](../../src/select_fuzz/generation/query_scope.py)
 - 本地官方来源锁：[`catalog/mysql-8.0.41-query-shapes.yaml`](../../catalog/mysql-8.0.41-query-shapes.yaml)
 
-官方 8.0 手册是滚动页面，因此报告同时以精确 `mysql-8.0.41` 源码标签为语法基线，并用版本矩阵核对 8.0 系列可用性。函数表中同一官方行的多个 `code` 名称/别名被拆开逐项检查；赋值 `=` 与比较 `=`、二元 `-` 与一元 `-` 保留为不同语义项。
+官方 8.0 手册是滚动页面，因此本历史报告以精确 `mysql-8.0.41` 源码标签为语法基线，并用版本矩阵核对 8.0 系列可用性。函数表中同一官方行的多个 `code` 名称/别名被拆开逐项检查；赋值 `=` 与比较 `=`、二元 `-` 与一元 `-` 保留为不同语义项。
 
 ## 查询表达式、SELECT 主体与子句
 

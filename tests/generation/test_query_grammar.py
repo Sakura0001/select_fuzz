@@ -186,7 +186,7 @@ query:
 
 def test_canonical_anti_matrix_is_explicit_and_unsupported_frame_syntax_is_absent() -> None:
     grammar = SelectGrammar.from_path(
-        Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.41-select.grammar.yy"
+        Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.22-select.grammar.yy"
     )
     anti = grammar.productions["anti_membership_predicate"]
     assert len(anti.alternatives) == 12
@@ -194,12 +194,47 @@ def test_canonical_anti_matrix_is_explicit_and_unsupported_frame_syntax_is_absen
         grammar.productions
     )
     grammar_text = (
-        Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.41-select.grammar.yy"
+        Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.22-select.grammar.yy"
     ).read_text(encoding="utf-8")
     assert "GROUPS" not in grammar_text
     assert "IGNORE NULLS" not in grammar_text
     assert "FROM LAST" not in grammar_text
     assert "EXCLUDE" not in grammar_text
+
+
+def test_canonical_grammar_targets_mysql_8022() -> None:
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "catalog"
+        / "mysql-8.0.22-select.grammar.yy"
+    )
+    text = path.read_text(encoding="utf-8")
+
+    for forbidden in (
+        "INTERSECT",
+        "EXCEPT",
+        "SQL_BUFFER_RESULT",
+        "SQL_CALC_FOUND_ROWS",
+        "SQL_NO_CACHE",
+        "HIGH_PRIORITY",
+        "SQL_SMALL_RESULT",
+        "SQL_BIG_RESULT",
+        "utf8mb4_0900_ai_ci",
+    ):
+        assert forbidden not in text
+    assert "VALUES values_rows" in text
+    assert "TABLE _query_table" in text
+    assert "UNION ALL" in text
+
+
+def test_default_grammar_is_the_packaged_mysql_8022_asset() -> None:
+    checkout = (
+        Path(__file__).resolve().parents[2]
+        / "catalog"
+        / "mysql-8.0.22-select.grammar.yy"
+    )
+
+    assert SelectGrammar.default().sha256 == SelectGrammar.from_path(checkout).sha256
 
 
 def test_generated_identifiers_are_bound_to_real_schema_or_derived_outputs() -> None:
@@ -227,7 +262,7 @@ def test_generated_identifiers_are_bound_to_real_schema_or_derived_outputs() -> 
                 assert re.fullmatch(r"(?:q|d|c)\d+|jt_(?:ord|value|exists)", column), candidate.sql
 
 
-def test_mysql_8041_grammar_reaches_ported_and_enhanced_families() -> None:
+def test_mysql_8022_grammar_reaches_supported_families() -> None:
     grammar = SelectGrammar.default()
     # Semantic hooks deliberately expand these productions from Python rather
     # than through a grammar symbol. They form explicit, audited reachability
@@ -264,8 +299,6 @@ def test_mysql_8041_grammar_reaches_ported_and_enhanced_families() -> None:
         {"JSON_TABLE", "_json_table_relation"},
         {"LATERAL", "_lateral_derived_relation"},
         {"WINDOW"},
-        {"INTERSECT"},
-        {"EXCEPT"},
         {"MATCH"},
         {"ST_ISVALID"},
     ):
@@ -288,7 +321,6 @@ def test_mysql_8041_grammar_reaches_ported_and_enhanced_families() -> None:
         assert production in grammar.productions
 
     for token in (
-        "SQL_NO_CACHE",
         "ESCAPE",
         "REGEXP",
         "RLIKE",

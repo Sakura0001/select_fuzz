@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--grammar",
         type=Path,
-        default=Path("catalog/mysql-8.0.41-select.grammar.yy"),
+        default=Path("catalog/mysql-8.0.22-select.grammar.yy"),
     )
     parser.add_argument("--artifact-root", type=Path, required=True)
     parser.add_argument("--iterations", type=_positive_int, default=50)

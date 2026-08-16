@@ -4,6 +4,8 @@
 
 本文件将 `docs/testing/query-generation-coverage-checklist.md` 中的未闭环事项，以及本轮工作中涉及的 SQL 生成逻辑，拆分为可以逐项实现、逐项运行、逐项验收的细粒度任务。
 
+除明确标注为历史 MySQL 8.0.41 验收的条目外，当前 canonical grammar 目标为 MySQL 8.0.22。
+
 本计划的核心要求是：
 
 1. 不能只通过静态代码检查、AST 断言、字符串断言或单元测试判断 SQL 生成功能已经完成。
@@ -114,7 +116,7 @@
 
 ### 5.1 最新 grammar 主路径
 
-要求：correctness 生产路径只能使用 `catalog/mysql-8.0.41-select.grammar.yy`。
+要求：correctness 生产路径只能使用 `catalog/mysql-8.0.22-select.grammar.yy`。
 
 验收：运行时记录 grammar hash；生成 SQL 的 coverage tag 必须包含 `grammar:*` 或 `grammar_alt:*`；生产代码中不存在第二套查询生成器或 fallback。
 
@@ -164,9 +166,9 @@
 
 ### 6.2 SELECT modifier 栈
 
-要求：覆盖 `ALL`、`DISTINCT`、`HIGH_PRIORITY`、`STRAIGHT_JOIN`、`SQL_SMALL_RESULT`、`SQL_BUFFER_RESULT`、`SQL_NO_CACHE`、`SQL_CALC_FOUND_ROWS` 等合法组合。
+要求：当前 grammar 仅覆盖 `ALL`、`DISTINCT`、`DISTINCTROW` 和 `_optimizer_hint`；不生成 `HIGH_PRIORITY`、`STRAIGHT_JOIN`、`SQL_SMALL_RESULT`、`SQL_BIG_RESULT`、`SQL_BUFFER_RESULT`、`SQL_NO_CACHE` 或 `SQL_CALC_FOUND_ROWS`。
 
-验收：每个 modifier 至少单独执行一次；互斥组合必须被拒绝或拆分到安全 lane；warning 三节点一致。
+验收：每个保留的 modifier 至少单独执行一次；互斥组合必须被拒绝或拆分到安全 lane；warning 三节点一致。
 
 ### 6.3 INNER/CROSS/STRAIGHT JOIN
 
@@ -380,21 +382,21 @@
 
 验收：每个 operator 至少执行 3 条 SQL；去重和保留重复行为正确。
 
-### 7.26 INTERSECT/INTERSECT ALL
+### 7.26 INTERSECT/INTERSECT ALL（当前 grammar 排除）
 
-要求：覆盖 INTERSECT 两种形态。
+要求：MySQL 8.0.22 grammar 不生成 INTERSECT 两种形态；MySQL 8.0.41 的既有验收仅作历史记录。
 
-验收：至少覆盖 numeric、text、binary、temporal 四种类型；三节点结果一致。
+验收：canonical grammar asset 中不存在 `INTERSECT`。
 
-### 7.27 EXCEPT/EXCEPT ALL
+### 7.27 EXCEPT/EXCEPT ALL（当前 grammar 排除）
 
-要求：覆盖 EXCEPT 两种形态。
+要求：MySQL 8.0.22 grammar 不生成 EXCEPT 两种形态；MySQL 8.0.41 的既有验收仅作历史记录。
 
-验收：至少覆盖 numeric、text、binary、temporal 四种类型；三节点结果一致。
+验收：canonical grammar asset 中不存在 `EXCEPT`。
 
 ### 7.28 集合运算优先级
 
-要求：覆盖混合 set operator 的默认优先级。
+要求：覆盖 UNION、UNION ALL、UNION DISTINCT 混合 set operator 的默认优先级。
 
 验收：SQL 包含至少两个不同 operator；括号解析结果与预期 AST/手工 oracle 一致。
 

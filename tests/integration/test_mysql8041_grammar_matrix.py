@@ -28,7 +28,7 @@ from test_mysql8041_grammar_p1 import _manifest
 
 
 _ROOT = Path(__file__).resolve().parents[2]
-_CANONICAL_GRAMMAR_PATH = _ROOT / "catalog" / "mysql-8.0.41-select.grammar.yy"
+_CANONICAL_GRAMMAR_PATH = _ROOT / "catalog" / "mysql-8.0.22-select.grammar.yy"
 _CANONICAL_SOURCE_TEXT = _CANONICAL_GRAMMAR_PATH.read_text(encoding="utf-8")
 _CANONICAL_GRAMMAR = SelectGrammar.from_text(_CANONICAL_SOURCE_TEXT)
 

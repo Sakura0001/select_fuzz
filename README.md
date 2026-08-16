@@ -167,7 +167,7 @@ uv run select-fuzz run --mode correctness --config config/local.yaml \
 - 每张表默认生成 10～500 行、1～8 张表、2～16 列；单个 query block 默认最多
   绑定 4 张表。
 - 每张表最多 65 个索引（默认上限 8）；单节点结果默认限制为 10000 行或 32 MiB。
-- 使用 MySQL 8.0.41 SELECT grammar 和 schema-aware 绑定；默认生产范围排除
+- 使用 MySQL 8.0.22 SELECT grammar 和 schema-aware 绑定；默认生产范围排除
   JSON、FULLTEXT、SPATIAL 和 multi-valued JSON-array index。
 - `query_grammar_path` 可以指向自定义 grammar；`grammar_compatible_type_percent`
   默认 80%，用于控制严格类型兼容表达式的选择概率。
@@ -388,8 +388,9 @@ and exposes findings, reports, and replay status.
 The current query-generation boundary, exact coverage counts, explicit exclusions,
 and remaining gaps are maintained in
 [`docs/testing/query-generation-coverage-checklist.md`](docs/testing/query-generation-coverage-checklist.md).
-It defines a closed MySQL 8.0.41 read-only subset; JSON/FULLTEXT/SPATIAL renderers remain
-available for isolated tests but are excluded from the default production scope.
+It defines the current closed MySQL 8.0.22 read-only subset and retains historical
+MySQL 8.0.41 evidence; JSON/FULLTEXT/SPATIAL renderers remain available for isolated
+tests but are excluded from the default production scope.
 
 The controlled corpus stores generator seeds and expected tags—not copied web
 SQL and not credentials:

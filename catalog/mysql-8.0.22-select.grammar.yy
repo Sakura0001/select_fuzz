@@ -1,4 +1,4 @@
-# Grammar-driven deterministic read-only query expressions for MySQL 8.0.41.
+# Grammar-driven deterministic read-only query expressions for MySQL 8.0.22.
 #
 # Duplicate alternatives are intentional weights, matching DDL Check behavior.
 # Semantic symbols start with `_`; they bind only schema objects visible in the
@@ -227,30 +227,15 @@ set_operator:
     UNION
     | UNION ALL
     | UNION DISTINCT
-    | INTERSECT
-    | INTERSECT ALL
-    | EXCEPT
-    | EXCEPT ALL
 
 select_modifier_list:
     row_qualifier
     | _optimizer_hint
-    | SQL_NO_CACHE
-    | SQL_CALC_FOUND_ROWS
-    | SQL_NO_CACHE SQL_CALC_FOUND_ROWS
-    | _optimizer_hint? row_qualifier? HIGH_PRIORITY STRAIGHT_JOIN? result_size_modifier? SQL_BUFFER_RESULT? SQL_NO_CACHE? SQL_CALC_FOUND_ROWS?
-    | _optimizer_hint? row_qualifier? STRAIGHT_JOIN result_size_modifier? SQL_BUFFER_RESULT? SQL_NO_CACHE? SQL_CALC_FOUND_ROWS?
-    | _optimizer_hint? row_qualifier? result_size_modifier SQL_BUFFER_RESULT? SQL_NO_CACHE? SQL_CALC_FOUND_ROWS?
-    | _optimizer_hint? row_qualifier? SQL_BUFFER_RESULT SQL_NO_CACHE? SQL_CALC_FOUND_ROWS?
 
 row_qualifier:
     ALL
     | DISTINCT
     | DISTINCTROW
-
-result_size_modifier:
-    SQL_SMALL_RESULT
-    | SQL_BIG_RESULT
 
 projection_list:
     projection_no_bare_star
@@ -473,7 +458,6 @@ predicate:
     | _strict_text_column RLIKE _regexp_pattern
     | _strict_text_column NOT RLIKE _regexp_pattern
     | _strict_text_column SOUNDS LIKE _strict_text_column
-    | _strict_text_column COLLATE utf8mb4_0900_ai_ci = _text
     | REGEXP_LIKE ( _strict_text_column , _regexp_pattern )
     | ( NOT REGEXP_LIKE ( _strict_text_column , _regexp_pattern ) )
     | JSON_OVERLAPS ( _strict_json_column , _strict_json_column )

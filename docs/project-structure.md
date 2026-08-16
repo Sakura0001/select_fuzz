@@ -17,8 +17,8 @@ flowchart LR
     Fuzz --> FuzzRunner["Per-database read/write workers"]
     Runner --> Schema["Schema + data setup"]
     Runner --> Grammar["GrammarQueryGenerator"]
-    Catalog["MySQL 8.0.41 catalog"] --> Schema
-    GrammarFile["Versioned .grammar.yy"] --> Grammar
+    Catalog["MySQL 8.0.41 historical catalog"] --> Schema
+    GrammarFile["MySQL 8.0.22 .grammar.yy"] --> Grammar
     Registry["Deterministic function registry"] --> Grammar
     Grammar --> Safety["Read-only safety gate"]
     Safety --> Explain["Baseline EXPLAIN admission"]
@@ -49,7 +49,7 @@ artifact 代码继续放在各自的公共包中。
 
 ```text
 select_fuzz 2/
-├── catalog/                 # MySQL 8.0.41 官方能力目录与 SELECT 文法
+├── catalog/                 # MySQL 8.0.41 历史能力目录与 MySQL 8.0.22 SELECT 文法
 ├── config/                  # correctness/performance 示例配置
 ├── docs/                    # 研究报告、测试计划、项目结构
 ├── frontend/                # React + TypeScript 控制台
@@ -71,7 +71,7 @@ CentOS 7 目标机只需运行 bundle 内的 `select-fuzz`，不需要预装 Pyt
 
 | 文件 | 职责 |
 | --- | --- |
-| [`catalog/mysql-8.0.41-select.grammar.yy`](../catalog/mysql-8.0.41-select.grammar.yy) | 版本化 SELECT 文法；当前 105 个 production、1026 个 alternative |
+| [`catalog/mysql-8.0.22-select.grammar.yy`](../catalog/mysql-8.0.22-select.grammar.yy) | 版本化 SELECT 文法 |
 | [`catalog/mysql-8.0.41-query-shapes.yaml`](../catalog/mysql-8.0.41-query-shapes.yaml) | 官方来源锁、feature、variant、版本和 schema profile |
 | [`generation/query_grammar.py`](../src/select_fuzz/generation/query_grammar.py) | 文法解析、随机展开、作用域/类型/表列绑定、稳定 alternative ID |
 | [`generation/function_registry.py`](../src/select_fuzz/generation/function_registry.py) | 确定性函数安全签名、参数类型、NULL witness 和 warning 契约 |

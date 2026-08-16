@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 import os
 from pathlib import Path
 import subprocess
@@ -97,6 +98,69 @@ def test_installed_wheel_loads_its_own_canonical_catalog(tmp_path: Path) -> None
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "64"
+
+
+def test_installed_wheel_loads_the_packaged_mysql_8022_grammar(tmp_path: Path) -> None:
+    wheel = _build_distribution(tmp_path, "wheel", "*.whl")
+    site_packages = tmp_path / "site-packages"
+    with ZipFile(wheel) as archive:
+        archive.extractall(site_packages)
+
+    checkout_sha256 = sha256(
+        (PROJECT_ROOT / "catalog" / "mysql-8.0.22-select.grammar.yy").read_bytes()
+    ).hexdigest()
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from pathlib import Path; "
+                "import select_fuzz.generation.query_grammar as module; "
+                "from select_fuzz.generation.query_grammar import SelectGrammar; "
+                "print(Path(module.__file__).resolve()); "
+                "print(SelectGrammar.default().sha256)"
+            ),
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(site_packages)},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    module_path, grammar_sha256 = completed.stdout.splitlines()
+    assert Path(module_path).is_relative_to(site_packages)
+    assert grammar_sha256 == checkout_sha256
+
+
+def test_installed_wheel_fails_closed_without_the_packaged_grammar(tmp_path: Path) -> None:
+    wheel = _build_distribution(tmp_path, "wheel", "*.whl")
+    site_packages = tmp_path / "site-packages"
+    with ZipFile(wheel) as archive:
+        archive.extractall(site_packages)
+    (site_packages / GRAMMAR_MEMBER).unlink()
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from select_fuzz.generation.query_grammar import SelectGrammar; "
+                "SelectGrammar.default()"
+            ),
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(site_packages)},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode != 0
+    assert "canonical MySQL 8.0.22 SELECT grammar is unavailable" in completed.stderr
 
 
 def test_sdist_is_reproducible_source_not_a_workspace_snapshot(tmp_path: Path) -> None:

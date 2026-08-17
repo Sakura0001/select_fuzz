@@ -139,7 +139,7 @@ correctness:
   max_indexes_per_table: 8
   # 单个 query block 最多绑定表数；范围 1-64，且不得超过 max_tables，默认 4。
   max_query_tables: 4
-  # 自定义 .grammar.yy 路径；null 使用打包的 MySQL 8.0.41 默认文法。
+  # 自定义 .grammar.yy 路径；null 使用打包的 MySQL 8.0.22 默认文法。
   query_grammar_path: null
   # 选择严格类型兼容表达式的概率百分比；范围 0-100，默认 80。
   grammar_compatible_type_percent: 80
@@ -232,7 +232,7 @@ fuzz:
   # SELECT 生成器权重：50% 负载型查询，50% 完全随机文法查询。
   grammar_query_weight: 50
   load_shaped_query_weight: 50
-  # reader SELECT 使用独立生成进程并只预取下一条；0 表示按总 reader 数与 CPU 核数自动计算，最多 32 个。
+  # reader SELECT 使用独立生成进程，每个 reader 最多预取 3 条；0 表示按总 reader 数与 CPU 核数自动计算，最多 32 个。
   query_generator_processes: 0
   # 从每代开始建库时计时，默认每 1800 秒停止旧连接并并发创建整批新库；0 表示关闭换代。
   # 历史库和失败时留下的半成品库均保留，不自动删除。

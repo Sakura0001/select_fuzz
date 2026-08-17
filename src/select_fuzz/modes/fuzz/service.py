@@ -26,6 +26,7 @@ from select_fuzz.modes.fuzz.diagnostics import (
     FuzzProgressReporter,
     FuzzRuntimeDiagnostics,
 )
+from select_fuzz.modes.fuzz.compatibility_backoff import CompatibilityErrorBackoff
 from select_fuzz.modes.fuzz.execution import StreamingQueryExecutor
 from select_fuzz.modes.fuzz.forensics import (
     FuzzErrorAggregator,
@@ -1049,6 +1050,10 @@ class FuzzModeService:
             )
         operation = 0 if prepared is None else prepared.next_operation
         delay = self._config.reconnect_initial_delay_seconds
+        compatibility_backoff = CompatibilityErrorBackoff(
+            initial_seconds=self._config.compatibility_error_backoff_initial_seconds,
+            maximum_seconds=self._config.compatibility_error_backoff_max_seconds,
+        )
         worker_key = self._worker_key(
             database_ordinal,
             "reader",
@@ -1178,6 +1183,7 @@ class FuzzModeService:
                         self._telemetry.observe("read_total_ns", result.elapsed_ns)
                         if result.stopped:
                             break
+                        compatibility_delay = compatibility_backoff.observe(result)
                         if result.success:
                             self._counters.increment("reads")
                             continue
@@ -1201,6 +1207,21 @@ class FuzzModeService:
                             if stop_event.is_set():
                                 break
                             raise RuntimeError(result.error or "reader connection lost")
+                        if compatibility_delay > 0:
+                            self._telemetry.set_stage(
+                                worker_key,
+                                "compatibility_error_backoff",
+                            )
+                            wait_started_ns = time.monotonic_ns()
+                            try:
+                                interrupted = stop_event.wait(compatibility_delay)
+                            finally:
+                                self._telemetry.observe(
+                                    "compatibility_error_backoff_ns",
+                                    max(0, time.monotonic_ns() - wait_started_ns),
+                                )
+                            if interrupted:
+                                break
                         # A server-side SQL error (including a query timeout) does
                         # not by itself invalidate the long-lived read session.
                         # Keep it open so the next generated query reuses the same

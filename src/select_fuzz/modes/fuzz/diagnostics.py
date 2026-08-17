@@ -338,6 +338,7 @@ _STAGE_LABELS = {
     "writer_executing": "写执行",
     "writer_fetching": "写拉取",
     "reconnecting": "重连",
+    "compatibility_error_backoff": "兼容错误退避",
 }
 
 _PHASE_DIAGNOSES = {
@@ -504,6 +505,11 @@ class FuzzProgressReporter:
             and waiting_age >= _NO_READ_WARNING_SECONDS
         ):
             return "generation_slow", "SQL生成速度不足"
+        if stage_counts.get("compatibility_error_backoff", 0) > 0:
+            return (
+                "compatibility_error_backoff",
+                "SQL兼容错误连续发生，读线程正在受控退避",
+            )
         error_storm = self._error_storm_top(document)
         if no_read_seconds >= _NO_READ_WARNING_SECONDS and error_storm:
             mysql_query, mysql_sleep = self._mysql_commands(document)
@@ -722,6 +728,7 @@ class FuzzProgressReporter:
             ("read_fetch_ns", "读拉取"),
             ("write_execute_ns", "写执行"),
             ("write_fetch_ns", "写拉取"),
+            ("compatibility_error_backoff_ns", "兼容退避"),
         )
         rendered: list[str] = []
         for metric, label in labels:

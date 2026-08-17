@@ -64,3 +64,6 @@ fuzz:
   query_kill_grace_seconds: 1
   reconnect_initial_delay_seconds: 0.25
   reconnect_max_delay_seconds: 10
+  # 仅对 1064/1234/1235/1253 的连续 SQL 兼容错误退避；死锁、锁等待和超时不退避。
+  compatibility_error_backoff_initial_seconds: 0.01
+  compatibility_error_backoff_max_seconds: 0.25

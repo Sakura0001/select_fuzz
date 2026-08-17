@@ -349,6 +349,33 @@ def _document(
     }
 
 
+def test_reporter_renders_compatibility_backoff_with_english_json_metric_keys() -> None:
+    reporter = FuzzProgressReporter(
+        diagnostics_interval_seconds=5,
+        expected_connection_groups={
+            "primary_writer": 3,
+            "primary_reader": 3,
+            "replica_reader": 6,
+        },
+        clock_ns=lambda: 20_000_000_000,
+    )
+    document = _document(stages={"compatibility_error_backoff": 12})
+    document["durations"] = {
+        "compatibility_error_backoff_ns": {
+            "count": 3,
+            "total_ns": 60_000_000,
+            "max_ns": 40_000_000,
+        }
+    }
+
+    line = reporter.render(document)[0]
+
+    assert "兼容错误退避:12" in line
+    assert "兼容退避:均20.0ms/最大40.0ms" in line
+    assert "判断=SQL兼容错误连续发生，读线程正在受控退避" in line
+    assert "compatibility_error_backoff" in document["stages"]
+
+
 def test_reporter_identifies_sql_generation_stall_and_throttles_warning() -> None:
     current = [0]
     reporter = FuzzProgressReporter(

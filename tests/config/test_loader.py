@@ -203,6 +203,22 @@ def test_fuzz_compatibility_backoff_defaults_bounds_and_cli_overrides(
         load_config(_write_config(tmp_path, data))
 
 
+@pytest.mark.parametrize(
+    "relative_path",
+    ("config/example.yaml", "config/intranet-fuzz.example.yaml"),
+)
+def test_fuzz_example_yaml_exposes_compatibility_backoff_defaults(
+    relative_path: str,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    data = yaml.safe_load((root / relative_path).read_text(encoding="utf-8"))
+    fuzz = data["fuzz"]
+
+    assert fuzz["compatibility_error_backoff_initial_seconds"] == 0.01
+    assert fuzz["compatibility_error_backoff_max_seconds"] == 0.25
+    assert FuzzConfig(**fuzz).compatibility_error_backoff_initial_seconds == 0.01
+
+
 def test_fuzz_schema_refresh_interval_can_be_disabled_but_not_negative() -> None:
     assert FuzzConfig(schema_refresh_interval_seconds=0).schema_refresh_interval_seconds == 0
     with pytest.raises(ValidationError):

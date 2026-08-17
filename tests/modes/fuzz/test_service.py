@@ -727,6 +727,328 @@ class _ErrorFactory:
         yield _ErrorSession(self._stop_event)
 
 
+class _ScriptedStopEvent:
+    """Stop without sleeping, while retaining the requested wait durations."""
+
+    def __init__(self, *, stop_after_waits: int | None = None) -> None:
+        self._stopped = False
+        self._stop_after_waits = stop_after_waits
+        self.waits: list[float | None] = []
+
+    def is_set(self) -> bool:
+        return self._stopped
+
+    def set(self) -> None:
+        self._stopped = True
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.waits.append(timeout)
+        if (
+            self._stop_after_waits is not None
+            and len(self.waits) >= self._stop_after_waits
+        ):
+            self._stopped = True
+        return self._stopped
+
+
+class _ScriptedSqlError(Exception):
+    def __init__(self, errno: int) -> None:
+        super().__init__(f"scripted errno={errno}")
+        self.errno = errno
+        self.sqlstate = "42000"
+
+
+@dataclass(frozen=True)
+class _ScriptedFetchFailure:
+    error: Exception
+
+
+class _FailingFetchCursor(_EmptyCursor):
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def fetchmany(self, size: int):  # type: ignore[no-untyped-def]
+        del size
+        raise self._error
+
+
+class _ScriptedReaderSession:
+    def __init__(
+        self,
+        actions: list[Exception | _ScriptedFetchFailure | None],
+        stop_event: _ScriptedStopEvent,
+    ) -> None:
+        self._actions = actions
+        self._stop_event = stop_event
+
+    def execute(self, sql: str) -> _EmptyCursor:
+        if not sql.startswith("SELECT"):
+            return _EmptyCursor()
+        if not self._actions:
+            self._stop_event.set()
+            return _EmptyCursor()
+        error = self._actions.pop(0)
+        if error is not None:
+            if isinstance(error, _ScriptedFetchFailure):
+                return _FailingFetchCursor(error.error)
+            raise error
+        return _EmptyCursor()
+
+    def connection_id(self) -> int:
+        return 72
+
+    def abort(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class _ScriptedReaderFactory:
+    def __init__(
+        self,
+        actions: list[Exception | _ScriptedFetchFailure | None],
+        stop_event: _ScriptedStopEvent,
+    ) -> None:
+        self._actions = actions
+        self._stop_event = stop_event
+        self.opens = 0
+
+    @contextmanager
+    def query_session(self, node, database):  # type: ignore[no-untyped-def]
+        del node, database
+        self.opens += 1
+        yield _ScriptedReaderSession(self._actions, self._stop_event)
+
+
+class _ElapsedStopEvent(_ScriptedStopEvent):
+    def __init__(self, clock_ns: list[int], *, elapsed_ns: int) -> None:
+        super().__init__(stop_after_waits=1)
+        self._clock_ns = clock_ns
+        self._elapsed_ns = elapsed_ns
+
+    def wait(self, timeout: float | None = None) -> bool:
+        interrupted = super().wait(timeout)
+        self._clock_ns[0] += self._elapsed_ns
+        return interrupted
+
+
+def _reader_backoff_service(
+    tmp_path,
+    factory: _ScriptedReaderFactory,
+) -> tuple[FuzzModeService, NodeConfig, InlineQueryPipeline]:  # type: ignore[no-untyped-def]
+    primary = NodeConfig(role=NodeRole.CUSTOM_ON, host="primary")
+    service = FuzzModeService(
+        config=FuzzConfig(
+            databases=1,
+            writer_threads_per_database=1,
+            reader_threads_per_database=3,
+            initial_tables=1,
+            initial_rows_per_table=100,
+            max_rows_per_database=1000,
+            compatibility_error_backoff_initial_seconds=0.01,
+            compatibility_error_backoff_max_seconds=0.25,
+        ),
+        primary=primary,
+        replica=NodeConfig(role=NodeRole.CUSTOM_ON, host="replica", port=3307),
+        factory=factory,
+        records=JsonlWriter(tmp_path / "events.jsonl"),
+        query_generator=WeightedQueryGenerator((("test", _QueryGenerator(), 1),)),
+        materializer_factory=lambda: _Materializer([], Lock()),
+    )
+    pipeline = InlineQueryPipeline(_QueryGenerator())
+    pipeline.start()
+    pipeline.register_database(0, "sf_f_reader", _schema("sf_f_reader").grammar_schema)
+    service._query_pipeline = pipeline  # type: ignore[attr-defined]
+    return service, primary, pipeline
+
+
+def test_reader_compatibility_errors_back_off_on_one_long_lived_connection(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    stop_event = _ScriptedStopEvent(stop_after_waits=3)
+    factory = _ScriptedReaderFactory(
+        [_ScriptedSqlError(1064), _ScriptedSqlError(1064), _ScriptedSqlError(1064)],
+        stop_event,
+    )
+    service, primary, pipeline = _reader_backoff_service(tmp_path, factory)
+
+    try:
+        service._reader_loop(  # type: ignore[attr-defined]
+            RunRequest("run-fuzz-reader-backoff", "fuzz", 1, 1, None, 1),
+            _schema("sf_f_reader"),
+            0,
+            0,
+            primary,
+            "primary",
+            stop_event,
+        )
+    finally:
+        pipeline.close()
+
+    assert stop_event.waits == [0.01, 0.02, 0.04]
+    assert factory.opens == 1
+    counters = service._counters.snapshot()  # type: ignore[attr-defined]
+    assert counters.errors == 3
+    assert counters.reconnects == 0
+    telemetry = service._telemetry.snapshot()  # type: ignore[attr-defined]
+    assert telemetry["stages"] == {"compatibility_error_backoff": 1}
+    assert telemetry["durations"]["compatibility_error_backoff_ns"]["count"] == 3
+    assert telemetry["durations"]["compatibility_error_backoff_ns"]["max_ns"] >= 0
+
+
+def test_reader_success_resets_compatibility_error_backoff(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    stop_event = _ScriptedStopEvent(stop_after_waits=2)
+    factory = _ScriptedReaderFactory(
+        [_ScriptedSqlError(1064), None, _ScriptedSqlError(1064)],
+        stop_event,
+    )
+    service, primary, pipeline = _reader_backoff_service(tmp_path, factory)
+
+    try:
+        service._reader_loop(  # type: ignore[attr-defined]
+            RunRequest("run-fuzz-reader-backoff-reset", "fuzz", 1, 1, None, 1),
+            _schema("sf_f_reader"),
+            0,
+            0,
+            primary,
+            "primary",
+            stop_event,
+        )
+    finally:
+        pipeline.close()
+
+    assert stop_event.waits == [0.01, 0.01]
+
+
+def test_reader_fetch_compatibility_error_uses_the_same_backoff(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    stop_event = _ScriptedStopEvent(stop_after_waits=1)
+    factory = _ScriptedReaderFactory(
+        [_ScriptedFetchFailure(_ScriptedSqlError(1235))],
+        stop_event,
+    )
+    service, primary, pipeline = _reader_backoff_service(tmp_path, factory)
+
+    try:
+        service._reader_loop(  # type: ignore[attr-defined]
+            RunRequest("run-fuzz-reader-fetch-backoff", "fuzz", 1, 1, None, 1),
+            _schema("sf_f_reader"),
+            0,
+            0,
+            primary,
+            "primary",
+            stop_event,
+        )
+    finally:
+        pipeline.close()
+
+    assert stop_event.waits == [0.01]
+    assert factory.opens == 1
+    assert service._counters.snapshot().errors == 1  # type: ignore[attr-defined]
+
+
+def test_reader_compatibility_backoff_records_interrupted_actual_wait_time(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:  # type: ignore[no-untyped-def]
+    clock_ns = [0]
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.service.time.monotonic_ns",
+        lambda: clock_ns[0],
+    )
+    stop_event = _ElapsedStopEvent(clock_ns, elapsed_ns=7_000_000)
+    factory = _ScriptedReaderFactory([_ScriptedSqlError(1064)], stop_event)
+    service, primary, pipeline = _reader_backoff_service(tmp_path, factory)
+
+    try:
+        service._reader_loop(  # type: ignore[attr-defined]
+            RunRequest("run-fuzz-reader-backoff-duration", "fuzz", 1, 1, None, 1),
+            _schema("sf_f_reader"),
+            0,
+            0,
+            primary,
+            "primary",
+            stop_event,
+        )
+    finally:
+        pipeline.close()
+
+    duration = service._telemetry.snapshot()["durations"][  # type: ignore[attr-defined]
+        "compatibility_error_backoff_ns"
+    ]
+    assert stop_event.waits == [0.01]
+    assert duration == {"count": 1, "total_ns": 7_000_000, "max_ns": 7_000_000}
+
+
+@pytest.mark.parametrize("errno", (1213, 1205, 1690))
+def test_reader_noncompatibility_errors_do_not_use_compatibility_backoff(
+    tmp_path,
+    errno: int,
+) -> None:  # type: ignore[no-untyped-def]
+    stop_event = _ScriptedStopEvent()
+    factory = _ScriptedReaderFactory([_ScriptedSqlError(errno)], stop_event)
+    service, primary, pipeline = _reader_backoff_service(tmp_path, factory)
+
+    try:
+        service._reader_loop(  # type: ignore[attr-defined]
+            RunRequest("run-fuzz-reader-noncompat", "fuzz", 1, 1, None, 1),
+            _schema("sf_f_reader"),
+            0,
+            0,
+            primary,
+            "primary",
+            stop_event,
+        )
+    finally:
+        pipeline.close()
+
+    assert stop_event.waits == []
+
+
+def test_reader_timeout_does_not_use_compatibility_backoff(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    stop_event = _ScriptedStopEvent()
+    factory = _ScriptedReaderFactory([TimeoutError("scripted timeout")], stop_event)
+    service, primary, pipeline = _reader_backoff_service(tmp_path, factory)
+
+    try:
+        service._reader_loop(  # type: ignore[attr-defined]
+            RunRequest("run-fuzz-reader-timeout", "fuzz", 1, 1, None, 1),
+            _schema("sf_f_reader"),
+            0,
+            0,
+            primary,
+            "primary",
+            stop_event,
+        )
+    finally:
+        pipeline.close()
+
+    assert stop_event.waits == []
+
+
+def test_reader_connection_loss_reconnects_without_compatibility_backoff(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    stop_event = _ScriptedStopEvent(stop_after_waits=1)
+    factory = _ScriptedReaderFactory([_ScriptedSqlError(2013)], stop_event)
+    service, primary, pipeline = _reader_backoff_service(tmp_path, factory)
+
+    try:
+        service._reader_loop(  # type: ignore[attr-defined]
+            RunRequest("run-fuzz-reader-lost", "fuzz", 1, 1, None, 1),
+            _schema("sf_f_reader"),
+            0,
+            0,
+            primary,
+            "primary",
+            stop_event,
+        )
+    finally:
+        pipeline.close()
+
+    assert stop_event.waits == [0.25]
+    counters = service._counters.snapshot()  # type: ignore[attr-defined]
+    assert counters.connection_losses == 1
+    assert counters.reconnects == 1
+    assert "compatibility_error_backoff_ns" not in service._telemetry.snapshot()["durations"]  # type: ignore[attr-defined]
+
+
 class _PrefetchTicket:
     def __init__(
         self,

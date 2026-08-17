@@ -349,7 +349,8 @@ def _document(
     }
 
 
-def test_reporter_renders_compatibility_backoff_with_english_json_metric_keys() -> None:
+def test_reporter_identifies_sustained_majority_compatibility_backoff() -> None:
+    current = [0]
     reporter = FuzzProgressReporter(
         diagnostics_interval_seconds=5,
         expected_connection_groups={
@@ -357,9 +358,15 @@ def test_reporter_renders_compatibility_backoff_with_english_json_metric_keys() 
             "primary_reader": 3,
             "replica_reader": 6,
         },
-        clock_ns=lambda: 20_000_000_000,
+        clock_ns=lambda: current[0],
     )
-    document = _document(stages={"compatibility_error_backoff": 12})
+    document = _document(
+        stages={
+            "compatibility_error_backoff": 5,
+            "reader_executing": 4,
+            "writer_executing": 3,
+        }
+    )
     document["durations"] = {
         "compatibility_error_backoff_ns": {
             "count": 3,
@@ -368,12 +375,89 @@ def test_reporter_renders_compatibility_backoff_with_english_json_metric_keys() 
         }
     }
 
+    reporter.render(document)
+    current[0] = 15_000_000_000
     line = reporter.render(document)[0]
 
-    assert "兼容错误退避:12" in line
+    assert "兼容错误退避:5" in line
     assert "兼容退避:均20.0ms/最大40.0ms" in line
     assert "判断=SQL兼容错误连续发生，读线程正在受控退避" in line
     assert "compatibility_error_backoff" in document["stages"]
+
+
+def test_reporter_prioritizes_error_storm_over_one_reader_in_backoff() -> None:
+    current = [0]
+    reporter = FuzzProgressReporter(
+        diagnostics_interval_seconds=5,
+        expected_connection_groups={
+            "primary_writer": 3,
+            "primary_reader": 3,
+            "replica_reader": 6,
+        },
+        clock_ns=lambda: current[0],
+    )
+    document = _document(
+        errors=7500,
+        stages={
+            "compatibility_error_backoff": 1,
+            "reader_executing": 8,
+            "writer_executing": 3,
+        },
+        errors_summary={
+            "total_count": 7500,
+            "interval_count": 2500,
+            "rate_per_second": 500.0,
+            "fingerprint_count": 1,
+            "other_count": 0,
+            "other_interval_count": 0,
+            "top": (
+                {
+                    "fingerprint": "8f32a6d417cb",
+                    "total_count": 7500,
+                    "interval_count": 2500,
+                    "rate_per_second": 500.0,
+                    "worker_count": 12,
+                    "database_count": 1,
+                    "endpoints": ("primary", "replica"),
+                    "failure_stage": "execute",
+                    "error_type": "ProgrammingError",
+                    "message": "syntax error",
+                },
+            ),
+        },
+    )
+
+    reporter.render(document)
+    current[0] = 15_000_000_000
+    line = reporter.render(document)[0]
+
+    assert "判断=客户端错误风暴" in line
+    assert "SQL兼容错误连续发生" not in line
+
+
+def test_reporter_does_not_diagnose_compatibility_backoff_when_reads_progress() -> None:
+    current = [0]
+    reporter = FuzzProgressReporter(
+        diagnostics_interval_seconds=5,
+        expected_connection_groups={
+            "primary_writer": 3,
+            "primary_reader": 3,
+            "replica_reader": 6,
+        },
+        clock_ns=lambda: current[0],
+    )
+    stages = {
+        "compatibility_error_backoff": 5,
+        "reader_executing": 4,
+        "writer_executing": 3,
+    }
+
+    reporter.render(_document(reads=10, stages=stages))
+    current[0] = 5_000_000_000
+    line = reporter.render(_document(reads=11, stages=stages))[0]
+
+    assert "无读取=0.0s" in line
+    assert "SQL兼容错误连续发生" not in line
 
 
 def test_reporter_identifies_sql_generation_stall_and_throttles_warning() -> None:

@@ -505,7 +505,14 @@ class FuzzProgressReporter:
             and waiting_age >= _NO_READ_WARNING_SECONDS
         ):
             return "generation_slow", "SQL生成速度不足"
-        if stage_counts.get("compatibility_error_backoff", 0) > 0:
+        compatibility_backoff_readers = stage_counts.get(
+            "compatibility_error_backoff",
+            0,
+        )
+        if (
+            no_read_seconds >= _NO_READ_WARNING_SECONDS
+            and compatibility_backoff_readers >= (expected_readers + 1) // 2
+        ):
             return (
                 "compatibility_error_backoff",
                 "SQL兼容错误连续发生，读线程正在受控退避",

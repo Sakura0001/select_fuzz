@@ -238,6 +238,16 @@ def test_canonical_grammar_targets_mysql_8022() -> None:
     assert set_operators == {"UNION", "UNION ALL", "UNION DISTINCT"}
     assert select_modifiers == {"row_qualifier", "_optimizer_hint"}
 
+    cast_expressions = {
+        " ".join(symbol.value for symbol in alternative.symbols)
+        for alternative in grammar.productions["cast_expression"].alternatives
+    }
+    assert all(
+        not alternative.startswith("CAST ( ST_GEOMFROMTEXT")
+        for alternative in cast_expressions
+    )
+    assert all(" AS POINT " not in f" {alternative} " for alternative in cast_expressions)
+
 
 def test_default_grammar_is_the_packaged_mysql_8022_asset() -> None:
     checkout = (

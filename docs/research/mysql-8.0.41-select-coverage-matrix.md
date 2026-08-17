@@ -37,12 +37,16 @@
 - [MySQL 8.0 内建函数与运算符总表](https://dev.mysql.com/doc/refman/8.0/en/built-in-function-reference.html)
 - [MySQL Server 函数版本矩阵](https://dev.mysql.com/doc/mysqld-version-reference/en/built-in-functions.html)
 - [MySQL 8.0 优化器提示总表](https://dev.mysql.com/doc/refman/8.0/en/optimizer-hints.html)
-- 当前版本化文法：[`catalog/mysql-8.0.22-select.grammar.yy`](../../catalog/mysql-8.0.22-select.grammar.yy)
+- 历史版本化文法：`git show 93ee593:catalog/mysql-8.0.41-select.grammar.yy`
 - 本地安全函数注册表：[`src/select_fuzz/generation/function_registry.py`](../../src/select_fuzz/generation/function_registry.py)
 - 本地默认排除范围：[`src/select_fuzz/generation/query_scope.py`](../../src/select_fuzz/generation/query_scope.py)
 - 本地官方来源锁：[`catalog/mysql-8.0.41-query-shapes.yaml`](../../catalog/mysql-8.0.41-query-shapes.yaml)
 
 官方 8.0 手册是滚动页面，因此本历史报告以精确 `mysql-8.0.41` 源码标签为语法基线，并用版本矩阵核对 8.0 系列可用性。函数表中同一官方行的多个 `code` 名称/别名被拆开逐项检查；赋值 `=` 与比较 `=`、二元 `-` 与一元 `-` 保留为不同语义项。
+
+## 当前实现（MySQL 8.0.22）
+
+当前 canonical grammar 为 [`catalog/mysql-8.0.22-select.grammar.yy`](../../catalog/mysql-8.0.22-select.grammar.yy)。它与本历史矩阵的 8.0.41 覆盖结论分开维护。
 
 ## 查询表达式、SELECT 主体与子句
 

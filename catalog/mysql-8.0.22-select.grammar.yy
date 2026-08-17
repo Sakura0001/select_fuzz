@@ -703,7 +703,6 @@ cast_expression:
     | CAST ( '2024-02-29 12:34:56.123456' AS DATETIME ( 6 ) ) _result_temporal
     | CAST ( 2024 AS YEAR ) _result_temporal
     | CAST ( '{"k":1}' AS JSON ) _result_json
-    | CAST ( ST_GEOMFROMTEXT ( 'POINT(0 0)' ) AS POINT ) _result_spatial
     | CONVERT ( _int , SIGNED ) _result_numeric
     | CONVERT ( _text , CHAR ( 64 ) ) _result_text
     | CONVERT ( _text USING utf8mb4 ) _result_text

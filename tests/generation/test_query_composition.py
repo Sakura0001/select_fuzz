@@ -6,7 +6,20 @@ from select_fuzz.generation.query import (
     WeightedQueryGenerator,
 )
 from select_fuzz.generation.query.grammar import RandomGrammarQueryGenerator
+from select_fuzz.generation.query.load_shaped import LoadShapedQueryGenerator
+from select_fuzz.generation.query_grammar import (
+    GrammarColumn,
+    GrammarSchema,
+    GrammarTable,
+)
 from select_fuzz.modes.fuzz import query_generation
+
+
+_EXPECTED_FUZZ_EXCLUDED_FAMILIES = frozenset({"json", "fulltext", "spatial"})
+# random.Random(0).randrange(100) == 49; grammar at the 50/50 boundary.
+_GRAMMAR_SEED = 0
+# random.Random(88).randrange(100) == 50; load-shaped at 50/50, grammar at 60/40.
+_LOAD_BOUNDARY_SEED = 88
 
 
 @dataclass
@@ -41,6 +54,23 @@ class _StubGenerator:
             generator=self.name,
             tags=frozenset({self.name}),
         )
+
+
+def _load_shaped_schema() -> GrammarSchema:
+    return GrammarSchema(
+        (
+            GrammarTable(
+                "fuzz_t0",
+                (
+                    GrammarColumn("id", "BIGINT"),
+                    GrammarColumn("tenant_id", "BIGINT"),
+                    GrammarColumn("amount", "BIGINT"),
+                    GrammarColumn("payload", "VARCHAR(32)"),
+                ),
+                (),
+            ),
+        )
+    )
 
 
 def test_weighted_query_generator_selects_per_call_deterministically() -> None:
@@ -92,14 +122,28 @@ def test_fuzz_query_factory_excludes_unavailable_grammar_families(
         "GrammarQueryGenerator",
         build_grammar_generator,
     )
-    schema = object()
-
-    query = query_generation.build_fuzz_query_generator(3).generate(
-        QueryGenerationContext("sf_f_case", schema),
-        seed=0,
+    assert (
+        query_generation.FUZZ_EXCLUDED_GRAMMAR_FAMILIES
+        == _EXPECTED_FUZZ_EXCLUDED_FAMILIES
     )
+    schema = _load_shaped_schema()
+    context = QueryGenerationContext("sf_f_case", schema)
+    generator = query_generation.build_fuzz_query_generator(3)
+
+    query = generator.generate(context, seed=_GRAMMAR_SEED)
+    load_query = generator.generate(context, seed=_LOAD_BOUNDARY_SEED)
 
     assert configured_max_tables == [3]
-    assert grammar.calls[0][:2] == (schema, 0)
-    assert grammar.calls[0][2] is query_generation.FUZZ_EXCLUDED_GRAMMAR_FAMILIES
-    assert query.generator == "grammar"
+    assert grammar.calls == [
+        (schema, _GRAMMAR_SEED, _EXPECTED_FUZZ_EXCLUDED_FAMILIES)
+    ]
+    assert query == GeneratedQuery(
+        "SELECT 1",
+        _GRAMMAR_SEED,
+        "grammar",
+        frozenset({"grammar_random"}),
+    )
+    assert load_query == LoadShapedQueryGenerator().generate(
+        context,
+        seed=_LOAD_BOUNDARY_SEED,
+    )

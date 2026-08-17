@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from threading import Event, Thread
 
 import pytest
@@ -10,21 +11,34 @@ from select_fuzz.generation.query import (
     QueryGenerationContext,
     WeightedQueryGenerator,
 )
+from select_fuzz.generation.query.grammar import RandomGrammarQueryGenerator
+from select_fuzz.generation.query.load_shaped import LoadShapedQueryGenerator
 from select_fuzz.generation.query_grammar import (
     GrammarColumn,
+    GrammarQueryConfig,
+    GrammarQueryGenerator,
     GrammarSchema,
     GrammarTable,
 )
 from select_fuzz.modes.fuzz.query_pipeline import (
     _configure_generation_worker_scheduling,
     _generation_worker,
+    _Generate,
+    _RegisterDatabase,
     _StopWorker,
     InlineQueryPipeline,
     ProcessQueryPipeline,
     QueryGenerationProcessDied,
     resolve_query_generator_processes,
 )
-from select_fuzz.modes.fuzz.query_generation import build_fuzz_query_generator
+from select_fuzz.modes.fuzz import query_generation
+
+
+_EXPECTED_FUZZ_EXCLUDED_FAMILIES = frozenset({"json", "fulltext", "spatial"})
+# random.Random(0).randrange(100) == 49; grammar at the 50/50 boundary.
+_GRAMMAR_SEED = 0
+# random.Random(88).randrange(100) == 50; load-shaped at 50/50, grammar at 60/40.
+_LOAD_BOUNDARY_SEED = 88
 
 
 def test_generation_worker_uses_fair_gil_switch_interval(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -81,6 +95,26 @@ class _RecordingGenerator:
             seed,
             "recording",
         )
+
+
+@dataclass
+class _GrammarCandidate:
+    sql: str
+
+
+class _RecordingGrammarGenerator:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, int, frozenset[str]]] = []
+
+    def generate(
+        self,
+        schema: object,
+        *,
+        seed: int,
+        excluded_families: frozenset[str] = frozenset(),
+    ) -> _GrammarCandidate:
+        self.calls.append((schema, seed, excluded_families))
+        return _GrammarCandidate("SELECT 1")
 
 
 class _RecordingQueue:
@@ -221,7 +255,21 @@ class _BlockingStartContext(_FailingSpawnContext):
 
 
 def _production_generator() -> WeightedQueryGenerator:
-    return build_fuzz_query_generator(1)
+    return WeightedQueryGenerator(
+        (
+            (
+                "grammar",
+                RandomGrammarQueryGenerator(
+                    GrammarQueryGenerator(
+                        config=GrammarQueryConfig(max_tables_per_query_block=1)
+                    ),
+                    excluded_families=_EXPECTED_FUZZ_EXCLUDED_FAMILIES,
+                ),
+                50,
+            ),
+            ("load_shaped", LoadShapedQueryGenerator(), 50),
+        )
+    )
 
 
 class _StoppedWorkerEvent:
@@ -230,8 +278,8 @@ class _StoppedWorkerEvent:
 
 
 class _WorkerQueue:
-    def __init__(self) -> None:
-        self.messages = [_StopWorker()]
+    def __init__(self, messages: list[object]) -> None:
+        self.messages = messages
 
     def get(self, timeout: float) -> object:
         del timeout
@@ -241,21 +289,45 @@ class _WorkerQueue:
 def test_generation_worker_uses_shared_fuzz_query_generator_factory(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
-    requested_max_tables: list[int] = []
-    shared_generator = build_fuzz_query_generator(1)
-
-    def build_shared_generator(max_tables_per_query_block: int):  # type: ignore[no-untyped-def]
-        requested_max_tables.append(max_tables_per_query_block)
-        return shared_generator
-
+    grammar = _RecordingGrammarGenerator()
     monkeypatch.setattr(
-        "select_fuzz.modes.fuzz.query_pipeline.build_fuzz_query_generator",
-        build_shared_generator,
+        query_generation,
+        "GrammarQueryGenerator",
+        lambda *, config: grammar,
+    )
+    responses = _RecordingQueue()
+    schema = _schema()
+
+    _generation_worker(
+        _WorkerQueue(
+            [
+                _RegisterDatabase(0, "sf_f_case", schema),
+                _Generate(1, 0, 0, _GRAMMAR_SEED),
+                _Generate(2, 0, 0, _LOAD_BOUNDARY_SEED),
+                _StopWorker(),
+            ]
+        ),
+        {(0, 0): responses},
+        _StoppedWorkerEvent(),
+        3,
     )
 
-    _generation_worker(_WorkerQueue(), {}, _StoppedWorkerEvent(), 3)
+    context = QueryGenerationContext("sf_f_case", schema)
+    assert grammar.calls == [
+        (schema, _GRAMMAR_SEED, _EXPECTED_FUZZ_EXCLUDED_FAMILIES)
+    ]
+    assert responses.messages[0].query == GeneratedQuery(
+        "SELECT 1",
+        _GRAMMAR_SEED,
+        "grammar",
+        frozenset({"grammar_random"}),
+    )
+    assert responses.messages[1].query == LoadShapedQueryGenerator().generate(
+        context,
+        seed=_LOAD_BOUNDARY_SEED,
+    )
+    assert [response.error_type for response in responses.messages] == [None, None]
 
-    assert requested_max_tables == [3]
 
 
 def test_inline_pipeline_preserves_seed_and_query_identity() -> None:

@@ -10,8 +10,22 @@ from select_fuzz.config import (
     RunMode,
 )
 from select_fuzz.config.models import ServerEndpointConfig
+from select_fuzz.generation.query import GeneratedQuery, QueryGenerationContext
+from select_fuzz.generation.query.load_shaped import LoadShapedQueryGenerator
+from select_fuzz.generation.query_grammar import (
+    GrammarColumn,
+    GrammarSchema,
+    GrammarTable,
+)
 from select_fuzz.modes.fuzz import entrypoint
-from select_fuzz.modes.fuzz.query_generation import build_fuzz_query_generator
+from select_fuzz.modes.fuzz import query_generation
+
+
+_EXPECTED_FUZZ_EXCLUDED_FAMILIES = frozenset({"json", "fulltext", "spatial"})
+# random.Random(0).randrange(100) == 49; grammar at the 50/50 boundary.
+_GRAMMAR_SEED = 0
+# random.Random(88).randrange(100) == 50; load-shaped at 50/50, grammar at 60/40.
+_LOAD_BOUNDARY_SEED = 88
 
 
 @dataclass
@@ -21,11 +35,48 @@ class _Factory:
     control_connection_limit: int | None
 
 
+@dataclass
+class _GrammarCandidate:
+    sql: str
+
+
+class _RecordingGrammarGenerator:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, int, frozenset[str]]] = []
+
+    def generate(
+        self,
+        schema: object,
+        *,
+        seed: int,
+        excluded_families: frozenset[str] = frozenset(),
+    ) -> _GrammarCandidate:
+        self.calls.append((schema, seed, excluded_families))
+        return _GrammarCandidate("SELECT 1")
+
+
 def _topology(role: NodeRole, primary_port: int) -> NodeTopologyConfig:
     return NodeTopologyConfig(
         role=role,
         primary=ServerEndpointConfig(host="127.0.0.1", port=primary_port),
         replica=ServerEndpointConfig(host="127.0.0.1", port=primary_port + 1),
+    )
+
+
+def _query_schema() -> GrammarSchema:
+    return GrammarSchema(
+        (
+            GrammarTable(
+                "fuzz_t0",
+                (
+                    GrammarColumn("id", "BIGINT"),
+                    GrammarColumn("tenant_id", "BIGINT"),
+                    GrammarColumn("amount", "BIGINT"),
+                    GrammarColumn("payload", "VARCHAR(32)"),
+                ),
+                (),
+            ),
+        )
     )
 
 
@@ -87,14 +138,12 @@ def test_entrypoint_uses_shared_fuzz_query_generator_factory(
     monkeypatch,
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
-    requested_max_tables: list[int] = []
-    shared_generator = build_fuzz_query_generator(1)
-
-    def build_shared_generator(max_tables_per_query_block: int):  # type: ignore[no-untyped-def]
-        requested_max_tables.append(max_tables_per_query_block)
-        return shared_generator
-
-    monkeypatch.setattr(entrypoint, "build_fuzz_query_generator", build_shared_generator)
+    grammar = _RecordingGrammarGenerator()
+    monkeypatch.setattr(
+        query_generation,
+        "GrammarQueryGenerator",
+        lambda *, config: grammar,
+    )
     config = AppConfig(
         mode=RunMode.FUZZ,
         nodes=(
@@ -110,6 +159,24 @@ def test_entrypoint_uses_shared_fuzz_query_generator_factory(
     )
 
     service = entrypoint.build_fuzz_runner(config, tmp_path)
+    schema = _query_schema()
+    context = QueryGenerationContext("sf_f_case", schema)
+    grammar_query = service._queries.generate(context, seed=_GRAMMAR_SEED)  # type: ignore[attr-defined]
+    load_query = service._queries.generate(  # type: ignore[attr-defined]
+        context,
+        seed=_LOAD_BOUNDARY_SEED,
+    )
 
-    assert requested_max_tables == [3]
-    assert service._queries is shared_generator  # type: ignore[attr-defined]
+    assert grammar.calls == [
+        (schema, _GRAMMAR_SEED, _EXPECTED_FUZZ_EXCLUDED_FAMILIES)
+    ]
+    assert grammar_query == GeneratedQuery(
+        "SELECT 1",
+        _GRAMMAR_SEED,
+        "grammar",
+        frozenset({"grammar_random"}),
+    )
+    assert load_query == LoadShapedQueryGenerator().generate(
+        context,
+        seed=_LOAD_BOUNDARY_SEED,
+    )

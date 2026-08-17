@@ -18,15 +18,9 @@ from select_fuzz.generation.query import (
     GeneratedQuery,
     QueryGenerationContext,
     QueryGenerator,
-    WeightedQueryGenerator,
 )
-from select_fuzz.generation.query.grammar import RandomGrammarQueryGenerator
-from select_fuzz.generation.query.load_shaped import LoadShapedQueryGenerator
-from select_fuzz.generation.query_grammar import (
-    GrammarQueryConfig,
-    GrammarQueryGenerator,
-    GrammarSchema,
-)
+from select_fuzz.generation.query_grammar import GrammarSchema
+from select_fuzz.modes.fuzz.query_generation import build_fuzz_query_generator
 
 
 _GENERATION_WORKER_SWITCH_INTERVAL_SECONDS = 0.001
@@ -300,22 +294,6 @@ class _GenerationResponse:
     compute_ns: int
 
 
-def _production_query_generator(max_tables_per_query_block: int) -> WeightedQueryGenerator:
-    grammar = RandomGrammarQueryGenerator(
-        GrammarQueryGenerator(
-            config=GrammarQueryConfig(
-                max_tables_per_query_block=max_tables_per_query_block
-            )
-        )
-    )
-    return WeightedQueryGenerator(
-        (
-            ("grammar", grammar, 50),
-            ("load_shaped", LoadShapedQueryGenerator(), 50),
-        )
-    )
-
-
 def _generation_worker(
     request_queue: Any,
     response_queues: dict[tuple[int, int], Any],
@@ -323,7 +301,7 @@ def _generation_worker(
     max_tables_per_query_block: int,
 ) -> None:
     _configure_generation_worker_scheduling()
-    generator = _production_query_generator(max_tables_per_query_block)
+    generator = build_fuzz_query_generator(max_tables_per_query_block)
     contexts: dict[int, QueryGenerationContext] = {}
     while not stop_event.is_set():
         try:

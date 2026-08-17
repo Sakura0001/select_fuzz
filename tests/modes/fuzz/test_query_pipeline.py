@@ -10,22 +10,21 @@ from select_fuzz.generation.query import (
     QueryGenerationContext,
     WeightedQueryGenerator,
 )
-from select_fuzz.generation.query.grammar import RandomGrammarQueryGenerator
-from select_fuzz.generation.query.load_shaped import LoadShapedQueryGenerator
 from select_fuzz.generation.query_grammar import (
     GrammarColumn,
-    GrammarQueryConfig,
-    GrammarQueryGenerator,
     GrammarSchema,
     GrammarTable,
 )
 from select_fuzz.modes.fuzz.query_pipeline import (
     _configure_generation_worker_scheduling,
+    _generation_worker,
+    _StopWorker,
     InlineQueryPipeline,
     ProcessQueryPipeline,
     QueryGenerationProcessDied,
     resolve_query_generator_processes,
 )
+from select_fuzz.modes.fuzz.query_generation import build_fuzz_query_generator
 
 
 def test_generation_worker_uses_fair_gil_switch_interval(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -222,20 +221,41 @@ class _BlockingStartContext(_FailingSpawnContext):
 
 
 def _production_generator() -> WeightedQueryGenerator:
-    return WeightedQueryGenerator(
-        (
-            (
-                "grammar",
-                RandomGrammarQueryGenerator(
-                    GrammarQueryGenerator(
-                        config=GrammarQueryConfig(max_tables_per_query_block=1)
-                    )
-                ),
-                50,
-            ),
-            ("load_shaped", LoadShapedQueryGenerator(), 50),
-        )
+    return build_fuzz_query_generator(1)
+
+
+class _StoppedWorkerEvent:
+    def is_set(self) -> bool:
+        return False
+
+
+class _WorkerQueue:
+    def __init__(self) -> None:
+        self.messages = [_StopWorker()]
+
+    def get(self, timeout: float) -> object:
+        del timeout
+        return self.messages.pop(0)
+
+
+def test_generation_worker_uses_shared_fuzz_query_generator_factory(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    requested_max_tables: list[int] = []
+    shared_generator = build_fuzz_query_generator(1)
+
+    def build_shared_generator(max_tables_per_query_block: int):  # type: ignore[no-untyped-def]
+        requested_max_tables.append(max_tables_per_query_block)
+        return shared_generator
+
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.query_pipeline.build_fuzz_query_generator",
+        build_shared_generator,
     )
+
+    _generation_worker(_WorkerQueue(), {}, _StoppedWorkerEvent(), 3)
+
+    assert requested_max_tables == [3]
 
 
 def test_inline_pipeline_preserves_seed_and_query_identity() -> None:

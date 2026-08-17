@@ -5,6 +5,28 @@ from select_fuzz.generation.query import (
     QueryGenerationContext,
     WeightedQueryGenerator,
 )
+from select_fuzz.generation.query.grammar import RandomGrammarQueryGenerator
+from select_fuzz.modes.fuzz import query_generation
+
+
+@dataclass
+class _GrammarCandidate:
+    sql: str
+
+
+class _RecordingGrammarGenerator:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, int, frozenset[str]]] = []
+
+    def generate(
+        self,
+        schema: object,
+        *,
+        seed: int,
+        excluded_families: frozenset[str] = frozenset(),
+    ) -> _GrammarCandidate:
+        self.calls.append((schema, seed, excluded_families))
+        return _GrammarCandidate("SELECT 1")
 
 
 @dataclass
@@ -33,3 +55,51 @@ def test_weighted_query_generator_selects_per_call_deterministically() -> None:
     assert first == second
     assert 70 <= first.count("grammar") <= 130
     assert 70 <= first.count("load") <= 130
+
+
+def test_random_grammar_generator_forwards_immutable_excluded_families() -> None:
+    grammar = _RecordingGrammarGenerator()
+    excluded_families = frozenset({"json", "fulltext", "spatial"})
+    generator = RandomGrammarQueryGenerator(
+        grammar, excluded_families=excluded_families  # type: ignore[arg-type]
+    )
+    schema = object()
+
+    query = generator.generate(QueryGenerationContext("sf_f_case", schema), seed=41)
+
+    assert grammar.calls[0][:2] == (schema, 41)
+    assert grammar.calls[0][2] is excluded_families
+    assert query == GeneratedQuery(
+        "SELECT 1",
+        41,
+        "grammar",
+        frozenset({"grammar_random"}),
+    )
+
+
+def test_fuzz_query_factory_excludes_unavailable_grammar_families(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    grammar = _RecordingGrammarGenerator()
+    configured_max_tables: list[int] = []
+
+    def build_grammar_generator(*, config: object) -> _RecordingGrammarGenerator:
+        configured_max_tables.append(config.max_tables_per_query_block)  # type: ignore[attr-defined]
+        return grammar
+
+    monkeypatch.setattr(
+        query_generation,
+        "GrammarQueryGenerator",
+        build_grammar_generator,
+    )
+    schema = object()
+
+    query = query_generation.build_fuzz_query_generator(3).generate(
+        QueryGenerationContext("sf_f_case", schema),
+        seed=0,
+    )
+
+    assert configured_max_tables == [3]
+    assert grammar.calls[0][:2] == (schema, 0)
+    assert grammar.calls[0][2] is query_generation.FUZZ_EXCLUDED_GRAMMAR_FAMILIES
+    assert query.generator == "grammar"

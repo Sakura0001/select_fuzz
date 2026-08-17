@@ -10,12 +10,9 @@ import mysql.connector
 from select_fuzz.artifacts import JsonlWriter
 from select_fuzz.config import AppConfig
 from select_fuzz.execution import MySQLConnectorFactory
-from select_fuzz.generation.query import WeightedQueryGenerator
-from select_fuzz.generation.query.grammar import RandomGrammarQueryGenerator
-from select_fuzz.generation.query.load_shaped import LoadShapedQueryGenerator
-from select_fuzz.generation.query_grammar import GrammarQueryConfig, GrammarQueryGenerator
 from select_fuzz.modes.fuzz.materialization import FuzzMaterializer
 from select_fuzz.modes.fuzz.models import FuzzConnectionLayout
+from select_fuzz.modes.fuzz.query_generation import build_fuzz_query_generator
 from select_fuzz.modes.fuzz.query_pipeline import (
     ProcessQueryPipeline,
     resolve_query_generator_processes,
@@ -63,20 +60,8 @@ def build_fuzz_runner(config: AppConfig, artifact_root: Path) -> FuzzModeService
         if config.full_thread_sql_log
         else None
     )
-    grammar = RandomGrammarQueryGenerator(
-        GrammarQueryGenerator(
-            config=GrammarQueryConfig(max_tables_per_query_block=config.fuzz.initial_tables)
-        )
-    )
-    query_generator = WeightedQueryGenerator(
-        (
-            ("grammar", grammar, config.fuzz.grammar_query_weight),
-            (
-                "load_shaped",
-                LoadShapedQueryGenerator(),
-                config.fuzz.load_shaped_query_weight,
-            ),
-        )
+    query_generator = build_fuzz_query_generator(
+        config.fuzz.initial_tables,
     )
     return FuzzModeService(
         config=config.fuzz,

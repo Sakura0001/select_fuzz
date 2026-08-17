@@ -11,6 +11,7 @@ from select_fuzz.config import (
 )
 from select_fuzz.config.models import ServerEndpointConfig
 from select_fuzz.modes.fuzz import entrypoint
+from select_fuzz.modes.fuzz.query_generation import build_fuzz_query_generator
 
 
 @dataclass
@@ -80,3 +81,35 @@ def test_production_fuzz_progress_is_flushed_to_stderr_only(capsys) -> None:  # 
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "[fuzz状态] 判断=负载正常推进\n"
+
+
+def test_entrypoint_uses_shared_fuzz_query_generator_factory(
+    monkeypatch,
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    requested_max_tables: list[int] = []
+    shared_generator = build_fuzz_query_generator(1)
+
+    def build_shared_generator(max_tables_per_query_block: int):  # type: ignore[no-untyped-def]
+        requested_max_tables.append(max_tables_per_query_block)
+        return shared_generator
+
+    monkeypatch.setattr(entrypoint, "build_fuzz_query_generator", build_shared_generator)
+    config = AppConfig(
+        mode=RunMode.FUZZ,
+        nodes=(
+            _topology(NodeRole.BASELINE, 33061),
+            _topology(NodeRole.CUSTOM_OFF, 33063),
+            _topology(NodeRole.CUSTOM_ON, 33065),
+        ),
+        fuzz=FuzzConfig(
+            initial_tables=3,
+            initial_rows_per_table=100,
+            max_rows_per_database=1000,
+        ),
+    )
+
+    service = entrypoint.build_fuzz_runner(config, tmp_path)
+
+    assert requested_max_tables == [3]
+    assert service._queries is shared_generator  # type: ignore[attr-defined]

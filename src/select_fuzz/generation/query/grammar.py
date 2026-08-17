@@ -12,8 +12,14 @@ from select_fuzz.generation.query_grammar import GrammarQueryGenerator
 class RandomGrammarQueryGenerator:
     name = "grammar"
 
-    def __init__(self, generator: GrammarQueryGenerator | None = None) -> None:
+    def __init__(
+        self,
+        generator: GrammarQueryGenerator | None = None,
+        *,
+        excluded_families: frozenset[str] = frozenset(),
+    ) -> None:
         self._generator = generator or GrammarQueryGenerator()
+        self._excluded_families = excluded_families
 
     def generate(
         self,
@@ -23,7 +29,11 @@ class RandomGrammarQueryGenerator:
     ) -> GeneratedQuery:
         if context.schema is None:
             raise ValueError("grammar query generation requires a schema")
-        candidate = self._generator.generate(context.schema, seed=seed)
+        candidate = self._generator.generate(
+            context.schema,
+            seed=seed,
+            excluded_families=self._excluded_families,
+        )
         return GeneratedQuery(
             candidate.sql,
             seed,

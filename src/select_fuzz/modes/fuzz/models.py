@@ -45,6 +45,7 @@ class FuzzExecutionResult:
     stopped: bool = False
     failure_evidence: dict[str, object] | None = None
     errno: int | None = None
+    error_stage: str | None = None
 
 
 class FuzzRowBudget:

@@ -96,6 +96,7 @@ class StreamingQueryExecutor:
                 connection_lost=lost,
                 failure_evidence=evidence,
                 errno=errno,
+                error_stage="connection_open",
             )
 
     def execute_session(
@@ -132,6 +133,7 @@ class StreamingQueryExecutor:
         success = False
         error_identity: str | None = None
         errno: int | None = None
+        error_stage: str | None = None
         connection_lost = False
         client_deadline_exceeded = False
         statement_token: object | None = None
@@ -189,6 +191,7 @@ class StreamingQueryExecutor:
             elif failure_stage == "fetch" and fetch_started_ns is not None:
                 fetch_elapsed_ns = max(0, failed_at_ns - fetch_started_ns)
             error_identity, connection_lost, errno = _error_identity(error)
+            error_stage = failure_stage
             client_deadline_exceeded = isinstance(error, TimeoutError)
             failure_evidence = capture_exception_evidence(error, failure_stage)
         finally:
@@ -198,16 +201,23 @@ class StreamingQueryExecutor:
                 try:
                     handle.cancel(statement_token=statement_token)
                 except Exception as error:
+                    secondary_identity, secondary_lost, secondary_errno = _error_identity(
+                        error
+                    )
                     if failure_evidence is None:
                         failure_evidence = capture_exception_evidence(
                             error,
                             "watchdog_cancel",
                         )
-                        error_identity, connection_lost, errno = _error_identity(error)
+                        error_identity = secondary_identity
+                        connection_lost = secondary_lost
+                        errno = secondary_errno
+                        error_stage = "watchdog_cancel"
                     else:
                         failure_evidence["watchdog_cancel_error"] = (
                             capture_exception_evidence(error, "watchdog_cancel")
                         )
+                        connection_lost |= secondary_lost
                     success = False
                 finally:
                     self._remove_active(statement_token)
@@ -216,13 +226,21 @@ class StreamingQueryExecutor:
                 try:
                     cursor.close()
                 except Exception as error:
+                    secondary_identity, secondary_lost, secondary_errno = _error_identity(
+                        error
+                    )
                     cursor_close_evidence = capture_exception_evidence(
                         error,
                         "cursor_close",
                     )
                     if failure_evidence is None:
                         failure_evidence = dict(cursor_close_evidence)
-                        error_identity, connection_lost, errno = _error_identity(error)
+                        error_identity = secondary_identity
+                        connection_lost = secondary_lost
+                        errno = secondary_errno
+                        error_stage = "cursor_close"
+                    else:
+                        connection_lost |= secondary_lost
                     success = False
                 finally:
                     cursor_close_elapsed_ns = max(
@@ -271,6 +289,7 @@ class StreamingQueryExecutor:
             stopped=stopped,
             failure_evidence=failure_evidence,
             errno=errno,
+            error_stage=error_stage,
         )
 
     def _register_active(self, handle: Any, statement_token: object) -> None:

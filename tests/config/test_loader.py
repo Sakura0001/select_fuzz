@@ -169,6 +169,8 @@ def test_fuzz_compatibility_backoff_defaults_bounds_and_cli_overrides(
         ("compatibility_error_backoff_max_seconds", -0.01),
         ("compatibility_error_backoff_initial_seconds", float("inf")),
         ("compatibility_error_backoff_max_seconds", float("nan")),
+        ("compatibility_error_backoff_initial_seconds", True),
+        ("compatibility_error_backoff_max_seconds", False),
     ):
         with pytest.raises(ValidationError):
             FuzzConfig(**{field: value})
@@ -189,6 +191,16 @@ def test_fuzz_compatibility_backoff_defaults_bounds_and_cli_overrides(
     )
     assert config.fuzz.compatibility_error_backoff_initial_seconds == 0.02
     assert config.fuzz.compatibility_error_backoff_max_seconds == 0.5
+    assert FuzzConfig(
+        compatibility_error_backoff_initial_seconds=0,
+        compatibility_error_backoff_max_seconds=0,
+    ).compatibility_error_backoff_initial_seconds == 0
+
+    data = _config_data()
+    data["mode"] = "fuzz"
+    data["fuzz"] = {"compatibility_error_backoff_initial_seconds": True}
+    with pytest.raises(ConfigLoadError):
+        load_config(_write_config(tmp_path, data))
 
 
 def test_fuzz_schema_refresh_interval_can_be_disabled_but_not_negative() -> None:

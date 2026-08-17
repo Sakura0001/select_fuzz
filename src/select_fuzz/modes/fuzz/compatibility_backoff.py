@@ -43,6 +43,7 @@ class CompatibilityErrorBackoff:
             result.success
             or result.timed_out
             or result.connection_lost
+            or result.error_stage not in {"execute", "fetch"}
             or result.errno not in COMPATIBILITY_ERROR_ERRNOS
         ):
             self.streak = 0

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from threading import Event, Thread
 
 from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.modes.fuzz.compatibility_backoff import CompatibilityErrorBackoff
 from select_fuzz.modes.fuzz.execution import StreamingQueryExecutor, _error_identity
 
 
@@ -73,6 +74,7 @@ def test_streaming_executor_discards_values_and_counts_rows() -> None:
     assert result.rows_seen == 3
     assert result.error is None
     assert result.errno is None
+    assert result.error_stage is None
     assert result.execute_elapsed_ns >= 0
     assert result.fetch_elapsed_ns >= 0
 
@@ -95,6 +97,7 @@ def test_streaming_executor_preserves_connection_open_failure_evidence() -> None
         == "cannot establish query connection"
     )
     assert result.errno == -1
+    assert result.error_stage == "connection_open"
 
 
 class _Handle:
@@ -250,6 +253,7 @@ def test_streaming_session_preserves_execute_exception_evidence() -> None:
     assert result.success is False
     assert result.error == "_InternalConnectorError:errno=-1:sqlstate=HY000"
     assert result.errno == -1
+    assert result.error_stage == "execute"
     assert result.failure_evidence is not None
     assert result.failure_evidence["failure_stage"] == "execute"
     assert result.failure_evidence["connection_id"] == 7
@@ -281,6 +285,7 @@ def test_streaming_session_preserves_fetch_exception_evidence() -> None:
     assert result.failure_evidence["timings"]["fetch_elapsed_ns"] >= 0
     assert result.failure_evidence["timings"]["total_elapsed_ns"] >= 0
     assert result.errno == -1
+    assert result.error_stage == "fetch"
 
 
 def test_streaming_session_turns_cursor_close_failure_into_evidence() -> None:
@@ -300,6 +305,7 @@ def test_streaming_session_turns_cursor_close_failure_into_evidence() -> None:
     assert result.success is False
     assert result.error == "_InternalConnectorError:errno=-1:sqlstate=HY000"
     assert result.errno == -1
+    assert result.error_stage == "cursor_close"
     assert result.failure_evidence is not None
     assert result.failure_evidence["failure_stage"] == "cursor_close"
     assert (
@@ -360,6 +366,7 @@ def test_streaming_session_preserves_watchdog_cancel_errno() -> None:
     assert result.success is False
     assert result.error == "_IntegerErrnoError:errno=1064"
     assert result.errno == 1064
+    assert result.error_stage == "watchdog_cancel"
     assert result.failure_evidence is not None
     assert result.failure_evidence["failure_stage"] == "watchdog_cancel"
 
@@ -395,9 +402,108 @@ def test_streaming_session_keeps_primary_error_errno_when_cursor_close_also_fail
 
     assert result.error == "_IntegerErrnoError:errno=1064"
     assert result.errno == 1064
+    assert result.error_stage == "fetch"
     assert result.failure_evidence is not None
     assert result.failure_evidence["failure_stage"] == "fetch"
     assert result.failure_evidence["cursor_close_error"] is not None
+
+
+class _LostConnectionError(Exception):
+    errno = 2013
+
+
+class _ExecuteAndCloseFailureCursor:
+    columns = ()
+
+    @property
+    def affected_rows(self) -> int:
+        raise _IntegerErrnoError("affected-row lookup failed")
+
+    def fetchmany(self, size: int):  # type: ignore[no-untyped-def]
+        del size
+        return ()
+
+    def close(self) -> None:
+        raise _LostConnectionError("cursor close lost connection")
+
+
+class _ExecuteAndCloseFailureSession(_Session):
+    def execute(self, sql: str) -> _ExecuteAndCloseFailureCursor:
+        assert sql == "SELECT value FROM t"
+        return _ExecuteAndCloseFailureCursor()
+
+
+def test_streaming_session_preserves_primary_execute_errno_and_stage_on_lost_close() -> None:
+    node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
+
+    result = StreamingQueryExecutor(  # type: ignore[arg-type]
+        _Factory(),
+        watchdog=_Watchdog(),
+    ).execute_session(
+        _ExecuteAndCloseFailureSession(),
+        "SELECT value FROM t",
+        node=node,
+        database="sf_f_case",
+        timeout_seconds=5,
+    )
+
+    assert result.error == "_IntegerErrnoError:errno=1064"
+    assert result.errno == 1064
+    assert result.error_stage == "execute"
+    assert result.connection_lost is True
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["failure_stage"] == "execute"
+    assert result.failure_evidence["cursor_close_error"] is not None
+    assert (
+        CompatibilityErrorBackoff(0.01, 0.25).observe(result)
+        == 0.0
+    )
+
+
+class _LostCancelHandle(_Handle):
+    def cancel(self, *, statement_token=None) -> None:  # type: ignore[no-untyped-def]
+        del statement_token
+        raise _LostConnectionError("watchdog cancel lost connection")
+
+
+class _LostCancelWatchdog(_Watchdog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.handle = _LostCancelHandle()
+
+
+class _CompatibilityFetchCursor(_Cursor):
+    def fetchmany(self, size: int):  # type: ignore[no-untyped-def]
+        del size
+        raise _IntegerErrnoError("fetch compatibility error")
+
+
+class _CompatibilityFetchSession(_Session):
+    def execute(self, sql: str) -> _CompatibilityFetchCursor:
+        assert sql == "SELECT value FROM t"
+        return _CompatibilityFetchCursor()
+
+
+def test_streaming_session_adds_connection_loss_from_secondary_watchdog_cancel() -> None:
+    node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
+
+    result = StreamingQueryExecutor(  # type: ignore[arg-type]
+        _Factory(),
+        watchdog=_LostCancelWatchdog(),
+    ).execute_session(
+        _CompatibilityFetchSession(),
+        "SELECT value FROM t",
+        node=node,
+        database="sf_f_case",
+        timeout_seconds=5,
+    )
+
+    assert result.error == "_IntegerErrnoError:errno=1064"
+    assert result.errno == 1064
+    assert result.error_stage == "fetch"
+    assert result.connection_lost is True
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["watchdog_cancel_error"] is not None
 
 
 class _BlockingSession:

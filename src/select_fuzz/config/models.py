@@ -311,6 +311,17 @@ class FuzzConfig(StrictModel):
     )
     compatibility_error_backoff_max_seconds: float = Field(default=0.25, ge=0, le=60)
 
+    @field_validator(
+        "compatibility_error_backoff_initial_seconds",
+        "compatibility_error_backoff_max_seconds",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_compatibility_backoff_bounds(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("compatibility backoff bounds must not be boolean")
+        return value
+
     @model_validator(mode="after")
     def validate_fuzz_bounds(self) -> Self:
         if self.reader_threads_per_database % 3 != 0:

@@ -152,6 +152,43 @@ def test_fuzz_mode_loads_concurrency_and_cli_compatibility_overrides(tmp_path: P
     assert config.fuzz.control_connection_reserve == 8
     assert config.fuzz.query_kill_grace_seconds == 1.0
     assert config.fuzz.diagnostics_interval_seconds == 5.0
+    assert config.fuzz.compatibility_error_backoff_initial_seconds == 0.01
+    assert config.fuzz.compatibility_error_backoff_max_seconds == 0.25
+
+
+def test_fuzz_compatibility_backoff_defaults_bounds_and_cli_overrides(
+    tmp_path: Path,
+) -> None:
+    config = FuzzConfig()
+
+    assert config.compatibility_error_backoff_initial_seconds == 0.01
+    assert config.compatibility_error_backoff_max_seconds == 0.25
+
+    for field, value in (
+        ("compatibility_error_backoff_initial_seconds", -0.01),
+        ("compatibility_error_backoff_max_seconds", -0.01),
+        ("compatibility_error_backoff_initial_seconds", float("inf")),
+        ("compatibility_error_backoff_max_seconds", float("nan")),
+    ):
+        with pytest.raises(ValidationError):
+            FuzzConfig(**{field: value})
+    with pytest.raises(ValidationError):
+        FuzzConfig(
+            compatibility_error_backoff_initial_seconds=0.5,
+            compatibility_error_backoff_max_seconds=0.25,
+        )
+
+    data = _config_data()
+    data["mode"] = "fuzz"
+    config = load_config(
+        _write_config(tmp_path, data),
+        cli={
+            "compatibility_error_backoff_initial_seconds": 0.02,
+            "compatibility_error_backoff_max_seconds": 0.5,
+        },
+    )
+    assert config.fuzz.compatibility_error_backoff_initial_seconds == 0.02
+    assert config.fuzz.compatibility_error_backoff_max_seconds == 0.5
 
 
 def test_fuzz_schema_refresh_interval_can_be_disabled_but_not_negative() -> None:

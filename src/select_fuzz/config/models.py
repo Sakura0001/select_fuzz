@@ -304,6 +304,12 @@ class FuzzConfig(StrictModel):
     query_kill_grace_seconds: float = Field(default=1.0, gt=0, le=10)
     reconnect_initial_delay_seconds: float = Field(default=0.25, gt=0, le=30)
     reconnect_max_delay_seconds: float = Field(default=10.0, gt=0, le=60)
+    compatibility_error_backoff_initial_seconds: float = Field(
+        default=0.01,
+        ge=0,
+        le=60,
+    )
+    compatibility_error_backoff_max_seconds: float = Field(default=0.25, ge=0, le=60)
 
     @model_validator(mode="after")
     def validate_fuzz_bounds(self) -> Self:
@@ -347,6 +353,14 @@ class FuzzConfig(StrictModel):
             raise ValueError(
                 "reconnect_initial_delay_seconds must not exceed "
                 "reconnect_max_delay_seconds"
+            )
+        if (
+            self.compatibility_error_backoff_initial_seconds
+            > self.compatibility_error_backoff_max_seconds
+        ):
+            raise ValueError(
+                "compatibility_error_backoff_initial_seconds must not exceed "
+                "compatibility_error_backoff_max_seconds"
             )
         return self
 

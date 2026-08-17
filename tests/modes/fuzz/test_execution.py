@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from threading import Event, Thread
 
 from select_fuzz.config import NodeConfig, NodeRole
-from select_fuzz.modes.fuzz.execution import StreamingQueryExecutor
+from select_fuzz.modes.fuzz.execution import StreamingQueryExecutor, _error_identity
 
 
 class _Cursor:
@@ -72,6 +72,7 @@ def test_streaming_executor_discards_values_and_counts_rows() -> None:
     assert result.success
     assert result.rows_seen == 3
     assert result.error is None
+    assert result.errno is None
     assert result.execute_elapsed_ns >= 0
     assert result.fetch_elapsed_ns >= 0
 
@@ -93,6 +94,7 @@ def test_streaming_executor_preserves_connection_open_failure_evidence() -> None
         result.failure_evidence["exception"]["message"]
         == "cannot establish query connection"
     )
+    assert result.errno == -1
 
 
 class _Handle:
@@ -247,6 +249,7 @@ def test_streaming_session_preserves_execute_exception_evidence() -> None:
 
     assert result.success is False
     assert result.error == "_InternalConnectorError:errno=-1:sqlstate=HY000"
+    assert result.errno == -1
     assert result.failure_evidence is not None
     assert result.failure_evidence["failure_stage"] == "execute"
     assert result.failure_evidence["connection_id"] == 7
@@ -277,6 +280,7 @@ def test_streaming_session_preserves_fetch_exception_evidence() -> None:
     )
     assert result.failure_evidence["timings"]["fetch_elapsed_ns"] >= 0
     assert result.failure_evidence["timings"]["total_elapsed_ns"] >= 0
+    assert result.errno == -1
 
 
 def test_streaming_session_turns_cursor_close_failure_into_evidence() -> None:
@@ -295,6 +299,7 @@ def test_streaming_session_turns_cursor_close_failure_into_evidence() -> None:
 
     assert result.success is False
     assert result.error == "_InternalConnectorError:errno=-1:sqlstate=HY000"
+    assert result.errno == -1
     assert result.failure_evidence is not None
     assert result.failure_evidence["failure_stage"] == "cursor_close"
     assert (
@@ -302,6 +307,97 @@ def test_streaming_session_turns_cursor_close_failure_into_evidence() -> None:
         == "cursor close found unread result"
     )
     assert result.failure_evidence["timings"]["cursor_close_elapsed_ns"] >= 0
+
+
+class _IntegerErrnoError(Exception):
+    errno = 1064
+
+
+class _BooleanErrnoError(Exception):
+    errno = True
+
+
+class _StringErrnoError(Exception):
+    errno = "1064"
+
+
+def test_error_identity_preserves_only_original_integer_connector_errno() -> None:
+    assert _error_identity(_IntegerErrnoError()) == (
+        "_IntegerErrnoError:errno=1064",
+        False,
+        1064,
+    )
+    assert _error_identity(_BooleanErrnoError()) == ("_BooleanErrnoError", False, None)
+    assert _error_identity(_StringErrnoError()) == ("_StringErrnoError", False, None)
+
+
+class _FailingCancelHandle(_Handle):
+    def cancel(self, *, statement_token=None) -> None:  # type: ignore[no-untyped-def]
+        del statement_token
+        raise _IntegerErrnoError("watchdog cancel failed")
+
+
+class _FailingCancelWatchdog(_Watchdog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.handle = _FailingCancelHandle()
+
+
+def test_streaming_session_preserves_watchdog_cancel_errno() -> None:
+    node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
+
+    result = StreamingQueryExecutor(  # type: ignore[arg-type]
+        _Factory(),
+        watchdog=_FailingCancelWatchdog(),
+    ).execute_session(
+        _Session(),
+        "SELECT value FROM t",
+        node=node,
+        database="sf_f_case",
+        timeout_seconds=5,
+    )
+
+    assert result.success is False
+    assert result.error == "_IntegerErrnoError:errno=1064"
+    assert result.errno == 1064
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["failure_stage"] == "watchdog_cancel"
+
+
+class _FetchAndCloseFailureCursor(_Cursor):
+    def fetchmany(self, size: int):  # type: ignore[no-untyped-def]
+        del size
+        raise _IntegerErrnoError("fetch failed")
+
+    def close(self) -> None:
+        raise _InternalConnectorError("cursor close failed")
+
+
+class _FetchAndCloseFailureSession(_Session):
+    def execute(self, sql: str) -> _FetchAndCloseFailureCursor:
+        assert sql == "SELECT value FROM t"
+        return _FetchAndCloseFailureCursor()
+
+
+def test_streaming_session_keeps_primary_error_errno_when_cursor_close_also_fails() -> None:
+    node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
+
+    result = StreamingQueryExecutor(  # type: ignore[arg-type]
+        _Factory(),
+        watchdog=_Watchdog(),
+    ).execute_session(
+        _FetchAndCloseFailureSession(),
+        "SELECT value FROM t",
+        node=node,
+        database="sf_f_case",
+        timeout_seconds=5,
+    )
+
+    assert result.error == "_IntegerErrnoError:errno=1064"
+    assert result.errno == 1064
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["failure_stage"] == "fetch"
+    assert result.failure_evidence["cursor_close_error"] is not None
 
 
 class _BlockingSession:

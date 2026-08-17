@@ -86,6 +86,8 @@ _FUZZ_FLAT_KEYS = {
     "load_shaped_query_weight",
     "reconnect_initial_delay_seconds",
     "reconnect_max_delay_seconds",
+    "compatibility_error_backoff_initial_seconds",
+    "compatibility_error_backoff_max_seconds",
     "data_rows_min",
     "data_rows_max",
     "degradation_ratio",

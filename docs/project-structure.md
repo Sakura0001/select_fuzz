@@ -35,8 +35,8 @@ flowchart LR
 modes/
 ├── contracts.py       # ModeDefinition/ModeRunner/ModeFactory
 ├── registry.py        # correctness/performance/fuzz 唯一注册表
-├── correctness/       # 三库结果对比入口；兼容旧实现
-├── performance/       # 三库性能对比入口；兼容旧实现
+├── correctness/       # 两实例结果对比入口；兼容旧实现
+├── performance/       # 两实例性能对比入口；兼容旧实现
 └── fuzz/              # 单集群、多库、多读写线程 fuzz 实现
 ```
 
@@ -97,16 +97,16 @@ select-fuzz run --mode correctness
 | 目录或文件 | 职责 |
 | --- | --- |
 | [`cli.py`](../src/select_fuzz/cli.py) | `run`、`doctor`、`report`、`replay`、`regression-seeds`、`serve` 命令 |
-| [`modes/correctness/`](../src/select_fuzz/modes/correctness) | 三节点结果对比模式的稳定入口与兼容层 |
-| [`modes/performance/`](../src/select_fuzz/modes/performance) | 三节点性能对比模式的稳定入口与兼容层 |
+| [`modes/correctness/`](../src/select_fuzz/modes/correctness) | 两实例结果对比模式的稳定入口与兼容层 |
+| [`modes/performance/`](../src/select_fuzz/modes/performance) | 两实例性能对比模式的稳定入口与兼容层 |
 | [`modes/fuzz/`](../src/select_fuzz/modes/fuzz) | 多数据库并发 writer/reader、随机 50+ 列 schema、DML/SELECT 生成、流式执行、重连和独立初始化 |
-| [`correctness.py`](../src/select_fuzz/correctness.py) | correctness round、grammar 动态查询、EXPLAIN 准入、三节点执行和结果持久化（兼容实现） |
+| [`correctness.py`](../src/select_fuzz/correctness.py) | correctness round、grammar 动态查询、EXPLAIN 准入、两实例执行和结果持久化（兼容实现） |
 | [`service.py`](../src/select_fuzz/service.py) | worker/round 生命周期和运行汇总 |
 | [`config/`](../src/select_fuzz/config) | 严格 Pydantic 配置、YAML/CLI 覆盖和凭据环境变量解析 |
 | [`domain/`](../src/select_fuzz/domain) | 节点结果、运行请求、种子树、稳定指纹等领域模型 |
 | [`generation/`](../src/select_fuzz/generation) | schema、data、setup、mutation、grammar、coverage 和安全策略 |
 | [`execution/`](../src/select_fuzz/execution) | MySQL 连接、超时、复制屏障、setup、triad 与 mutation 执行 |
-| [`oracle/`](../src/select_fuzz/oracle) | 结果规范化、三节点差分、错误分类 |
+| [`oracle/`](../src/select_fuzz/oracle) | 结果规范化、两实例差分、错误分类 |
 | [`artifacts/`](../src/select_fuzz/artifacts) | finding bundle、JSONL、线程 SQL、HTML 报告和读取索引 |
 | [`api/`](../src/select_fuzz/api) | loopback FastAPI 控制面、事件流、运行监督和 replay API |
 | [`performance/`](../src/select_fuzz/performance) | 独立性能 fuzz template、校准、物化、执行和性能 oracle |

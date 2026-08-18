@@ -7,7 +7,12 @@ from threading import Event
 import pytest
 
 from select_fuzz.artifacts import read_jsonl
-from select_fuzz.config import AppConfig, NodeConfig, NodeRole, PerformanceConfig
+from select_fuzz.config import (
+    COMPARISON_ROLES,
+    AppConfig,
+    NodeConfig,
+    PerformanceConfig,
+)
 from select_fuzz.doctor import build_doctor
 from select_fuzz.domain import RunRequest
 from select_fuzz.performance.entrypoint import build_performance_runner
@@ -16,8 +21,8 @@ from select_fuzz.performance.entrypoint import build_performance_runner
 def _release_config() -> AppConfig:
     if os.environ.get("SELECT_FUZZ_MYSQL_PERFORMANCE_INTEGRATION") != "1":
         pytest.skip(
-            "set SELECT_FUZZ_MYSQL_PERFORMANCE_INTEGRATION=1 plus three isolated "
-            "MySQL 8.0.41 endpoints and environment-only credentials"
+            "set SELECT_FUZZ_MYSQL_PERFORMANCE_INTEGRATION=1 plus two isolated "
+            "MySQL 8.0.22 endpoints and environment-only credentials"
         )
     if not os.environ.get("SELECT_FUZZ_MYSQL_USER") or os.environ.get(
         "SELECT_FUZZ_MYSQL_PASSWORD"
@@ -25,7 +30,7 @@ def _release_config() -> AppConfig:
         pytest.skip("environment-only MySQL credentials are not configured")
     nodes: list[NodeConfig] = []
     missing: list[str] = []
-    for role in NodeRole:
+    for role in COMPARISON_ROLES:
         prefix = f"SELECT_FUZZ_{role.value.upper()}"
         host = os.environ.get(f"{prefix}_HOST")
         port = os.environ.get(f"{prefix}_PORT")
@@ -34,7 +39,7 @@ def _release_config() -> AppConfig:
             continue
         nodes.append(NodeConfig(role=role, host=host, port=int(port)))
     if missing:
-        pytest.skip("three-node integration endpoints are unset: " + ", ".join(missing))
+        pytest.skip("two-instance integration endpoints are unset: " + ", ".join(missing))
     return AppConfig(
         mode="performance",
         nodes=tuple(nodes),
@@ -52,15 +57,15 @@ def _release_config() -> AppConfig:
 
 @pytest.mark.mysql_performance
 @pytest.mark.timeout(900)
-def test_one_cpu_dense_case_on_exact_isolated_three_node_mysql_8_0_41(
+def test_one_performance_case_on_two_isolated_mysql_8_0_22_instances(
     tmp_path: Path,
 ) -> None:
     config = _release_config()
     assert build_doctor(config).run().can_start
     request = RunRequest(
-        run_id="run_mysql_8041_performance_gate",
+        run_id="run_mysql_8022_pair_performance",
         mode="performance",
-        seed=8041,
+        seed=8022,
         workers=1,
         rounds=1,
         queries_per_round=1,
@@ -77,9 +82,6 @@ def test_one_cpu_dense_case_on_exact_isolated_three_node_mysql_8_0_41(
         for item in records
         if item.get("type") in {"performance_result", "performance_alert"}
     )
-    assert set(result["measurements"]) == {role.value for role in NodeRole}  # type: ignore[arg-type]
-    assert all(
-        len(attempt["samples_seconds"][role.value]) == 3  # type: ignore[index]
-        for attempt in result["calibration"]  # type: ignore[union-attr]
-        for role in (NodeRole.BASELINE, NodeRole.CUSTOM_OFF)
-    )
+    assert set(result["measurements"]) == {  # type: ignore[arg-type]
+        role.value for role in COMPARISON_ROLES
+    }

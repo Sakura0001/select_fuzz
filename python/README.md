@@ -6,7 +6,7 @@ The bundle includes:
 - CPython 3.11 built for the CentOS 7 / glibc 2.17 ABI;
 - all runtime Python dependencies, including `mysql-connector-python`;
 - the `select_fuzz` package and its bundled MySQL grammar/catalog files;
-- the intranet fuzz configuration examples.
+- the two-instance comparison and intranet fuzz configuration examples.
 
 The target machine does not need Python, pip, or uv. A Linux x86_64 machine
 with Docker can build the bundle without Python installed:
@@ -17,6 +17,26 @@ with Docker can build the bundle without Python installed:
 
 The output is written to `python/output/`. Copy the generated directory or
 archive to the CentOS 7 host and run:
+
+For correctness or performance, configure two independently writable instances.
+`custom_off` must have PQ disabled and `custom_on` must have PQ enabled before
+the run; Select Fuzz does not change that server-side setting and does not wait
+for replication:
+
+```bash
+cd select-fuzz-centos7-x86_64
+cp config/example.yaml config/comparison.yaml
+export SELECT_FUZZ_MYSQL_USER='<local user>'
+export SELECT_FUZZ_MYSQL_PASSWORD='<set in shell only>'
+./select-fuzz doctor --mode correctness --config config/comparison.yaml
+./select-fuzz run --mode correctness --config config/comparison.yaml \
+  --rounds 1 --seed "$(date +%s)" --artifacts artifacts/correctness
+./select-fuzz doctor --mode performance --config config/comparison.yaml
+./select-fuzz run --mode performance --config config/comparison.yaml \
+  --rounds 1 --seed "$(date +%s)" --artifacts artifacts/performance
+```
+
+For fuzz, use the separate primary/replica template:
 
 ```bash
 cd select-fuzz-centos7-x86_64

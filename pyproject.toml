@@ -77,7 +77,7 @@ include = [
 testpaths = ["tests"]
 markers = [
   "mysql: real MySQL integration",
-  "mysql_performance: exact three-node MySQL 8.0.41 performance integration",
+  "mysql_performance: two-instance MySQL 8.0.22 performance integration",
   "online: opt-in checks that fetch immutable official sources",
   "soak: long-running tests",
 ]

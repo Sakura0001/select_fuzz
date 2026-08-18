@@ -529,6 +529,7 @@ def test_example_configuration_loads_and_contains_no_password_literal() -> None:
 
     config = load_config(example)
 
+    assert config.mode is RunMode.CORRECTNESS
     assert [node.role for node in config.comparison_nodes] == [
         NodeRole.CUSTOM_OFF,
         NodeRole.CUSTOM_ON,

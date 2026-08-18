@@ -1,24 +1,22 @@
 # Select Fuzz
 
-Select Fuzz is a deterministic MySQL differential test product for three
-primary/replica pairs:
+Select Fuzz provides three independently registered modes: two-instance
+correctness comparison, two-instance performance comparison, and concurrent
+primary/replica fuzzing.
 
-- `baseline`: unmodified open-source MySQL 8.0.41;
-- `custom_off`: the custom engine with parallel query disabled globally;
-- `custom_on`: the custom engine with parallel query enabled globally.
+Comparison modes use exactly two independently writable MySQL endpoints:
 
-Each role has one primary for setup/DML and one replica for SELECT/analysis.
-It has three independently registered modes: correctness comparison, performance
-comparison, and concurrent read/write fuzzing. Correctness compares typed
-results or normalized errors on all three replicas. Both comparison modes use seed-reproducible
-weighted random schemas, tables, ordinary MySQL types and ranges, indexes, data,
-and table-reading SELECTs. Performance uses exactly one logical worker. Each
-performance round fills its random tables once through bounded deterministic
-stored procedures, waits for all replicas, and then executes the configured
-number of distinct `EXPLAIN ANALYZE FORMAT=TREE` queries sequentially. Each query
-is launched concurrently on the three replicas and reports regressions against
-both baseline and `custom_off`. JSON, FULLTEXT, SPATIAL, and multi-valued
-JSON-array indexes are excluded from the default fuzz scope.
+- `custom_off`: the only reference, with parallel query disabled server-side;
+- `custom_on`: the candidate, with parallel query enabled server-side.
+
+The same endpoint performs setup, DML, evidence reads, and SELECT for its role.
+Comparison modes do not create replication markers or wait for replicas.
+Correctness compares typed results or normalized errors between the pair.
+Performance starts the same `EXPLAIN ANALYZE FORMAT=TREE` query concurrently on
+both endpoints and emits only `VS_CUSTOM_OFF` regressions. Fuzz keeps its
+separate selected-role primary/replica topology and long-lived load workers.
+JSON, FULLTEXT, SPATIAL, and multi-valued JSON-array indexes are excluded from
+the default fuzz scope.
 
 ## Install
 
@@ -33,17 +31,14 @@ npm --prefix frontend run build
 export SELECT_FUZZ_MYSQL_USER='<local user>'
 export SELECT_FUZZ_MYSQL_PASSWORD='<set in shell only>'
 cp config/example.yaml config/local.yaml
-cp config/replica-parameters.example.yaml config/replica-parameters.yaml
 ```
 
-Edit the six endpoints and optional role probes in the ignored
-`config/local.yaml`, then point `replica_parameters_file` at the separate
-replica parameter file. Only typed `SET SESSION` values are accepted there;
-credentials remain environment-only. The three role pairs must have isolated,
-comparable resources and working primary-to-replica replication. For a fuzz-only
-load-balancing proxy, copy `config/intranet-fuzz.example.yaml`; fuzz uses only
-`fuzz.target_role` and permits one proxy endpoint to represent both primary and
-replica.
+Edit the two endpoints and optional role probes in the ignored
+`config/local.yaml`. Both instances must be independently writable and have
+their PQ setting prepared before startup; credentials remain environment-only.
+For fuzz, copy `config/intranet-fuzz.example.yaml`; fuzz uses only
+`fuzz.target_role` and retains explicit primary/replica routing. Fuzz can also
+use one load-balancing proxy endpoint for both logical sides.
 
 ## CentOS 7 without a system Python
 
@@ -70,12 +65,22 @@ unzip select-fuzz-centos7-x86_64.zip
 tar -xzf select-fuzz-centos7-x86_64.tar.gz
 cd select-fuzz-centos7-x86_64
 
-cp config/intranet-fuzz.example.yaml config/intranet-fuzz.yaml
-vi config/intranet-fuzz.yaml
-
 export SELECT_FUZZ_MYSQL_USER=root
 export SELECT_FUZZ_MYSQL_PASSWORD='<set-in-shell-only>'
 
+# correctness/performance：两个独立可写实例，服务端提前配置 PQ 开关
+cp config/example.yaml config/comparison.yaml
+vi config/comparison.yaml
+./select-fuzz doctor --mode correctness --config config/comparison.yaml
+./select-fuzz run --mode correctness --config config/comparison.yaml \
+  --rounds 1 --seed "$(date +%s)" --artifacts artifacts/correctness
+./select-fuzz doctor --mode performance --config config/comparison.yaml
+./select-fuzz run --mode performance --config config/comparison.yaml \
+  --rounds 1 --seed "$(date +%s)" --artifacts artifacts/performance
+
+# fuzz：使用单独的主备模板
+cp config/intranet-fuzz.example.yaml config/intranet-fuzz.yaml
+vi config/intranet-fuzz.yaml
 ./select-fuzz doctor \
   --mode fuzz \
   --config config/intranet-fuzz.yaml
@@ -93,8 +98,9 @@ export SELECT_FUZZ_MYSQL_PASSWORD='<set-in-shell-only>'
 
 ## CLI
 
-Always run `doctor` first. Comparison modes probe all six distinct endpoints;
-fuzz probes only the selected role and deduplicates a shared proxy endpoint.
+Always run `doctor` first. Comparison modes probe exactly the two configured
+endpoints; fuzz probes only the selected role's primary/replica endpoints and
+deduplicates a shared proxy endpoint.
 Version and configuration differences are reported but do not hard-gate startup;
 missing runtime capabilities or required permissions remain fatal.
 
@@ -102,7 +108,7 @@ missing runtime capabilities or required permissions remain fatal.
 uv run select-fuzz doctor --mode correctness --config config/local.yaml
 uv run select-fuzz run --mode correctness --config config/local.yaml --rounds 1
 uv run select-fuzz run --mode performance --config config/local.yaml --rounds 1
-uv run select-fuzz run --mode fuzz --config config/local.yaml --duration-seconds 300
+uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml --duration-seconds 300
 ```
 
 For the internal proxy template:
@@ -119,10 +125,10 @@ uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml \
 
 ### 通用启动流程
 
-1. 复制 `config/example.yaml` 为未纳入 Git 的 `config/local.yaml`，填写六个
-   endpoint；用户名和密码只通过环境变量提供。
-2. 确认三组主备复制已经由外部环境配置完成，PQ 等目标开关已经由服务端配置完成。
-   本程序只验证连接和副本追平，不会创建复制拓扑，也不会修改 PQ 开关。
+1. 复制 `config/example.yaml` 为未纳入 Git 的 `config/local.yaml`，填写
+   `custom_off`、`custom_on` 两个独立可写 endpoint；用户名和密码只通过环境变量提供。
+2. 由服务端提前关闭/开启对应 PQ 特性。本程序不会修改 PQ 开关，也不会为
+   correctness/performance 创建或等待主备复制。
 3. 先执行 `doctor`，再执行目标模式：
 
    ```bash
@@ -141,7 +147,7 @@ uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml \
    `--databases`、`--writer-threads-per-database` 和
    `--reader-threads-per-database` 按所选模式覆盖对应配置。
 
-### correctness：三节点结果正确性对比
+### correctness：两实例结果正确性对比
 
 启动示例：
 
@@ -153,12 +159,11 @@ uv run select-fuzz run --mode correctness --config config/local.yaml \
 
 运行方式：
 
-- 使用 `baseline`、`custom_off`、`custom_on` 三组主备，共六个 endpoint。
-- 在三个 primary 上创建同构数据库、表、索引和初始数据；在三个 replica 上执行
-  SELECT 并比较 typed result 或规范化错误。
+- 在 `custom_off`、`custom_on` 两个独立实例上锁步创建同构数据库、表、索引和数据，
+  再对同一 SELECT 比较 typed result 或规范化错误。
 - 每个 worker 每完成十个逻辑查询后，触发一个确定性的 1～3 语句 DML 事务；
-  三个 primary 按相同顺序执行，事务和 marker 追平后再继续读。
-- 发现结果、错误、受影响行数、DDL/DML 或复制可见性不一致时，保留数据库和最小
+  两个实例按相同顺序执行并直接比较受影响行数，不创建 marker。
+- 发现结果、错误、受影响行数或 DDL/DML 状态不一致时，保留数据库和最小
   复现用例，当前 worker 转入新 round。
 
 当前边界：
@@ -174,7 +179,7 @@ uv run select-fuzz run --mode correctness --config config/local.yaml \
 - 这是结果差分模式，不以查询耗时退化作为 finding；数据库状态差异会进入 finding。
 - DML 是小事务锁步差分，不是持续高并发写压测；不负责读取服务端 crash/error 日志。
 
-### performance：三节点性能对比
+### performance：两实例性能对比
 
 启动示例：
 
@@ -186,16 +191,15 @@ uv run select-fuzz run --mode performance --config config/local.yaml \
 
 运行方式：
 
-- 同样使用三组 primary/replica；每轮只在三个 primary 上完成一次物化，并等待三个
-  replica 追平。
-- 性能模式固定一个逻辑 worker，按顺序选择不同查询，然后在三个 replica 上并发执行
+- 每轮在两个实例上并发完成相同物化，并核对 schema、行数和内容证据。
+- 性能模式固定一个逻辑 worker，按顺序选择不同查询，然后在两个实例上并发执行
   `EXPLAIN ANALYZE FORMAT=TREE`。
-- 以 `baseline` 为基准，同时与 `custom_off` 对比；超过
+- 只以 `custom_off` 为基准；`custom_on` 超过
   `performance.regression_threshold` 的耗时退化会保留数据库和报告。
 
 当前边界：
 
-- `workers` 固定为 1，不能改成并发性能 worker；并发只发生在同一查询发往三个 replica
+- `workers` 固定为 1，不能改成并发性能 worker；并发只发生在同一查询发往两个实例
   的阶段。
 - 默认每轮 100 条查询；每张表初始 100000 行，允许扩展到 50000000 行，整轮总行数默认
   不超过 100000000 行。
@@ -204,7 +208,7 @@ uv run select-fuzz run --mode performance --config config/local.yaml \
 - 性能模式只做 `EXPLAIN ANALYZE` 性能判定，物化完成后没有周期性 INSERT/UPDATE/DELETE；
   不提供 correctness 模式那样的结果逐行差分。
 - 校准相关旧配置字段仍接受以保持兼容，但当前生产 shared-round 流程不使用它们。
-- 需要服务端允许 `EXPLAIN ANALYZE`，查询超时、物化失败、节点启动偏差和副本追平失败
+- 需要服务端允许 `EXPLAIN ANALYZE`，查询超时、物化失败或节点启动偏差
   会使本轮失败并保留现场。
 
 ### fuzz：单集群并发读写压力
@@ -304,9 +308,22 @@ uv run select-fuzz run --mode fuzz --config config/local.yaml \
 
 | 模式 | 目标 | 拓扑 | 读操作 | 写操作 | 结果判定 |
 | --- | --- | --- | --- | --- | --- |
-| correctness | 发现结果/错误/状态差异 | 三组主备，六节点 | 三 replica 结果差分 | 三 primary 锁步小事务 | typed result、规范化错误和状态一致性 |
-| performance | 发现执行计划和耗时退化 | 三组主备，六节点 | 三 replica 并发 `EXPLAIN ANALYZE` | 仅初始化物化，无周期 DML | baseline/custom_off 性能阈值 |
+| correctness | 发现结果/错误/状态差异 | 两个独立可写实例 | 两实例结果差分 | 两实例锁步小事务 | typed result、规范化错误和状态一致性 |
+| performance | 发现执行计划和耗时退化 | 两个独立可写实例 | 两实例并发 `EXPLAIN ANALYZE` | 仅初始化物化，无周期 DML | `VS_CUSTOM_OFF` 性能阈值 |
 | fuzz | 制造并发读写、资源和连接压力 | 一组指定主备 | primary:replica = 1:2，结果丢弃 | primary 多 writer，INSERT/UPDATE/UPSERT/DELETE | SQL 错误、连接状态和运行统计 |
+
+correctness/performance 的 setup、控制和查询连接都是有界短连接，任务结束即关闭；
+不像 fuzz 那样保留长期 reader/writer 连接。运行结束后可在两个实例分别执行：
+
+```sql
+SELECT COMMAND, COUNT(*), MAX(TIME)
+FROM information_schema.PROCESSLIST
+WHERE USER = '<test user>' AND ID <> CONNECTION_ID()
+GROUP BY COMMAND;
+```
+
+预期没有残留的 Select Fuzz 应用连接。执行中的瞬时 `Sleep` 可以出现，但不应在程序
+停止推进时持续增长；超时路径会中止并关闭对应 session。
 
 ### 产物、停止和清理
 
@@ -421,22 +438,22 @@ operator-provided `--fault-command`, matching `--fault-probe`, and an optional
 `--mysql-connection-probe`; unconfigured or unrecovered scheduled faults fail
 acceptance instead of being reported as successful.
 
-Exact local three-node socket integration and a production-pipeline soak can be run
-without storing a password:
+The historical exact-version socket compatibility gate now uses the same two-role
+comparison topology and can run without storing a password:
 
 ```bash
 SELECT_FUZZ_MYSQL_SOCKET_INTEGRATION=1 \
-SELECT_FUZZ_MYSQL_SOCKETS=/tmp/baseline.sock,/tmp/custom-off.sock,/tmp/custom-on.sock \
+SELECT_FUZZ_MYSQL_SOCKETS=/tmp/custom-off.sock,/tmp/custom-on.sock \
 uv run pytest -q tests/integration/test_mysql8041_*.py
 
 PYTHONPATH=src uv run python scripts/run_mysql8041_socket_soak.py \
-  --sockets /tmp/baseline.sock /tmp/custom-off.sock /tmp/custom-on.sock \
+  --sockets /tmp/custom-off.sock /tmp/custom-on.sock \
   --duration-seconds 1800 --queries-per-round 100 --workers 3 \
   --artifact-root /tmp/select-fuzz-mysql8041-soak \
   --run-id mysql8041-query-soak
 ```
 
-Socket order is `baseline`, `custom_off`, `custom_on`. The soak validates exact
+Socket order is `custom_off`, `custom_on`. The soak validates exact
 8.0.41 versions and retains generated databases for replay; use a fresh artifact root
 for each acceptance run. Canonical round scripts are always written. Full per-worker
 SQL is written only when `full_thread_sql_log` is enabled, keeping the default durable
@@ -459,7 +476,7 @@ npm --prefix frontend run e2e
 git diff --check
 ```
 
-Tests marked `mysql` require opt-in and environment-only credentials. The
-legacy three-socket suite remains a generator/executor compatibility gate;
-comparison-mode primary/replica routing and lag behavior require six configured
-cloud endpoints. Fuzz mode can instead use one selected routing-proxy endpoint.
+Tests marked `mysql` require opt-in and environment-only credentials. Comparison
+integration requires only the two independently writable `custom_off` and
+`custom_on` endpoints. Fuzz retains one selected primary/replica role and may use
+one routing-proxy endpoint for both logical sides.

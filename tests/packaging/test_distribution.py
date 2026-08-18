@@ -171,3 +171,12 @@ def test_sdist_is_reproducible_source_not_a_workspace_snapshot(tmp_path: Path) -
 
     assert any(path.name == "mysql-8.0.41-query-shapes.yaml" for path in members)
     assert not any(_is_forbidden_sdist_member(path) for path in members)
+
+
+def test_centos_bundle_copies_comparison_and_fuzz_templates() -> None:
+    dockerfile = (PROJECT_ROOT / "packaging" / "centos7" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'cp /src/config/example.yaml "$bundle/config/"' in dockerfile
+    assert 'cp /src/config/intranet-fuzz.example.yaml "$bundle/config/"' in dockerfile

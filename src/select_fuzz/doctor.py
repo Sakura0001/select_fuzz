@@ -1,4 +1,4 @@
-"""Three-node connectivity, version, capability, permission, and role probes."""
+"""Connectivity, version, capability, permission, and role probes."""
 
 from __future__ import annotations
 
@@ -8,11 +8,13 @@ from typing import Protocol
 
 from select_fuzz.config import (
     AppConfig,
+    COMPARISON_ROLES,
     NodeConfig,
     NodePreflight,
     NodeRole,
     PreflightIssue,
     PreflightReport,
+    RunMode,
     evaluate_preflight,
 )
 from select_fuzz.domain import stable_fingerprint
@@ -126,22 +128,26 @@ class DoctorService:
         replica_snapshots: list[NodePreflight] = []
         failures: list[PreflightIssue] = []
         endpoint_limits: dict[tuple[str, int], int | None] = {}
-        roles = (
-            (self._config.fuzz.target_role,)
-            if self._config.mode.value == "fuzz"
-            else tuple(NodeRole)
-        )
-        jobs: dict[tuple[NodeRole, str], NodeConfig] = {
-            (role, "primary"): self._config.node_for(role) for role in roles
-        }
-        for role in roles:
+        is_fuzz = self._config.mode is RunMode.FUZZ
+        roles: tuple[NodeRole, ...]
+        if is_fuzz:
+            roles = (self._config.fuzz.target_role,)
+            role = roles[0]
             primary = self._config.node_for(role)
             replica = self._config.replica_for(role)
+            jobs: dict[tuple[NodeRole, str], NodeConfig] = {
+                (role, "primary"): primary
+            }
             if (primary.host.casefold(), primary.port) != (
                 replica.host.casefold(),
                 replica.port,
             ):
                 jobs[(role, "replica")] = replica
+        else:
+            roles = COMPARISON_ROLES
+            jobs = {
+                (role, "endpoint"): self._config.node_for(role) for role in roles
+            }
         with ThreadPoolExecutor(
             max_workers=len(jobs), thread_name_prefix="sf-doctor"
         ) as pool:
@@ -154,14 +160,18 @@ class DoctorService:
                     snapshot = future.result()
                     if snapshot.role is not role:
                         raise ValueError("probe returned the wrong role")
-                    target = snapshots if endpoint_kind == "primary" else replica_snapshots
+                    target = (
+                        replica_snapshots
+                        if endpoint_kind == "replica"
+                        else snapshots
+                    )
                     target.append(snapshot)
                     probed_node = jobs[(role, endpoint_kind)]
                     endpoint_limits[
                         (probed_node.host.casefold(), probed_node.port)
                     ] = snapshot.max_connections
                     if (
-                        self._config.mode.value == "fuzz"
+                        is_fuzz
                         and endpoint_kind == "primary"
                         and self._config.node_for(role).host.casefold()
                         == self._config.replica_for(role).host.casefold()
@@ -185,16 +195,18 @@ class DoctorService:
                     )
         evaluated = evaluate_preflight(
             tuple(snapshots),
-            required_capabilities=frozenset(),
+            required_capabilities=(
+                REQUIRED_CORRECTNESS_CAPABILITIES
+                if self._config.mode is RunMode.PERFORMANCE
+                else frozenset()
+            ),
             required_permissions=REQUIRED_CORRECTNESS_PERMISSIONS,
         )
         replica_evaluated = (
             evaluate_preflight(
                 tuple(replica_snapshots),
                 required_capabilities=(
-                    REQUIRED_CORRECTNESS_CAPABILITIES
-                    if self._config.mode.value == "performance"
-                    else frozenset()
+                    frozenset()
                 ),
                 required_permissions=frozenset({"SELECT"}),
             )
@@ -233,7 +245,7 @@ class DoctorService:
             (
                 PreflightIssue(
                     code="version_mismatch",
-                    message="MySQL versions differ across configured primary/replica endpoints",
+                    message="配置的 MySQL endpoint 版本不一致",
                 ),
             )
             if len(versions) > 1

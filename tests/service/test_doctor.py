@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 from select_fuzz.config import AppConfig, NodeConfig, NodePreflight, NodeRole, RunMode
 from select_fuzz.doctor import DoctorService
 
 
 def _nodes() -> tuple[NodeConfig, ...]:
-    return tuple(
-        NodeConfig(role=role, host="127.0.0.1", port=33061 + index)
-        for index, role in enumerate(NodeRole)
+    return (
+        NodeConfig(role=NodeRole.CUSTOM_OFF, host="127.0.0.1", port=33061),
+        NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1", port=33062),
     )
 
 
@@ -18,8 +20,10 @@ def _config() -> AppConfig:
 class _Probe:
     def __init__(self, snapshots: dict[NodeRole, NodePreflight]) -> None:
         self.snapshots = snapshots
+        self.roles: list[NodeRole] = []
 
     def probe(self, node: NodeConfig) -> NodePreflight:
+        self.roles.append(node.role)
         return self.snapshots[node.role]
 
 
@@ -44,17 +48,30 @@ def _snapshot(role: NodeRole, *, fingerprint: str = "same") -> NodePreflight:
 
 
 def test_doctor_allows_configuration_and_missing_role_probe_warnings() -> None:
-    snapshots = {role: _snapshot(role) for role in NodeRole}
+    snapshots = {role: _snapshot(role) for role in (NodeRole.CUSTOM_OFF, NodeRole.CUSTOM_ON)}
 
     report = DoctorService(_config(), _Probe(snapshots)).run()
 
     assert report.can_start is True
     assert {issue.code for issue in report.warnings} == {"role_probe_missing"}
+    assert len(report.warnings) == 2
+
+
+@pytest.mark.parametrize("mode", [RunMode.CORRECTNESS, RunMode.PERFORMANCE])
+def test_doctor_probes_exactly_two_comparison_endpoints(mode: RunMode) -> None:
+    snapshots = {role: _snapshot(role) for role in (NodeRole.CUSTOM_OFF, NodeRole.CUSTOM_ON)}
+    probe = _Probe(snapshots)
+
+    report = DoctorService(AppConfig(mode=mode, nodes=_nodes()), probe).run()
+
+    assert probe.roles == [NodeRole.CUSTOM_OFF, NodeRole.CUSTOM_ON]
+    assert report.can_start is True
 
 
 def test_doctor_configuration_difference_is_warning_not_fatal() -> None:
     snapshots = {
-        role: _snapshot(role, fingerprint=f"fp-{role.value}") for role in NodeRole
+        role: _snapshot(role, fingerprint=f"fp-{role.value}")
+        for role in (NodeRole.CUSTOM_OFF, NodeRole.CUSTOM_ON)
     }
 
     report = DoctorService(_config(), _Probe(snapshots)).run()
@@ -64,7 +81,7 @@ def test_doctor_configuration_difference_is_warning_not_fatal() -> None:
 
 
 def test_doctor_does_not_gate_exact_version_but_missing_permission_is_fatal() -> None:
-    snapshots = {role: _snapshot(role) for role in NodeRole}
+    snapshots = {role: _snapshot(role) for role in (NodeRole.CUSTOM_OFF, NodeRole.CUSTOM_ON)}
     snapshots[NodeRole.CUSTOM_ON] = NodePreflight(
         role=NodeRole.CUSTOM_ON,
         config_fingerprint="same",
@@ -93,19 +110,15 @@ def test_doctor_sanitizes_probe_exception_as_node_unavailable() -> None:
     assert "password" not in issue.message
 
 
-def test_doctor_probes_all_six_distinct_endpoints_and_only_warns_on_version_mismatch() -> None:
+def test_doctor_probes_two_distinct_endpoints_and_only_warns_on_version_mismatch() -> None:
     config = AppConfig(
         nodes=tuple(
-            {
-                "role": role,
-                "primary": {"host": "primary.example", "port": 33061 + index},
-                "replica": {"host": "replica.example", "port": 33161 + index},
-            }
-            for index, role in enumerate(NodeRole)
+            NodeConfig(role=role, host="endpoint.example", port=33061 + index)
+            for index, role in enumerate((NodeRole.CUSTOM_OFF, NodeRole.CUSTOM_ON))
         )
     )
 
-    class SixProbe:
+    class PairProbe:
         def __init__(self) -> None:
             self.ports: list[int] = []
 
@@ -123,13 +136,13 @@ def test_doctor_probes_all_six_distinct_endpoints_and_only_warns_on_version_mism
                     "CREATE",
                     "CREATE TEMPORARY TABLES",
                 },
-                server_version="8.0.40" if node.port < 33100 else "8.4.0",
+                server_version="8.0.22" if node.role is NodeRole.CUSTOM_OFF else "8.0.23",
             )
 
-    probe = SixProbe()
+    probe = PairProbe()
     report = DoctorService(config, probe).run()
 
-    assert len(probe.ports) == 6
+    assert len(probe.ports) == 2
     assert report.can_start is True
     assert "version_mismatch" in {issue.code for issue in report.warnings}
 

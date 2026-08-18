@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 from select_fuzz.performance.artifacts import (
     PerformanceDiagnosticWriter,
     PerformanceRecorder,
@@ -61,7 +61,7 @@ def _completed_formal_run() -> FormalRun:
                 tree="-> Table scan on pf_t0 (actual time=0..1 rows=1 loops=1)",
                 cache_state="unverified",
             )
-            for role in NodeRole
+            for role in COMPARISON_ROLES
         },
         start_skew_ms=0.0,
     )
@@ -82,7 +82,7 @@ def test_round_sql_contains_one_setup_and_multiple_explain_analyze_queries(
     recorder = PerformanceRecorder(
         _Records(),
         run_id="run-shared-round",
-        node_config_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        node_config_fingerprints={role: f"fp-{role.value}" for role in COMPARISON_ROLES},
         sql_root=tmp_path,
     )
     for number in (1, 2):
@@ -115,11 +115,8 @@ def test_alert_artifact_contains_every_input_needed_to_rebuild_and_diagnose() ->
         number=1,
         scale=ScaleKnobs(),
         sql="SELECT SUM(v) FROM cpu_data",
-        samples_seconds={
-            NodeRole.BASELINE: (5.0, 5.1, 5.2),
-            NodeRole.CUSTOM_OFF: (6.0, 6.1, 6.2),
-        },
-        medians_seconds={NodeRole.BASELINE: 5.1, NodeRole.CUSTOM_OFF: 6.1},
+        samples_seconds={NodeRole.CUSTOM_OFF: (5.0, 5.1, 5.2)},
+        medians_seconds={NodeRole.CUSTOM_OFF: 5.1},
     )
     frozen = FrozenCase(
         case_id="case_1",
@@ -136,7 +133,7 @@ def test_alert_artifact_contains_every_input_needed_to_rebuild_and_diagnose() ->
         },
         sql="SELECT SUM(v) FROM cpu_data",
         boundary=ShapeBoundary(frozenset({Family.SCAN})),
-        medians_seconds={NodeRole.BASELINE: 5.1, NodeRole.CUSTOM_OFF: 6.1},
+        medians_seconds={NodeRole.CUSTOM_OFF: 5.1},
         attempts=(attempt,),
     )
     run = FormalRun(
@@ -151,12 +148,12 @@ def test_alert_artifact_contains_every_input_needed_to_rebuild_and_diagnose() ->
                 tree="-> Table scan on cpu_data (actual time=0..10000 rows=1 loops=1)",
                 cache_state="unverified",
             )
-            for role in NodeRole
+            for role in COMPARISON_ROLES
         },
         start_skew_ms=1.0,
     )
     records, diagnostics = _Records(), _Diagnostics()
-    fingerprints = {role: f"fingerprint-{role.value}" for role in NodeRole}
+    fingerprints = {role: f"fingerprint-{role.value}" for role in COMPARISON_ROLES}
     recorder = PerformanceRecorder(
         records,
         diagnostics,
@@ -165,7 +162,7 @@ def test_alert_artifact_contains_every_input_needed_to_rebuild_and_diagnose() ->
         now=lambda: "2026-07-13T00:00:00Z",
     )
 
-    record = recorder.record(frozen, run, Assessment(Verdict.PERF_ALERT, ("VS_BASELINE",)))
+    record = recorder.record(frozen, run, Assessment(Verdict.PERF_ALERT, ("VS_CUSTOM_OFF",)))
 
     assert record["template_id"] == "cpu_scan_v1"
     assert record["run_id"] == "run-perf-1"
@@ -175,11 +172,9 @@ def test_alert_artifact_contains_every_input_needed_to_rebuild_and_diagnose() ->
         role.value: value for role, value in fingerprints.items()
     }
     assert record["calibration"][0]["samples_seconds"] == {  # type: ignore[index]
-        "baseline": [5.0, 5.1, 5.2],
-        "custom_off": [6.0, 6.1, 6.2],
+        "custom_off": [5.0, 5.1, 5.2],
     }
-    assert diagnostics.files.keys() >= {
-        "plans/baseline.tree",
+    assert set(diagnostics.files) == {
         "plans/custom_off.tree",
         "plans/custom_on.tree",
         "diagnostics/metrics.json",
@@ -196,14 +191,13 @@ def test_calibration_failure_record_keeps_classification_and_reproduction(
         records,
         diagnostics,
         run_id="run-perf-2",
-        node_config_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        node_config_fingerprints={role: f"fp-{role.value}" for role in COMPARISON_ROLES},
         sql_root=tmp_path,
-        replica_parameters_sha256="b" * 64,
         now=lambda: "2026-07-13T00:00:01Z",
     )
     failure = CalibrationTerminated(
         CalibrationFailureKind.PARSE,
-        NodeRole.BASELINE,
+        NodeRole.CUSTOM_OFF,
         error_type="PlanParseError",
         scale=ScaleKnobs(table_rows=123),
         sql="SELECT SUM(v) FROM cpu_data",
@@ -220,7 +214,7 @@ def test_calibration_failure_record_keeps_classification_and_reproduction(
         failing_action_sql="INSERT INTO cpu_data VALUES(1)",
         failure_details={
             "node_results": {
-                "baseline": {"status": "success", "affected_rows": 1},
+                "custom_off": {"status": "success", "affected_rows": 1},
                 "custom_on": {"status": "error", "affected_rows": None},
             }
         },
@@ -244,7 +238,7 @@ def test_calibration_failure_record_keeps_classification_and_reproduction(
     assert record["diagnostic_attempt"] == 2  # type: ignore[index]
     assert record["database"] == "sf_performance_real_failure_1"  # type: ignore[index]
     assert record["failing_action_sql"] == "INSERT INTO cpu_data VALUES(1)"  # type: ignore[index]
-    assert record["replica_parameters_sha256"] == "b" * 64  # type: ignore[index]
+    assert "replica_parameters_sha256" not in record  # type: ignore[operator]
     script = tmp_path / "performance_failures" / "bad_1" / "case.sql"
     assert "sf_performance_real_failure_1" in script.read_text(encoding="utf-8")
     assert diagnostics.case_ids == ["bad_1_attempt_2"]
@@ -260,14 +254,14 @@ def test_diagnostic_writer_atomically_publishes_manifest_and_files(
         "perf_case_1",
         {"case_id": "perf_case_1", "type": "performance_alert"},
         {
-            "plans/baseline.tree": b"-> Table scan",
+            "plans/custom_off.tree": b"-> Table scan",
             "setup/manifest.json": b'{"rows":100}',
         },
     )
 
     assert published == tmp_path / "performance_findings" / "perf_case_1"
     assert json.loads((published / "manifest.json").read_text())["case_id"] == "perf_case_1"
-    assert (published / "plans" / "baseline.tree").read_bytes() == b"-> Table scan"
+    assert (published / "plans" / "custom_off.tree").read_bytes() == b"-> Table scan"
     assert not list((tmp_path / "performance_findings").glob(".*.tmp-*"))
 
 
@@ -288,18 +282,15 @@ def test_exhausted_calibration_without_failure_object_still_gets_diagnostics() -
         records,
         diagnostics,
         run_id="run-exhausted",
-        node_config_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        node_config_fingerprints={role: f"fp-{role.value}" for role in COMPARISON_ROLES},
         now=lambda: "2026-07-13T00:00:02Z",
     )
     attempt = CalibrationAttempt(
         number=1,
         scale=ScaleKnobs(),
         sql="SELECT 1 ORDER BY 1",
-        samples_seconds={
-            NodeRole.BASELINE: (1.0, 1.0, 1.0),
-            NodeRole.CUSTOM_OFF: (1.0, 1.0, 1.0),
-        },
-        medians_seconds={NodeRole.BASELINE: 1.0, NodeRole.CUSTOM_OFF: 1.0},
+        samples_seconds={NodeRole.CUSTOM_OFF: (1.0, 1.0, 1.0)},
+        medians_seconds={NodeRole.CUSTOM_OFF: 1.0},
     )
     template = type(
         "Template", (), {"case_id": "exhausted_1", "template_id": "cpu_v1", "seed": 8}

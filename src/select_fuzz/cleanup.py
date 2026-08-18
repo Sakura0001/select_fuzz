@@ -10,7 +10,13 @@ from typing import Protocol
 
 import mysql.connector
 
-from select_fuzz.config import AppConfig, NodeConfig, NodeRole, resolve_credentials
+from select_fuzz.config import (
+    COMPARISON_ROLES,
+    AppConfig,
+    NodeConfig,
+    NodeRole,
+    resolve_credentials,
+)
 
 
 _MANAGED_DATABASE = re.compile(
@@ -60,8 +66,12 @@ class CleanupService:
         nodes: Sequence[NodeConfig],
         connect: Callable[[NodeConfig], ConnectionLike],
     ) -> None:
-        if len(nodes) != len(NodeRole) or {node.role for node in nodes} != set(NodeRole):
-            raise ValueError("cleanup requires one node for every fixed role")
+        roles = {node.role for node in nodes}
+        if len(nodes) != len(roles) or roles not in (
+            set(COMPARISON_ROLES),
+            set(NodeRole),
+        ):
+            raise ValueError("cleanup requires the active comparison or fuzz roles")
         self._nodes = tuple(sorted(nodes, key=lambda node: node.role.value))
         self._connect = connect
 

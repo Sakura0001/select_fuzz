@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from select_fuzz.cleanup import CleanupService, ManagedDatabaseError, build_cleanup_service
-from select_fuzz.config import AppConfig, NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, AppConfig, NodeConfig, NodeRole
 
 
 MANAGED = "sf_c_20260713t112233_w0_r1_s0123456789_nabcdef12_q0"
@@ -100,7 +100,9 @@ def test_production_cleanup_builder_resolves_credentials_without_persisting_them
         calls.append(kwargs)
         return _Connection([])
 
-    config = AppConfig(nodes=_nodes())
+    config = AppConfig(
+        nodes=tuple(node for node in _nodes() if node.role in COMPARISON_ROLES)
+    )
     service = build_cleanup_service(
         config,
         environ={
@@ -112,7 +114,7 @@ def test_production_cleanup_builder_resolves_credentials_without_persisting_them
     report = service.run((MANAGED,), execute=True)
 
     assert report.success
-    assert len(calls) == 3
+    assert len(calls) == 2
     assert calls[0]["user"] == "local-user"
     assert calls[0]["password"] == "ephemeral-secret"
     assert "ephemeral-secret" not in repr(report)

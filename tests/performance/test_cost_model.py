@@ -18,8 +18,9 @@ def test_cost_model_seeds_scale_from_reference_estimated_work() -> None:
     template = CpuDenseScanTemplate(seed=3, case_id="case_3")
     initial = ScaleKnobs()
     plans = {
-        role: parse_tree("-> Table scan on cpu_data (cost=1 rows=25000)")
-        for role in (NodeRole.BASELINE, NodeRole.CUSTOM_OFF)
+        NodeRole.CUSTOM_OFF: parse_tree(
+            "-> Table scan on cpu_data (cost=1 rows=25000)"
+        )
     }
 
     seeded = CostModel(row_cap=50_000_000).seed_scale(template, initial, plans)

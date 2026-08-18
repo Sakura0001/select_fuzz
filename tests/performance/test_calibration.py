@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeConfig, NodeRole
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.performance.calibration import (
     CalibrationFailureKind,
@@ -79,13 +79,8 @@ class _AnalyzePort:
         return _execution(role, self.values[role].pop(0))
 
 
-def test_calibration_runs_each_reference_three_times_and_freezes_one_case() -> None:
-    port = _AnalyzePort(
-        {
-            NodeRole.BASELINE: [4.0, 5.0, 6.0],
-            NodeRole.CUSTOM_OFF: [11.0, 12.0, 13.0],
-        }
-    )
+def test_calibration_runs_custom_off_three_times_and_freezes_one_case() -> None:
+    port = _AnalyzePort({NodeRole.CUSTOM_OFF: [4.0, 5.0, 6.0]})
     materializer = _Materializer()
     template = _Template()
 
@@ -93,14 +88,8 @@ def test_calibration_runs_each_reference_three_times_and_freezes_one_case() -> N
         template, ScaleKnobs(), database="perf_round_7"
     )
 
-    assert frozen.medians_seconds == {
-        NodeRole.BASELINE: 5.0,
-        NodeRole.CUSTOM_OFF: 12.0,
-    }
-    assert [role for role, _, _ in port.calls] == [
-        NodeRole.BASELINE,
-        NodeRole.CUSTOM_OFF,
-    ] * 3
+    assert frozen.medians_seconds == {NodeRole.CUSTOM_OFF: 5.0}
+    assert [role for role, _, _ in port.calls] == [NodeRole.CUSTOM_OFF] * 3
     assert frozen.sql == template.render(frozen.scale)
     assert frozen.data_manifest == template.data_manifest(frozen.scale)
     assert materializer.calls == [(frozen.database, frozen.data_manifest)]
@@ -109,10 +98,7 @@ def test_calibration_runs_each_reference_three_times_and_freezes_one_case() -> N
 def test_calibration_scales_up_each_round_then_reports_bounded_exhaustion() -> None:
     policy = PerformancePolicy(max_calibration_rounds=3)
     port = _AnalyzePort(
-        {
-            NodeRole.BASELINE: [1.0] * 9,
-            NodeRole.CUSTOM_OFF: [1.0] * 9,
-        }
+        {NodeRole.CUSTOM_OFF: [1.0] * 9}
     )
 
     with pytest.raises(CalibrationExhausted) as captured:
@@ -146,21 +132,23 @@ class _CoreRunner:
 
 
 def test_reference_analyzer_is_a_thin_shared_node_query_runner_adapter() -> None:
-    nodes = tuple(NodeConfig(role=role, host=f"{role.value}.example") for role in NodeRole)
+    nodes = tuple(
+        NodeConfig(role=role, host=f"{role.value}.example") for role in COMPARISON_ROLES
+    )
     core = _CoreRunner()
     adapter = ReferenceAnalyzer(nodes, core)
 
     result = adapter.analyze(
-        NodeRole.BASELINE,
+        NodeRole.CUSTOM_OFF,
         "perf_1",
         "SELECT SUM(v) FROM t;",
         timeout_s=60.0,
     )
 
-    assert result.role is NodeRole.BASELINE
+    assert result.role is NodeRole.CUSTOM_OFF
     assert core.calls == [
         (
-            NodeRole.BASELINE,
+            NodeRole.CUSTOM_OFF,
             "perf_1",
             "EXPLAIN ANALYZE FORMAT=TREE SELECT SUM(v) FROM t",
             60.0,
@@ -190,11 +178,13 @@ class _InfraCoreRunner(_CoreRunner):
 
 
 def test_reference_explain_infrastructure_failure_requests_pause() -> None:
-    nodes = tuple(NodeConfig(role=role, host=f"{role.value}.example") for role in NodeRole)
+    nodes = tuple(
+        NodeConfig(role=role, host=f"{role.value}.example") for role in COMPARISON_ROLES
+    )
 
     with pytest.raises(CalibrationInfrastructurePause):
         ReferenceAnalyzer(nodes, _InfraCoreRunner()).explain_tree(
-            NodeRole.BASELINE, "perf_1", "SELECT 1"
+            NodeRole.CUSTOM_OFF, "perf_1", "SELECT 1"
         )
 
 
@@ -229,7 +219,7 @@ class _OutcomePort:
 
 
 def test_infrastructure_calibration_failure_pauses_instead_of_scaling() -> None:
-    port = _OutcomePort(_failure(NodeRole.BASELINE, ExecutionStatus.INFRA_ERROR, 2013))
+    port = _OutcomePort(_failure(NodeRole.CUSTOM_OFF, ExecutionStatus.INFRA_ERROR, 2013))
 
     with pytest.raises(CalibrationInfrastructurePause) as captured:
         CalibrationEngine(port, _Materializer(), PerformancePolicy()).calibrate(
@@ -237,7 +227,7 @@ def test_infrastructure_calibration_failure_pauses_instead_of_scaling() -> None:
         )
 
     assert captured.value.kind is CalibrationFailureKind.INFRA
-    assert captured.value.role is NodeRole.BASELINE
+    assert captured.value.role is NodeRole.CUSTOM_OFF
     assert captured.value.error_code == 2013
 
 
@@ -245,12 +235,12 @@ def test_infrastructure_calibration_failure_pauses_instead_of_scaling() -> None:
     "execution,kind",
     [
         (
-            _failure(NodeRole.BASELINE, ExecutionStatus.ERROR, 1064),
+            _failure(NodeRole.CUSTOM_OFF, ExecutionStatus.ERROR, 1064),
             CalibrationFailureKind.EXECUTION,
         ),
         (
             NodeExecution.success(
-                role=NodeRole.BASELINE,
+                role=NodeRole.CUSTOM_OFF,
                 connection_id=1,
                 started_ns=0,
                 ended_ns=1,
@@ -260,7 +250,7 @@ def test_infrastructure_calibration_failure_pauses_instead_of_scaling() -> None:
         ),
         (
             NodeExecution.success(
-                role=NodeRole.BASELINE,
+                role=NodeRole.CUSTOM_OFF,
                 connection_id=1,
                 started_ns=0,
                 ended_ns=1,
@@ -284,7 +274,7 @@ def test_non_timeout_calibration_failures_are_classified_and_terminate(
 
 
 def test_timeout_rejects_case_without_scaling_below_random_initial_volume() -> None:
-    timeout = _failure(NodeRole.BASELINE, ExecutionStatus.TIMEOUT, 3024)
+    timeout = _failure(NodeRole.CUSTOM_OFF, ExecutionStatus.TIMEOUT, 3024)
     with pytest.raises(CalibrationExhausted) as captured:
         CalibrationEngine(
             _OutcomePort(timeout),
@@ -297,14 +287,14 @@ def test_timeout_rejects_case_without_scaling_below_random_initial_volume() -> N
 
 
 def test_first_timeout_short_circuits_and_rejects_the_candidate() -> None:
-    timeout = _failure(NodeRole.BASELINE, ExecutionStatus.TIMEOUT, 3024)
+    timeout = _failure(NodeRole.CUSTOM_OFF, ExecutionStatus.TIMEOUT, 3024)
     port = _OutcomePort(timeout)
     with pytest.raises(CalibrationExhausted):
         CalibrationEngine(
             port, _Materializer(), PerformancePolicy(max_calibration_rounds=2)
         ).calibrate(_Template(), ScaleKnobs(), database="perf_timeout_fast")
 
-    # One baseline timeout per candidate; custom_off and remaining samples are skipped.
+    # One custom_off timeout rejects this candidate; remaining samples are skipped.
     assert getattr(port, "call_count", 0) == 1
 
 
@@ -316,12 +306,12 @@ def test_materialization_mismatch_is_terminal_setup_mismatch_not_infra_pause() -
                 "different content",
                 database=database,
                 sql="INSERT INTO cpu_data VALUES (1)",
-                details={"node_results": {"baseline": {"affected_rows": 1}}},
+                details={"node_results": {"custom_off": {"affected_rows": 1}}},
             )
 
     with pytest.raises(CalibrationTerminated) as captured:
         CalibrationEngine(
-            _AnalyzePort({NodeRole.BASELINE: [5.0] * 3, NodeRole.CUSTOM_OFF: [5.0] * 3}),
+            _AnalyzePort({NodeRole.CUSTOM_OFF: [5.0] * 3}),
             MismatchMaterializer(),
             PerformancePolicy(),
         ).calibrate(_Template(), ScaleKnobs(), database="perf_setup_mismatch")
@@ -330,7 +320,9 @@ def test_materialization_mismatch_is_terminal_setup_mismatch_not_infra_pause() -
     assert not isinstance(captured.value, CalibrationInfrastructurePause)
     assert captured.value.database == "perf_setup_mismatch"
     assert captured.value.failing_action_sql == "INSERT INTO cpu_data VALUES (1)"
-    assert captured.value.failure_details["node_results"] == {"baseline": {"affected_rows": 1}}
+    assert captured.value.failure_details["node_results"] == {
+        "custom_off": {"affected_rows": 1}
+    }
 
 
 class _WrongExplainShapePort(_AnalyzePort):
@@ -341,10 +333,7 @@ class _WrongExplainShapePort(_AnalyzePort):
 
 def test_explain_plan_shape_failure_is_not_mislabeled_as_parse_failure() -> None:
     port = _WrongExplainShapePort(
-        {
-            NodeRole.BASELINE: [5.0] * 3,
-            NodeRole.CUSTOM_OFF: [5.0] * 3,
-        }
+        {NodeRole.CUSTOM_OFF: [5.0] * 3}
     )
 
     with pytest.raises(CalibrationTerminated) as captured:
@@ -363,10 +352,7 @@ class _BrokenMaterializer:
 
 def test_materialization_exception_becomes_safe_infrastructure_pause() -> None:
     port = _AnalyzePort(
-        {
-            NodeRole.BASELINE: [5.0] * 3,
-            NodeRole.CUSTOM_OFF: [5.0] * 3,
-        }
+        {NodeRole.CUSTOM_OFF: [5.0] * 3}
     )
 
     with pytest.raises(CalibrationInfrastructurePause) as captured:

@@ -192,7 +192,7 @@ def test_fuzz_run_cli_prints_runner_failure_in_chinese(
             "--mode",
             "fuzz",
             "--config",
-            str(PROJECT_ROOT / "config" / "example.yaml"),
+            str(PROJECT_ROOT / "config" / "intranet-fuzz.example.yaml"),
             "--rounds",
             "1",
             "--artifacts",

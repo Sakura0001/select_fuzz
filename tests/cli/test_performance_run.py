@@ -13,7 +13,6 @@ def _config() -> AppConfig:
         {
             "mode": "performance",
             "nodes": [
-                {"role": "baseline", "host": "127.0.0.1", "port": 34061},
                 {"role": "custom_off", "host": "127.0.0.1", "port": 34062},
                 {"role": "custom_on", "host": "127.0.0.1", "port": 34063},
             ],

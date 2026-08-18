@@ -22,7 +22,7 @@ from select_fuzz.artifacts.sql_script import (
     write_difference_summary,
     write_minimal_failure_script,
 )
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 from select_fuzz.performance.calibration import CalibrationTerminated
 from select_fuzz.performance.models import Assessment, FormalRun, FrozenCase, Verdict
 
@@ -125,14 +125,16 @@ def compact_record(
         "scale": frozen.scale.as_dict(),
         "data_manifest": _compact_manifest(frozen.data_manifest),
         "node_config_fingerprints": {
-            role.value: node_config_fingerprints[role] for role in NodeRole
+            role.value: node_config_fingerprints[role] for role in COMPARISON_ROLES
         },
         "calibration": _calibration_record(frozen),
         "cache_state": "unverified",
         "start_skew_ms": run.start_skew_ms,
         "verdict": assessment.verdict.value,
         "reasons": list(assessment.reasons),
-        "measurements": {role.value: _measurement_record(run, role) for role in NodeRole},
+        "measurements": {
+            role.value: _measurement_record(run, role) for role in COMPARISON_ROLES
+        },
     }
 
 
@@ -145,15 +147,14 @@ class PerformanceRecorder:
         run_id: str,
         node_config_fingerprints: Mapping[NodeRole, str],
         sql_root: str | Path | None = None,
-        replica_parameters_sha256: str | None = None,
         now: Callable[[], str] = lambda: datetime.now(UTC).isoformat(),
     ) -> None:
         if not run_id:
             raise ValueError("run_id must not be empty")
-        if set(node_config_fingerprints) != set(NodeRole) or any(
+        if set(node_config_fingerprints) != set(COMPARISON_ROLES) or any(
             not value for value in node_config_fingerprints.values()
         ):
-            raise ValueError("three nonempty node configuration fingerprints are required")
+            raise ValueError("two nonempty comparison fingerprints are required")
         self._records = records
         self._diagnostics = diagnostics
         self._node_config_fingerprints = dict(node_config_fingerprints)
@@ -162,12 +163,6 @@ class PerformanceRecorder:
         self._sql_root = None if sql_root is None else Path(sql_root)
         self._round_writers: dict[str, SourceableSqlWriter] = {}
         self._round_writers_lock = Lock()
-        if (
-            replica_parameters_sha256 is not None
-            and re.fullmatch(r"[0-9a-f]{64}", replica_parameters_sha256) is None
-        ):
-            raise ValueError("replica_parameters_sha256 must be lowercase SHA-256")
-        self._replica_parameters_sha256 = replica_parameters_sha256
 
     @staticmethod
     def _setup_statements(manifest: object) -> tuple[str, ...]:
@@ -186,7 +181,6 @@ class PerformanceRecorder:
                     metadata={
                         "run_id": self._run_id,
                         "round_seed": getattr(frozen.data_manifest, "seed", frozen.seed),
-                        "replica_parameters_sha256": self._replica_parameters_sha256,
                     },
                 )
                 for statement in self._setup_statements(frozen.data_manifest):
@@ -210,7 +204,6 @@ class PerformanceRecorder:
             run_id=self._run_id,
             occurred_at=self._now(),
         )
-        record["replica_parameters_sha256"] = self._replica_parameters_sha256
         self._write_case_sql(frozen)
         self._records.append(record)
         if assessment.verdict is not Verdict.PASS and self._sql_root is not None:
@@ -237,7 +230,7 @@ class PerformanceRecorder:
         if assessment.verdict is not Verdict.PASS and self._diagnostics is not None:
             files: dict[str, bytes] = {
                 f"plans/{role.value}.tree": (run.measurements[role].tree or "").encode("utf-8")
-                for role in NodeRole
+                for role in COMPARISON_ROLES
             }
             files["calibration.json"] = json.dumps(
                 record["calibration"], sort_keys=True, allow_nan=False
@@ -307,11 +300,11 @@ class PerformanceRecorder:
             "sql": None if failure is None else failure.sql,
             "data_manifest": (None if data_manifest is None else _compact_manifest(data_manifest)),
             "node_config_fingerprints": {
-                role.value: self._node_config_fingerprints[role] for role in NodeRole
+                role.value: self._node_config_fingerprints[role]
+                for role in COMPARISON_ROLES
             },
             "calibration": calibration,
             "cache_state": "unverified",
-            "replica_parameters_sha256": self._replica_parameters_sha256,
         }
         self._records.append(record)
         if self._sql_root is not None and failure is not None:
@@ -327,7 +320,6 @@ class PerformanceRecorder:
                         "case_id": str(case_id),
                         "run_id": self._run_id,
                         "verdict": failure.kind.value,
-                        "replica_parameters_sha256": self._replica_parameters_sha256,
                     },
                 )
                 write_difference_summary(
@@ -340,7 +332,6 @@ class PerformanceRecorder:
                         "database": failure.database,
                         "failing_action_sql": failure.failing_action_sql,
                         "failure_details": _artifact_value(failure.failure_details),
-                        "replica_parameters_sha256": self._replica_parameters_sha256,
                     },
                 )
         if self._diagnostics is not None:

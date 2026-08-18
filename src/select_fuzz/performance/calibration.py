@@ -8,7 +8,7 @@ from enum import StrEnum
 from statistics import median
 from typing import Protocol
 
-from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeConfig, NodeRole
 from select_fuzz.domain import NodeExecution
 from select_fuzz.execution.protocols import BarrierLike
 from select_fuzz.performance.execution import classify_execution
@@ -34,7 +34,7 @@ from select_fuzz.performance.tree import (
 )
 
 
-REFERENCE_ROLES = (NodeRole.BASELINE, NodeRole.CUSTOM_OFF)
+REFERENCE_ROLES = (NodeRole.CUSTOM_OFF,)
 
 
 class CalibrationFailureKind(StrEnum):
@@ -158,8 +158,8 @@ class ReferenceAnalyzer:
 
     def __init__(self, nodes: Sequence[NodeConfig], runner: SharedQueryRunner) -> None:
         by_role = {node.role: node for node in nodes}
-        if len(nodes) != 3 or set(by_role) != set(NodeRole):
-            raise ValueError("reference analyzer requires all three fixed node roles")
+        if len(nodes) != 2 or set(by_role) != set(COMPARISON_ROLES):
+            raise ValueError("reference analyzer requires the two comparison roles")
         self._nodes = by_role
         self._runner = runner
 
@@ -245,7 +245,7 @@ class CostModel:
         plans: Mapping[NodeRole, TreePlan],
     ) -> ScaleKnobs:
         if set(plans) != set(REFERENCE_ROLES):
-            raise ValueError("cost model requires both reference plans")
+            raise ValueError("cost model requires the custom_off reference plan")
         observed = max(plan.estimated_work(template.driver_family) for plan in plans.values())
         if observed <= 0:
             raise PlanParseError("estimated driver work must be positive")
@@ -324,7 +324,7 @@ class CalibrationEngine:
         except MaterializationMismatch as error:
             raise CalibrationTerminated(
                 CalibrationFailureKind.SETUP_MISMATCH,
-                NodeRole.BASELINE,
+                NodeRole.CUSTOM_OFF,
                 error_type=type(error).__name__,
                 scale=initial,
                 sql=initial_sql,
@@ -336,7 +336,7 @@ class CalibrationEngine:
         except Exception as error:
             raise CalibrationInfrastructurePause(
                 CalibrationFailureKind.INFRA,
-                NodeRole.BASELINE,
+                NodeRole.CUSTOM_OFF,
                 error_type=type(error).__name__,
                 scale=initial,
                 sql=initial_sql,
@@ -372,7 +372,7 @@ class CalibrationEngine:
         except PlanParseError as error:
             raise CalibrationTerminated(
                 CalibrationFailureKind.PARSE,
-                NodeRole.BASELINE,
+                NodeRole.CUSTOM_OFF,
                 error_type=type(error).__name__,
                 scale=initial,
                 sql=initial_sql,
@@ -397,7 +397,7 @@ class CalibrationEngine:
         except PlanParseError as error:
             raise CalibrationTerminated(
                 CalibrationFailureKind.PARSE,
-                NodeRole.BASELINE,
+                NodeRole.CUSTOM_OFF,
                 error_type=type(error).__name__,
                 scale=initial,
                 sql=initial_sql,
@@ -456,7 +456,7 @@ class CalibrationEngine:
                 except MaterializationMismatch as error:
                     raise CalibrationTerminated(
                         CalibrationFailureKind.SETUP_MISMATCH,
-                        NodeRole.BASELINE,
+                        NodeRole.CUSTOM_OFF,
                         error_type=type(error).__name__,
                         attempts=tuple(attempts),
                         scale=scale,
@@ -469,7 +469,7 @@ class CalibrationEngine:
                 except Exception as error:
                     raise CalibrationInfrastructurePause(
                         CalibrationFailureKind.INFRA,
-                        NodeRole.BASELINE,
+                        NodeRole.CUSTOM_OFF,
                         error_type=type(error).__name__,
                         attempts=tuple(attempts),
                         scale=scale,
@@ -529,7 +529,7 @@ class CalibrationEngine:
                 failure_categories={role: tuple(values) for role, values in failures.items()},
             )
             attempts.append(attempt)
-            if len(medians) == 2 and all(lower <= value <= upper for value in medians.values()):
+            if len(medians) == 1 and all(lower <= value <= upper for value in medians.values()):
                 return FrozenCase(
                     case_id=template.case_id,
                     template_id=template.template_id,
@@ -542,8 +542,6 @@ class CalibrationEngine:
                     medians_seconds=medians,
                     attempts=tuple(attempts),
                 )
-            if len(medians) == 2 and min(medians.values()) < lower < upper < max(medians.values()):
-                raise CalibrationDivergence(tuple(attempts))
             timed_out = candidate_timed_out or any(
                 category == CalibrationFailureKind.TIMEOUT.value
                 for categories in failures.values()

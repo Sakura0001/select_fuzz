@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import Event
 
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 from select_fuzz.performance.calibration import (
     CalibrationFailureKind,
     CalibrationInfrastructurePause,
@@ -52,7 +52,7 @@ class _Preparation:
             data_manifest={},
             sql="SELECT 1",
             boundary=ShapeBoundary(frozenset({Family.SCAN})),
-            medians_seconds={NodeRole.BASELINE: 5.0, NodeRole.CUSTOM_OFF: 5.0},
+            medians_seconds={NodeRole.CUSTOM_OFF: 5.0},
             attempts=(),
         )
 
@@ -75,7 +75,7 @@ class _Formal:
                     None,
                     "unverified",
                 )
-                for role in NodeRole
+                for role in COMPARISON_ROLES
             },
             start_skew_ms=0.0,
         )
@@ -160,7 +160,7 @@ def test_service_persists_infrastructure_pause_then_retries_same_case() -> None:
             if self.calls == 1:
                 raise CalibrationInfrastructurePause(
                     CalibrationFailureKind.INFRA,
-                    NodeRole.BASELINE,
+                    NodeRole.CUSTOM_OFF,
                     error_type="ConnectionUnavailable",
                 )
             return super().prepare(template, initial, database=database)
@@ -201,7 +201,7 @@ def test_service_counts_terminal_calibration_failure_as_rejected() -> None:
             del initial, database
             raise CalibrationTerminated(
                 CalibrationFailureKind.SETUP_MISMATCH,
-                NodeRole.BASELINE,
+                NodeRole.CUSTOM_OFF,
                 error_type="MaterializationMismatch",
             )
 
@@ -242,7 +242,7 @@ def test_terminal_calibration_failure_preserves_round_database_and_starts_new_on
             if self.calls == 1:
                 raise CalibrationTerminated(
                     CalibrationFailureKind.SETUP_MISMATCH,
-                    NodeRole.BASELINE,
+                    NodeRole.CUSTOM_OFF,
                     error_type="MaterializationMismatch",
                 )
             return super().prepare(template, initial, database=database)
@@ -292,7 +292,7 @@ def test_performance_finding_stops_current_database_and_starts_next_round() -> N
                         None,
                         "unverified",
                     )
-                    for role in NodeRole
+                    for role in COMPARISON_ROLES
                 },
                 start_skew_ms=0.0,
             )

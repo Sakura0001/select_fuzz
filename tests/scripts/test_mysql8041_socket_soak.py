@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from select_fuzz.artifacts import JsonlWriter, read_jsonl
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES
 from select_fuzz.correctness import JsonlEventSink
 from select_fuzz.domain import RunEvent
 from select_fuzz.generation.query_scope import QueryExclusionReason
@@ -77,9 +77,8 @@ class _FakeConnect:
         return _RawVersionConnection(self.versions[socket_path])
 
 
-def _paths(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _paths(tmp_path: Path) -> tuple[Path, Path]:
     return (
-        tmp_path / "baseline.sock",
         tmp_path / "custom-off.sock",
         tmp_path / "custom-on.sock",
     )
@@ -150,8 +149,8 @@ def test_jsonl_event_sink_thaws_nested_negative_error_payloads(tmp_path: Path) -
 @pytest.mark.parametrize(
     "values",
     (
-        ("/tmp/a.sock", "/tmp/b.sock", "/tmp/c.sock"),
-        ("/tmp/a.sock,/tmp/b.sock,/tmp/c.sock",),
+        ("/tmp/a.sock", "/tmp/b.sock"),
+        ("/tmp/a.sock,/tmp/b.sock",),
     ),
 )
 def test_socket_cli_accepts_separate_or_comma_delimited_paths(
@@ -159,7 +158,7 @@ def test_socket_cli_accepts_separate_or_comma_delimited_paths(
 ) -> None:
     parsed = soak_script._socket_paths(values)
 
-    assert tuple(path.name for path in parsed) == ("a.sock", "b.sock", "c.sock")
+    assert tuple(path.name for path in parsed) == ("a.sock", "b.sock")
 
 
 def test_mysql_connector_factory_injection_maps_ports_to_sockets_without_password(
@@ -174,7 +173,7 @@ def test_mysql_connector_factory_injection_maps_ports_to_sockets_without_passwor
         soak_script.build_nodes(),
     )
 
-    assert versions == {role: "8.0.41" for role in NodeRole}
+    assert versions == {role: "8.0.41" for role in COMPARISON_ROLES}
     assert [call["unix_socket"] for call in fake_connect.calls] == [str(path) for path in paths]
     assert all(call["user"] == "root" for call in fake_connect.calls)
     assert all("host" not in call and "port" not in call for call in fake_connect.calls)
@@ -184,7 +183,7 @@ def test_mysql_connector_factory_injection_maps_ports_to_sockets_without_passwor
 def test_version_probe_rejects_any_non_exact_mysql_version(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     versions = {str(path): "8.0.41" for path in paths}
-    versions[str(paths[2])] = "8.0.42"
+    versions[str(paths[1])] = "8.0.42"
     factory = soak_script.build_connector(paths, connect=_FakeConnect(versions))
 
     with pytest.raises(RuntimeError, match="exact MySQL 8.0.41"):
@@ -199,11 +198,13 @@ def test_runtime_assembles_real_production_service_after_fake_socket_preflight(
 
     runtime = soak_script.build_runtime(config, fake_connect)
 
-    assert runtime.versions == {role: "8.0.41-community" for role in NodeRole}
+    assert runtime.versions == {
+        role: "8.0.41-community" for role in COMPARISON_ROLES
+    }
     assert runtime.service.__class__.__name__ == "CorrectnessRunService"
     rounds = runtime.service._rounds
     assert rounds._source._grammar_queries is not None
-    assert len(fake_connect.calls) == 3
+    assert len(fake_connect.calls) == 2
 
 
 class _FakeService:
@@ -252,7 +253,7 @@ def test_duration_stop_and_finite_round_request_produce_machine_summary(
     def runtime_factory(config: Any, connect: Any) -> Any:
         return soak_script.SocketSoakRuntime(
             service,
-            {role: "8.0.41" for role in NodeRole},
+            {role: "8.0.41" for role in COMPARISON_ROLES},
         )
 
     summary = soak_script.run_socket_soak(

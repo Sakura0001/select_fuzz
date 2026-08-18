@@ -5,17 +5,12 @@ from threading import Event
 
 import pytest
 
-from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeConfig, NodeRole
 from select_fuzz.domain import (
     ColumnMeta,
     ErrorInfo,
     ExecutionStatus,
     NodeExecution,
-)
-from select_fuzz.execution.replication import (
-    ReplicationObservation,
-    ReplicationWaitResult,
-    ReplicationWaitStatus,
 )
 from select_fuzz.performance.entrypoint import MySQLCpuMaterializationPort
 from select_fuzz.performance.materialization import (
@@ -81,44 +76,22 @@ class _Runner:
         )
 
 
-class _Waiter:
-    def __init__(self, *, ready: bool = True) -> None:
-        self.calls: list[tuple[str, int]] = []
-        self.ready = ready
-
-    def wait(self, database: str, sequence: int) -> ReplicationWaitResult:
-        self.calls.append((database, sequence))
-        return ReplicationWaitResult(
-            ReplicationWaitStatus.READY if self.ready else ReplicationWaitStatus.TIMEOUT,
-            sequence,
-            {
-                role: ReplicationObservation(role, sequence if self.ready else sequence - 1)
-                for role in NodeRole
-            },
-        )
-
-
 def _nodes(base: int, host: str) -> tuple[NodeConfig, ...]:
     return tuple(
-        NodeConfig(role=role, host=host, port=base + index) for index, role in enumerate(NodeRole)
+        NodeConfig(role=role, host=host, port=base + index)
+        for index, role in enumerate(COMPARISON_ROLES)
     )
 
 
-def test_performance_materialization_writes_primary_then_reads_replica_after_barrier() -> None:
-    primaries = _nodes(33061, "primary.example")
-    replicas = _nodes(33161, "replica.example")
-    writes = _Runner()
-    reads = _Runner()
-    waiter = _Waiter()
+def test_performance_materialization_uses_same_two_endpoints_without_marker() -> None:
+    nodes = _nodes(33061, "comparison.example")
+    runner = _Runner()
     port = MySQLCpuMaterializationPort(
-        primaries,
+        nodes,
         _Factory(),
-        writes,  # type: ignore[arg-type]
+        runner,  # type: ignore[arg-type]
         timeout_seconds=300,
         stop_event=Event(),
-        read_nodes=replicas,
-        read_query_runner=reads,  # type: ignore[arg-type]
-        replication_waiter=waiter,  # type: ignore[arg-type]
     )
     manifest = CpuDenseSetupManifest(
         "test",
@@ -133,27 +106,20 @@ def test_performance_materialization_writes_primary_then_reads_replica_after_bar
     evidence = ScaleMaterializer(port).rebuild_all("sf_performance_route_1", manifest)
 
     assert all(item.row_counts == {"cpu_data": 1} for item in evidence.values())
-    assert {port for port, _sql in writes.calls} == {node.port for node in primaries}
-    assert {port for port, _sql in reads.calls} == {node.port for node in replicas}
-    assert any(sql.startswith("INSERT INTO `__select_fuzz") for _, sql in writes.calls)
-    assert waiter.calls == [("sf_performance_route_1", 1)]
+    assert {port for port, _sql in runner.calls} == {node.port for node in nodes}
+    assert any(sql.startswith("SELECT COUNT") for _, sql in runner.calls)
+    assert all("__select_fuzz_replication_marker" not in sql for _, sql in runner.calls)
 
 
-def test_performance_primary_setup_affected_row_mismatch_stops_before_replica_reads() -> None:
-    primaries = _nodes(33061, "primary.example")
-    replicas = _nodes(33161, "replica.example")
-    writes = _Runner({NodeRole.CUSTOM_ON: 2})
-    reads = _Runner()
-    waiter = _Waiter()
+def test_performance_setup_affected_row_mismatch_stops_before_evidence_reads() -> None:
+    nodes = _nodes(33061, "comparison.example")
+    runner = _Runner({NodeRole.CUSTOM_ON: 2})
     port = MySQLCpuMaterializationPort(
-        primaries,
+        nodes,
         _Factory(),
-        writes,  # type: ignore[arg-type]
+        runner,  # type: ignore[arg-type]
         timeout_seconds=300,
         stop_event=Event(),
-        read_nodes=replicas,
-        read_query_runner=reads,  # type: ignore[arg-type]
-        replication_waiter=waiter,  # type: ignore[arg-type]
     )
     manifest = CpuDenseSetupManifest(
         "test",
@@ -170,9 +136,10 @@ def test_performance_primary_setup_affected_row_mismatch_stops_before_replica_re
 
     assert captured.value.database == "sf_performance_mismatch_1"
     assert captured.value.sql == "INSERT INTO cpu_data VALUES (1)"
-    assert set(captured.value.details["node_results"]) == {role.value for role in NodeRole}
-    assert reads.calls == []
-    assert waiter.calls == []
+    assert set(captured.value.details["node_results"]) == {
+        role.value for role in COMPARISON_ROLES
+    }
+    assert not any(sql.startswith("SELECT") for _, sql in runner.calls)
 
 
 @pytest.mark.parametrize(
@@ -204,7 +171,7 @@ def test_performance_primary_setup_classifies_consistent_failures(
             return super().run(node, database, sql, **kwargs)
 
     port = MySQLCpuMaterializationPort(
-        _nodes(33061, "primary.example"),
+        _nodes(33061, "comparison.example"),
         _Factory(),
         FailingRunner(),  # type: ignore[arg-type]
         timeout_seconds=300,
@@ -224,8 +191,8 @@ def test_performance_primary_setup_classifies_consistent_failures(
         ScaleMaterializer(port).rebuild_all("sf_performance_failure_1", manifest)
 
 
-def test_performance_setup_requires_affected_rows_and_replica_timeout_is_terminal() -> None:
-    primaries = _nodes(33061, "primary.example")
+def test_performance_setup_requires_affected_rows() -> None:
+    nodes = _nodes(33061, "comparison.example")
     manifest = CpuDenseSetupManifest(
         "test",
         1,
@@ -236,47 +203,35 @@ def test_performance_setup_requires_affected_rows_and_replica_timeout_is_termina
         ),
     )
     missing_rows = MySQLCpuMaterializationPort(
-        primaries,
+        nodes,
         _Factory(),
-        _Runner({role: None for role in NodeRole}),  # type: ignore[arg-type]
+        _Runner({role: None for role in COMPARISON_ROLES}),  # type: ignore[arg-type]
         timeout_seconds=300,
         stop_event=Event(),
     )
     with pytest.raises(MaterializationExecutionFailure, match="MissingAffectedRows"):
         ScaleMaterializer(missing_rows).rebuild_all("sf_performance_missing_rows_1", manifest)
 
-    timeout = MySQLCpuMaterializationPort(
-        primaries,
-        _Factory(),
-        _Runner(),  # type: ignore[arg-type]
-        timeout_seconds=300,
-        stop_event=Event(),
-        replication_waiter=_Waiter(ready=False),  # type: ignore[arg-type]
-    )
-    with pytest.raises(MaterializationExecutionFailure, match="ReplicaSyncTimeout") as captured:
-        ScaleMaterializer(timeout).rebuild_all("sf_performance_sync_timeout_1", manifest)
-    assert captured.value.database == "sf_performance_sync_timeout_1"
-    assert captured.value.details["replication"]["required_sequence"] == 1  # type: ignore[index]
-
-
 def test_performance_materialization_validates_topology_and_stop_state() -> None:
-    nodes = _nodes(33061, "primary.example")
-    with pytest.raises(ValueError, match="all three"):
+    nodes = _nodes(33061, "comparison.example")
+    with pytest.raises(ValueError, match="two comparison"):
         MySQLCpuMaterializationPort(
-            nodes[:2],
+            nodes[:1],
             _Factory(),
             _Runner(),  # type: ignore[arg-type]
             timeout_seconds=300,
             stop_event=Event(),
         )
-    with pytest.raises(ValueError, match="reads"):
+    with pytest.raises(ValueError, match="two comparison"):
         MySQLCpuMaterializationPort(
-            nodes,
+            (
+                NodeConfig(role=NodeRole.BASELINE, host="old.example", port=33060),
+                *nodes,
+            ),
             _Factory(),
             _Runner(),  # type: ignore[arg-type]
             timeout_seconds=300,
             stop_event=Event(),
-            read_nodes=nodes[:2],
         )
     stopped = Event()
     stopped.set()

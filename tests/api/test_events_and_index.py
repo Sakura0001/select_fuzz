@@ -9,7 +9,7 @@ import pytest
 from select_fuzz.artifacts.bundle import CaseBundleWriter, FindingRecord
 from select_fuzz.api.events import EventBroker, EventHistoryExpired, encode_sse
 from select_fuzz.api.read_index import ReadIndex
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES
 
 
 def test_sse_encoding_and_resume_from_last_event_id() -> None:
@@ -174,7 +174,7 @@ def test_read_index_filters_writer_generator_findings_by_errno_and_classificatio
         case_id="case_generator_error",
         run_id="run_generator_error",
         mode="correctness",
-        databases={role: database for role in NodeRole},
+        databases={role: database for role in COMPARISON_ROLES},
         seeds={"query": 1},
         setup_sql=("CREATE TABLE `t` (`id` INT);",),
         query_sql="SELECT missing FROM `t` ORDER BY 1",
@@ -185,19 +185,19 @@ def test_read_index_filters_writer_generator_findings_by_errno_and_classificatio
             "category": "generator_contract",
             "expected_error": None,
             "observed_identities": [
-                {"errno": 1054, "sqlstate": "42S22"} for _ in NodeRole
+                {"errno": 1054, "sqlstate": "42S22"} for _ in COMPARISON_ROLES
             ],
             "reason": "a valid-lane query returned an error on every node",
         },
         statistics={},
-        configuration_fingerprints={role: "fingerprint" for role in NodeRole},
+        configuration_fingerprints={role: "fingerprint" for role in COMPARISON_ROLES},
         results={
             role: {
                 "role": role.value,
                 "status": "error",
                 "error": {"errno": 1054, "sqlstate": "42S22"},
             }
-            for role in NodeRole
+            for role in COMPARISON_ROLES
         },
     )
     CaseBundleWriter(tmp_path).write_finding(record)

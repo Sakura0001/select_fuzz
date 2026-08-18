@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the production correctness pipeline against three local MySQL 8.0.41 sockets."""
+"""Run the production correctness pipeline against two local MySQL 8.0.41 sockets."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from typing import Any, Protocol
 import mysql.connector
 
 from select_fuzz.artifacts import CaseBundleWriter, JsonlWriter
-from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeConfig, NodeRole
 from select_fuzz.correctness import (
     CorrectnessRoundEngine,
     GeneratedRoundSource,
@@ -33,7 +33,7 @@ from select_fuzz.execution import (
     MySQLSetupRunner,
     NodeQueryRunner,
     QueryLimits,
-    TriadCoordinator,
+    ComparisonCoordinator,
 )
 from select_fuzz.generation.coverage import CoverageLedger
 from select_fuzz.generation.query_grammar import GrammarQueryGenerator, SelectGrammar
@@ -41,7 +41,7 @@ from select_fuzz.generation.query_scope import DEFAULT_QUERY_SCOPE
 from select_fuzz.service import CorrectnessRunService, RunSummary
 
 
-_SOCKET_PORTS = (44_061, 44_062, 44_063)
+_SOCKET_PORTS = (44_062, 44_063)
 _SOCKET_USER_ENV = "SELECT_FUZZ_SOCKET_SOAK_USER"
 _SOCKET_AUTH_ENV = "SELECT_FUZZ_SOCKET_SOAK_AUTH"
 _SOCKET_AUTH_PLACEHOLDER = "local-socket-peer-auth"
@@ -64,7 +64,7 @@ TimerFactory = Callable[[float, Callable[[], None]], TimerLike]
 
 @dataclass(frozen=True, slots=True)
 class SocketSoakConfig:
-    sockets: tuple[Path, Path, Path]
+    sockets: tuple[Path, Path]
     duration_seconds: float
     queries_per_round: int
     workers: int
@@ -80,8 +80,8 @@ class SocketSoakConfig:
     full_thread_sql_log: bool = False
 
     def __post_init__(self) -> None:
-        if len(set(self.sockets)) != 3:
-            raise ValueError("sockets must contain three distinct paths")
+        if len(set(self.sockets)) != 2:
+            raise ValueError("sockets must contain two distinct paths")
         if (
             not isinstance(self.duration_seconds, (int, float))
             or isinstance(self.duration_seconds, bool)
@@ -131,8 +131,8 @@ class SocketSoakRuntime:
     versions: Mapping[NodeRole, str]
 
     def __post_init__(self) -> None:
-        if set(self.versions) != set(NodeRole):
-            raise ValueError("versions must contain all three node roles")
+        if set(self.versions) != set(COMPARISON_ROLES):
+            raise ValueError("versions must contain both comparison roles")
         object.__setattr__(self, "versions", MappingProxyType(dict(self.versions)))
 
 
@@ -145,8 +145,8 @@ class UnixSocketConnectAdapter:
         delegate: ConnectCallable = mysql.connector.connect,
     ) -> None:
         if set(sockets_by_port) != set(_SOCKET_PORTS):
-            raise ValueError("socket mapping must contain exactly the three soak ports")
-        if len(set(sockets_by_port.values())) != 3:
+            raise ValueError("socket mapping must contain exactly the two soak ports")
+        if len(set(sockets_by_port.values())) != 2:
             raise ValueError("socket mapping paths must be distinct")
         self._sockets_by_port = dict(sockets_by_port)
         self._delegate = delegate
@@ -179,12 +179,12 @@ def build_nodes() -> tuple[NodeConfig, ...]:
             username_env=_SOCKET_USER_ENV,
             password_env=_SOCKET_AUTH_ENV,
         )
-        for role, port in zip(NodeRole, _SOCKET_PORTS, strict=True)
+        for role, port in zip(COMPARISON_ROLES, _SOCKET_PORTS, strict=True)
     )
 
 
 def build_connector(
-    sockets: tuple[Path, Path, Path],
+    sockets: tuple[Path, Path],
     *,
     connect: ConnectCallable = mysql.connector.connect,
 ) -> MySQLConnectorFactory:
@@ -219,8 +219,8 @@ def probe_mysql8041_versions(
         if version.split("-", 1)[0] != "8.0.41":
             raise RuntimeError(f"{node.role.value} must run exact MySQL 8.0.41, observed {version}")
         versions[node.role] = version
-    if set(versions) != set(NodeRole):
-        raise RuntimeError("version probe did not cover all three roles")
+    if set(versions) != set(COMPARISON_ROLES):
+        raise RuntimeError("version probe did not cover both comparison roles")
     return versions
 
 
@@ -251,7 +251,7 @@ def build_runtime(
         grammar_query_generator=GrammarQueryGenerator(SelectGrammar.default()),
         query_scope=DEFAULT_QUERY_SCOPE,
     )
-    triad = TriadCoordinator(
+    comparison = ComparisonCoordinator(
         nodes,
         setup_runner=MySQLSetupRunner(factory),
         query_runner=NodeQueryRunner(factory),
@@ -269,7 +269,7 @@ def build_runtime(
     }
     engine = CorrectnessRoundEngine(
         source,
-        ProductionCoordinatorAdapter(triad),
+        ProductionCoordinatorAdapter(comparison),
         artifacts,
         coverage,
         QueryLimits(
@@ -359,7 +359,9 @@ def run_socket_soak(
         ],
         "status": status,
         "stopped": summary.stopped,
-        "versions": {role.value: runtime.versions[role] for role in NodeRole},
+        "versions": {
+            role.value: runtime.versions[role] for role in COMPARISON_ROLES
+        },
         "workers": config.workers,
     }
 
@@ -393,7 +395,7 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="SOCKET",
         help=(
-            "three paths in baseline, custom_off, custom_on order; either separate "
+            "two paths in custom_off, custom_on order; either separate "
             "arguments or one comma-separated value"
         ),
     )
@@ -421,14 +423,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _socket_paths(values: Sequence[str]) -> tuple[Path, Path, Path]:
+def _socket_paths(values: Sequence[str]) -> tuple[Path, Path]:
     flattened = (
         tuple(part for part in values[0].split(",") if part) if len(values) == 1 else tuple(values)
     )
-    if len(flattened) != 3:
-        raise ValueError("--sockets requires exactly three paths")
+    if len(flattened) != 2:
+        raise ValueError("--sockets requires exactly two paths")
     resolved = tuple(Path(value).expanduser().resolve() for value in flattened)
-    return (resolved[0], resolved[1], resolved[2])
+    return (resolved[0], resolved[1])
 
 
 def _validate_socket_files(paths: Sequence[Path]) -> None:

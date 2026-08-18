@@ -6,10 +6,10 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event
 
 from select_fuzz.artifacts import JsonlWriter, WorkerSqlLogWriter
-from select_fuzz.config import AppConfig, NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, AppConfig, NodeConfig, NodeRole
 from select_fuzz.domain import (
     ExecutionStatus,
     NodeExecution,
@@ -22,9 +22,6 @@ from select_fuzz.execution import (
     DatabaseNameFactory,
     MySQLConnectorFactory,
     NodeQueryRunner,
-    ReplicationBarrier,
-    marker_upsert_sql,
-    MARKER_DDL_SQL,
 )
 from select_fuzz.execution.protocols import BarrierLike, ConnectionFactory, QuerySession
 from select_fuzz.performance.artifacts import (
@@ -135,38 +132,19 @@ class MySQLCpuMaterializationPort:
         timeout_seconds: float,
         stop_event: Event,
         sql_log: WorkerSqlLogWriter | None = None,
-        read_nodes: Sequence[NodeConfig] | None = None,
-        read_query_runner: NodeQueryRunner | _SqlLoggingQueryRunner | None = None,
-        replication_waiter: ReplicationBarrier | None = None,
     ) -> None:
         by_role = {node.role: node for node in nodes}
-        if len(nodes) != 3 or set(by_role) != set(NodeRole):
-            raise ValueError("materialization requires all three node roles")
+        if len(nodes) != 2 or set(by_role) != set(COMPARISON_ROLES):
+            raise ValueError("materialization requires the two comparison roles")
         self._nodes = by_role
-        read_by_role = {node.role: node for node in (nodes if read_nodes is None else read_nodes)}
-        if len(read_by_role) != 3 or set(read_by_role) != set(NodeRole):
-            raise ValueError("materialization reads require all three node roles")
-        self._read_nodes = read_by_role
         self._factory = factory
         self._query_runner = query_runner
-        self._read_query_runner = read_query_runner or query_runner
-        self._replication_waiter = replication_waiter
         self._timeout_seconds = timeout_seconds
         self._stop_event = stop_event
         self._sql_log = sql_log
-        self._sequence_lock = Lock()
-        self._database_sequences: dict[str, int] = {}
 
-    def _next_sequence(self, database: str) -> int:
-        with self._sequence_lock:
-            sequence = self._database_sequences.get(database, 0) + 1
-            self._database_sequences[database] = sequence
-            return sequence
-
-    def _bounded(
-        self, role: NodeRole, database: str, sql: str, *, read: bool = False
-    ) -> NodeExecution:
-        result = self._run(role, database, sql, read=read)
+    def _bounded(self, role: NodeRole, database: str, sql: str) -> NodeExecution:
+        result = self._run(role, database, sql)
         if result.status is ExecutionStatus.TIMEOUT:
             raise MaterializationTimeout(
                 role,
@@ -215,15 +193,13 @@ class MySQLCpuMaterializationPort:
             for role, result in results.items()
         }
 
-    def _run(self, role: NodeRole, database: str, sql: str, *, read: bool = False) -> NodeExecution:
+    def _run(self, role: NodeRole, database: str, sql: str) -> NodeExecution:
         if self._stop_event.is_set():
             raise MaterializationInfrastructureFailure(
                 role, "RunStopped", database=database, sql=sql
             )
-        runner = self._read_query_runner if read else self._query_runner
-        node = self._read_nodes[role] if read else self._nodes[role]
-        result = runner.run(
-            node,
+        result = self._query_runner.run(
+            self._nodes[role],
             database,
             sql,
             timeout_s=self._timeout_seconds,
@@ -263,7 +239,7 @@ class MySQLCpuMaterializationPort:
             self._bounded(role, database, statement)
 
     def prepare_all(self, database: str, manifest: object) -> None:
-        """Execute primary setup statement-by-statement and compare every outcome."""
+        """Execute setup statement-by-statement and compare both outcomes."""
 
         self._validate_manifest(manifest)
         assert isinstance(manifest, (CpuDenseSetupManifest, ScalableFuzzSetupManifest))
@@ -272,14 +248,17 @@ class MySQLCpuMaterializationPort:
             *((database, statement) for statement in manifest.setup_statements),
         )
         for statement_database, sql in statements:
-            self._primary_lockstep(statement_database, sql)
+            self._comparison_lockstep(statement_database, sql)
 
-    def _primary_lockstep(self, database: str, sql: str) -> None:
+    def _comparison_lockstep(self, database: str, sql: str) -> None:
         with ThreadPoolExecutor(
-            max_workers=3, thread_name_prefix="sf-perf-setup-statement"
+            max_workers=2, thread_name_prefix="sf-perf-setup-statement"
         ) as pool:
-            futures = {role: pool.submit(self._run, role, database, sql) for role in NodeRole}
-            results = {role: futures[role].result() for role in NodeRole}
+            futures = {
+                role: pool.submit(self._run, role, database, sql)
+                for role in COMPARISON_ROLES
+            }
+            results = {role: futures[role].result() for role in COMPARISON_ROLES}
         is_dml = sql.lstrip().split(None, 1)[0].upper() in {
             "INSERT",
             "UPDATE",
@@ -287,7 +266,7 @@ class MySQLCpuMaterializationPort:
             "REPLACE",
         }
         identities: set[object] = set()
-        for role in NodeRole:
+        for role in COMPARISON_ROLES:
             result = results[role]
             if result.status is ExecutionStatus.SUCCESS:
                 identities.add(
@@ -305,77 +284,46 @@ class MySQLCpuMaterializationPort:
                 )
         if len(identities) != 1:
             raise MaterializationMismatch(
-                f"primary setup outcomes differ for {sql.split(None, 1)[0]}",
+                f"comparison setup outcomes differ for {sql.split(None, 1)[0]}",
                 database=database,
                 sql=sql,
                 details={"node_results": self._node_result_details(results)},
             )
         details = {"node_results": self._node_result_details(results)}
-        baseline = results[NodeRole.BASELINE]
-        if baseline.status is ExecutionStatus.SUCCESS:
-            if is_dml and baseline.affected_rows is None:
+        reference = results[NodeRole.CUSTOM_OFF]
+        if reference.status is ExecutionStatus.SUCCESS:
+            if is_dml and reference.affected_rows is None:
                 raise MaterializationExecutionFailure(
-                    NodeRole.BASELINE,
+                    NodeRole.CUSTOM_OFF,
                     "MissingAffectedRows",
                     database=database,
                     sql=sql,
                     details=details,
                 )
             return
-        if baseline.status is ExecutionStatus.TIMEOUT:
+        if reference.status is ExecutionStatus.TIMEOUT:
             raise MaterializationTimeout(
-                NodeRole.BASELINE,
+                NodeRole.CUSTOM_OFF,
                 "MaterializationTimeout",
                 database=database,
                 sql=sql,
                 details=details,
             )
-        if baseline.status is ExecutionStatus.INFRA_ERROR:
+        if reference.status is ExecutionStatus.INFRA_ERROR:
             raise MaterializationInfrastructureFailure(
-                NodeRole.BASELINE,
-                baseline.watchdog_error_type or "MySQLInfrastructureError",
+                NodeRole.CUSTOM_OFF,
+                reference.watchdog_error_type or "MySQLInfrastructureError",
                 database=database,
                 sql=sql,
                 details=details,
             )
         raise MaterializationExecutionFailure(
-            NodeRole.BASELINE,
+            NodeRole.CUSTOM_OFF,
             "MySQLExecutionError",
             database=database,
             sql=sql,
             details=details,
         )
-
-    def synchronize(self, database: str, manifest: object) -> None:
-        """Publish one marker only after all three primary rebuilds completed."""
-
-        self._validate_manifest(manifest)
-        if self._replication_waiter is None:
-            return
-        sequence = self._next_sequence(database)
-
-        self._primary_lockstep(database, MARKER_DDL_SQL)
-        self._primary_lockstep(database, marker_upsert_sql(sequence))
-        replication = self._replication_waiter.wait(database, sequence)
-        if not replication.ready:
-            raise MaterializationExecutionFailure(
-                NodeRole.BASELINE,
-                "ReplicaSyncTimeout",
-                database=database,
-                sql=marker_upsert_sql(sequence),
-                details={
-                    "replication": {
-                        "required_sequence": sequence,
-                        "observations": {
-                            role.value: {
-                                "error_type": observation.error_type,
-                                "observed_sequence": observation.observed_sequence,
-                            }
-                            for role, observation in replication.observations.items()
-                        },
-                    }
-                },
-            )
 
     def evidence(
         self,
@@ -398,7 +346,6 @@ class MySQLCpuMaterializationPort:
                 role,
                 database,
                 f"SELECT COUNT(*) FROM `{table_name}` ORDER BY 1",
-                read=True,
             )
             if len(count_execution.rows) != 1 or len(count_execution.rows[0]) != 1:
                 raise MaterializationExecutionFailure(
@@ -440,9 +387,8 @@ class MySQLCpuMaterializationPort:
                 f"SELECT * FROM `{table_name}` WHERE `id` IN ("
                 + ",".join(str(value) for value in sample_ids)
                 + ") ORDER BY `id`",
-                read=True,
             )
-            schema = self._bounded(role, database, f"SHOW CREATE TABLE `{table_name}`", read=True)
+            schema = self._bounded(role, database, f"SHOW CREATE TABLE `{table_name}`")
             schema_rows.append((table_name, schema.rows))
             sample_rows.append((table_name, samples.rows))
         return MaterializationEvidence(
@@ -466,7 +412,6 @@ class MySQLCpuMaterializationPort:
         """Compatibility path; ScaleMaterializer uses the phased API above."""
 
         self.prepare(role, database, manifest)
-        self.synchronize(database, manifest)
         return self.evidence(role, database, manifest)
 
 
@@ -487,7 +432,7 @@ def _server_fingerprints(
             raise RuntimeError("performance fingerprint probe returned no row")
         return node.role, stable_fingerprint(rows[0])
 
-    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-perf-fingerprint") as pool:
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sf-perf-fingerprint") as pool:
         return dict(pool.map(one, nodes))
 
 
@@ -502,59 +447,44 @@ class PerformanceModeRunner:
         if request.mode != "performance" or request.workers != 1:
             raise ValueError("performance request requires mode=performance and workers=1")
         policy = PerformancePolicy.from_config(self._config.performance)
-        primary_connector = MySQLConnectorFactory()
-        replica_connector = MySQLConnectorFactory(
-            session_variables_by_role={
-                role: self._config.replica_session_variables(role) for role in NodeRole
-            }
-        )
-        replication = ReplicationBarrier(
-            self._config.replica_nodes,
-            replica_connector,
-            timeout_seconds=self._config.replica_sync_timeout_seconds,
-        )
+        nodes = self._config.comparison_nodes
+        connector = MySQLConnectorFactory()
         thread_sql_log = (
             WorkerSqlLogWriter(self._artifact_root / "sql")
             if self._config.full_thread_sql_log
             else None
         )
-        primary_runner = _SqlLoggingQueryRunner(
-            NodeQueryRunner(primary_connector),
-            thread_sql_log,
-        )
-        replica_runner = _SqlLoggingQueryRunner(
-            NodeQueryRunner(replica_connector),
+        query_runner = _SqlLoggingQueryRunner(
+            NodeQueryRunner(connector),
             thread_sql_log,
         )
         materializer = ScaleMaterializer(
             MySQLCpuMaterializationPort(
-                self._config.primary_nodes,
-                primary_connector,
-                primary_runner,
+                nodes,
+                connector,
+                query_runner,
                 timeout_seconds=self._config.performance.materialization_timeout_seconds,
                 stop_event=stop_event,
                 sql_log=thread_sql_log,
-                read_nodes=self._config.replica_nodes,
-                read_query_runner=replica_runner,
-                replication_waiter=replication,
             )
         )
         preparation = SharedRoundCasePreparer(materializer)
         formal = FormalRunner(
-            self._config.replica_nodes,
-            replica_runner,
+            nodes,
+            query_runner,
             policy,
-            diagnostics=MySQLDiagnosticsCollector(replica_connector),
+            diagnostics=MySQLDiagnosticsCollector(connector),
         )
         records = JsonlWriter(self._artifact_root / "events.jsonl")
-        fingerprints = _server_fingerprints(self._config.replica_nodes, replica_connector)
+        fingerprints = _server_fingerprints(nodes, connector)
         records.append(
             {
                 "configuration_difference": len(set(fingerprints.values())) > 1,
-                "fingerprints": {role.value: fingerprints[role] for role in NodeRole},
+                "fingerprints": {
+                    role.value: fingerprints[role] for role in COMPARISON_ROLES
+                },
                 "run_id": request.run_id,
                 "occurred_at": datetime.now(UTC).isoformat(),
-                "replica_parameters_sha256": self._config.replica_parameters_sha256,
                 "type": "performance_preflight",
             }
         )
@@ -564,7 +494,6 @@ class PerformanceModeRunner:
             run_id=request.run_id,
             node_config_fingerprints=fingerprints,
             sql_root=self._artifact_root,
-            replica_parameters_sha256=self._config.replica_parameters_sha256,
         )
         names = DatabaseNameFactory()
 

@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from select_fuzz.config import PerformanceConfig
-from select_fuzz.performance.models import PerformancePolicy, ScaleKnobs
+from select_fuzz.config import NodeRole, PerformanceConfig
+from select_fuzz.performance.models import (
+    FormalRun,
+    Measurement,
+    Outcome,
+    PerformancePolicy,
+    ScaleKnobs,
+)
 
 
 def test_policy_defaults_are_the_seeded_fuzz_contract() -> None:
@@ -67,3 +73,29 @@ def test_policy_adapts_the_shared_config_without_cli_specific_logic() -> None:
     assert policy.regression_threshold == 0.25
     assert policy.max_start_skew_ms == 75.0
     assert ScaleKnobs.from_config(config).table_rows == config.initial_table_rows
+
+
+def test_formal_run_requires_exactly_the_two_comparison_roles() -> None:
+    def measurement(role: NodeRole) -> Measurement:
+        return Measurement(
+            role=role,
+            outcome=Outcome.COMPLETED,
+            started_ns=0,
+            ended_ns=1,
+            connection_id=1,
+            root_end_ms=1.0,
+            tree="tree",
+            cache_state="unverified",
+        )
+
+    valid = {
+        NodeRole.CUSTOM_OFF: measurement(NodeRole.CUSTOM_OFF),
+        NodeRole.CUSTOM_ON: measurement(NodeRole.CUSTOM_ON),
+    }
+    assert tuple(FormalRun(valid, 0.0).measurements) == (
+        NodeRole.CUSTOM_OFF,
+        NodeRole.CUSTOM_ON,
+    )
+
+    with pytest.raises(ValueError, match="two comparison roles"):
+        FormalRun({NodeRole.BASELINE: measurement(NodeRole.BASELINE), **valid}, 0.0)

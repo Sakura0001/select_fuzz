@@ -8,7 +8,7 @@ from enum import StrEnum
 import math
 from types import MappingProxyType
 
-from select_fuzz.config import NodeRole, PerformanceConfig
+from select_fuzz.config import COMPARISON_ROLES, NodeRole, PerformanceConfig
 
 
 def _finite_number(name: str, value: float, *, positive: bool = False) -> None:
@@ -272,8 +272,8 @@ class FormalRun:
     start_skew_ms: float
 
     def __post_init__(self) -> None:
-        if set(self.measurements) != set(NodeRole):
-            raise ValueError("formal run requires exactly one measurement per node role")
+        if set(self.measurements) != set(COMPARISON_ROLES):
+            raise ValueError("formal run requires exactly the two comparison roles")
         _finite_number("start_skew_ms", self.start_skew_ms)
         if self.start_skew_ms < 0:
             raise ValueError("start_skew_ms must be nonnegative")

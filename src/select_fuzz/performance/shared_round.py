@@ -50,7 +50,7 @@ class SharedRoundCasePreparer:
         elif manifest != self._manifest:
             raise CalibrationTerminated(
                 CalibrationFailureKind.SETUP_MISMATCH,
-                NodeRole.BASELINE,
+                NodeRole.CUSTOM_OFF,
                 error_type="RoundManifestChanged",
                 scale=initial,
                 sql=sql,
@@ -121,7 +121,7 @@ class SharedRoundCasePreparer:
         except MaterializationMismatch as error:
             raise CalibrationTerminated(
                 CalibrationFailureKind.SETUP_MISMATCH,
-                NodeRole.BASELINE,
+                NodeRole.CUSTOM_OFF,
                 error_type=type(error).__name__,
                 scale=initial,
                 sql=sql,
@@ -133,7 +133,7 @@ class SharedRoundCasePreparer:
         except Exception as error:
             raise CalibrationInfrastructurePause(
                 CalibrationFailureKind.INFRA,
-                NodeRole.BASELINE,
+                NodeRole.CUSTOM_OFF,
                 error_type=type(error).__name__,
                 scale=initial,
                 sql=sql,

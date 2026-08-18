@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeConfig, NodeRole
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.performance.execution import FormalRunner, classify_execution
 from select_fuzz.performance.models import FrozenCase, Outcome, PerformancePolicy, ScaleKnobs
@@ -13,7 +13,7 @@ from select_fuzz.performance.tree import Family, ShapeBoundary
 
 
 def _nodes() -> tuple[NodeConfig, ...]:
-    return tuple(NodeConfig(role=role, host=f"{role.value}.example") for role in NodeRole)
+    return tuple(NodeConfig(role=role, host=f"{role.value}.example") for role in COMPARISON_ROLES)
 
 
 def _tree(seconds: float) -> str:
@@ -32,7 +32,7 @@ def _frozen() -> FrozenCase:
         data_manifest={"rows": 100},
         sql="SELECT SUM(v) FROM t",
         boundary=ShapeBoundary(frozenset({Family.SCAN})),
-        medians_seconds={NodeRole.BASELINE: 10.0, NodeRole.CUSTOM_OFF: 10.0},
+        medians_seconds={NodeRole.CUSTOM_OFF: 10.0},
         attempts=(),
     )
 
@@ -57,9 +57,8 @@ class _Runner:
         assert barrier is not None
         barrier.wait(timeout=2)  # type: ignore[attr-defined]
         started = {
-            NodeRole.BASELINE: 1_000_000_000,
-            NodeRole.CUSTOM_OFF: 1_050_000_000,
-            NodeRole.CUSTOM_ON: 1_080_000_000,
+            NodeRole.CUSTOM_OFF: 1_000_000_000,
+            NodeRole.CUSTOM_ON: 1_030_000_000,
         }[node.role]
         with self._lock:
             self.calls.append((node.role, database, sql, timeout_s, barrier))
@@ -72,18 +71,18 @@ class _Runner:
         )
 
 
-def test_all_three_nodes_start_once_behind_one_barrier_and_all_count_for_skew() -> None:
+def test_both_nodes_start_once_behind_one_barrier_and_both_count_for_skew() -> None:
     core = _Runner()
 
     run = FormalRunner(_nodes(), core, PerformancePolicy()).run(_frozen())
 
-    assert len(core.calls) == 3
-    assert {call[0] for call in core.calls} == set(NodeRole)
+    assert len(core.calls) == 2
+    assert {call[0] for call in core.calls} == set(COMPARISON_ROLES)
     assert all(call[2].startswith("EXPLAIN ANALYZE FORMAT=TREE ") for call in core.calls)
     assert all(call[3] == 15.0 for call in core.calls)
     assert len({id(call[4]) for call in core.calls}) == 1
     assert all(call[4] is not None for call in core.calls)
-    assert run.start_skew_ms == pytest.approx(80.0)
+    assert run.start_skew_ms == pytest.approx(30.0)
     assert all(item.cache_state == "unverified" for item in run.measurements.values())
 
 
@@ -115,7 +114,7 @@ def test_timeout_disconnect_and_execution_error_classification(
 
 def test_completed_execution_with_partial_tree_is_parse_error() -> None:
     raw = NodeExecution.success(
-        role=NodeRole.BASELINE,
+        role=NodeRole.CUSTOM_OFF,
         connection_id=1,
         started_ns=0,
         ended_ns=1,
@@ -130,7 +129,7 @@ def test_completed_execution_with_partial_tree_is_parse_error() -> None:
 
 def test_execution_error_keeps_only_a_safe_error_type() -> None:
     raw = NodeExecution.failure(
-        role=NodeRole.BASELINE,
+        role=NodeRole.CUSTOM_OFF,
         status=ExecutionStatus.ERROR,
         started_ns=0,
         ended_ns=1,
@@ -157,7 +156,7 @@ class _EarlyInfraRunner:
         barrier: object,
     ) -> NodeExecution:
         del database, sql, timeout_s, row_limit, byte_limit
-        if node.role is NodeRole.BASELINE:
+        if node.role is NodeRole.CUSTOM_OFF:
             return NodeExecution.failure(
                 role=node.role,
                 status=ExecutionStatus.INFRA_ERROR,
@@ -219,8 +218,8 @@ def test_diagnostics_are_collected_for_each_node_without_changing_query_elapsed(
         _frozen()
     )
 
-    assert set(diagnostics.before_roles) == set(NodeRole)
-    assert set(diagnostics.after_roles) == set(NodeRole)
+    assert set(diagnostics.before_roles) == set(COMPARISON_ROLES)
+    assert set(diagnostics.after_roles) == set(COMPARISON_ROLES)
     assert all(item.wall_time_ms == 10_000 for item in run.measurements.values())
     assert all("status_delta" in (item.metrics or {}) for item in run.measurements.values())
 

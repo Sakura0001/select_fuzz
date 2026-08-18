@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from select_fuzz.config import NodeRole
 from select_fuzz.performance.calibration import (
     CalibrationFailureKind,
     CalibrationTerminated,
@@ -89,6 +90,7 @@ def test_materialization_mismatch_keeps_database_and_exact_failure_context() -> 
         )
 
     assert captured.value.kind is CalibrationFailureKind.SETUP_MISMATCH
+    assert captured.value.role is NodeRole.CUSTOM_OFF
     assert captured.value.database == "sf_performance_round_1"
     assert captured.value.failing_action_sql == "INSERT INTO pf_t0 VALUES (1)"
     assert captured.value.failure_details == failure.details

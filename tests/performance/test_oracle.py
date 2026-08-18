@@ -24,7 +24,6 @@ def _measurement(role: NodeRole, outcome: Outcome, seconds: float | None) -> Mea
 
 
 def _run(
-    baseline: tuple[Outcome, float | None],
     custom_off: tuple[Outcome, float | None],
     custom_on: tuple[Outcome, float | None],
     *,
@@ -32,7 +31,6 @@ def _run(
 ) -> FormalRun:
     return FormalRun(
         measurements={
-            NodeRole.BASELINE: _measurement(NodeRole.BASELINE, *baseline),
             NodeRole.CUSTOM_OFF: _measurement(NodeRole.CUSTOM_OFF, *custom_off),
             NodeRole.CUSTOM_ON: _measurement(NodeRole.CUSTOM_ON, *custom_on),
         },
@@ -40,24 +38,22 @@ def _run(
     )
 
 
-def test_exact_threshold_is_alert_against_each_reference() -> None:
+def test_exact_threshold_is_alert_against_custom_off_reference() -> None:
     result = assess(
         _run(
-            (Outcome.COMPLETED, 10.0),
             (Outcome.COMPLETED, 20.0),
-            (Outcome.COMPLETED, 12.0),
+            (Outcome.COMPLETED, 24.0),
         ),
         threshold=0.20,
     )
 
     assert result.verdict is Verdict.PERF_ALERT
-    assert result.reasons == ("VS_BASELINE",)
+    assert result.reasons == ("VS_CUSTOM_OFF",)
 
 
 def test_skew_over_threshold_suppresses_a_performance_alert() -> None:
     unreliable = assess(
         _run(
-            (Outcome.COMPLETED, 10.0),
             (Outcome.COMPLETED, 10.0),
             (Outcome.COMPLETED, 20.0),
             skew=100.001,
@@ -66,7 +62,6 @@ def test_skew_over_threshold_suppresses_a_performance_alert() -> None:
     )
     exact = assess(
         _run(
-            (Outcome.COMPLETED, 10.0),
             (Outcome.COMPLETED, 10.0),
             (Outcome.COMPLETED, 20.0),
             skew=100.0,
@@ -82,10 +77,8 @@ def test_all_timeouts_are_over_budget_and_infra_never_gets_performance_verdict()
     all_timeout = _run(
         (Outcome.TIMEOUT, None),
         (Outcome.TIMEOUT, None),
-        (Outcome.TIMEOUT, None),
     )
     infra = _run(
-        (Outcome.COMPLETED, 10.0),
         (Outcome.INFRA_ERROR, None),
         (Outcome.COMPLETED, 20.0),
     )
@@ -98,10 +91,8 @@ def test_reference_timeout_is_drift_but_custom_on_timeout_is_alert() -> None:
     reference_timeout = _run(
         (Outcome.TIMEOUT, None),
         (Outcome.COMPLETED, 10.0),
-        (Outcome.COMPLETED, 10.0),
     )
     on_timeout = _run(
-        (Outcome.COMPLETED, 10.0),
         (Outcome.COMPLETED, 10.0),
         (Outcome.TIMEOUT, None),
     )

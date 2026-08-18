@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from typing import Protocol
 
-from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeConfig
 from select_fuzz.domain import ExecutionStatus, NodeExecution
 from select_fuzz.execution.protocols import BarrierLike
 from select_fuzz.performance.diagnostics import DiagnosticsPort
@@ -74,15 +74,15 @@ class FormalRunner:
         diagnostics: DiagnosticsPort | None = None,
     ) -> None:
         by_role = {node.role: node for node in nodes}
-        if len(nodes) != 3 or set(by_role) != set(NodeRole):
-            raise ValueError("formal runner requires one node for every fixed role")
-        self._nodes = tuple(by_role[role] for role in NodeRole)
+        if len(nodes) != 2 or set(by_role) != set(COMPARISON_ROLES):
+            raise ValueError("formal runner requires the two comparison roles")
+        self._nodes = tuple(by_role[role] for role in COMPARISON_ROLES)
         self._core = core
         self._policy = policy
         self._diagnostics = diagnostics
 
     def run(self, frozen: FrozenCase) -> FormalRun:
-        barrier = Barrier(3)
+        barrier = Barrier(2)
         explain_sql = f"EXPLAIN ANALYZE FORMAT=TREE {frozen.sql.rstrip().rstrip(';')}"
 
         def one(node: NodeConfig, start_barrier: BarrierLike | None) -> Measurement:
@@ -151,10 +151,10 @@ class FormalRunner:
                 diagnostic_payload["diagnostics_error"] = diagnostic_error
             return self.measure(raw, frozen, self._policy, diagnostic_payload=diagnostic_payload)
 
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-perf-formal") as pool:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sf-perf-formal") as pool:
             futures = {node.role: pool.submit(one, node, barrier) for node in self._nodes}
             measurements = {role: futures[role].result() for role in futures}
-        starts = [measurements[role].started_ns for role in NodeRole]
+        starts = [measurements[role].started_ns for role in COMPARISON_ROLES]
         return FormalRun(
             measurements=measurements,
             start_skew_ms=(max(starts) - min(starts)) / 1_000_000,

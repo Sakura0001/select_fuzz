@@ -1,4 +1,4 @@
-"""Deterministic three-node materialization verification."""
+"""Deterministic two-instance materialization verification."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Protocol
 
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,12 +90,9 @@ class ScaleMaterializer:
             raise ValueError("database must not be empty")
         prepare = getattr(self._port, "prepare", None)
         prepare_all = getattr(self._port, "prepare_all", None)
-        synchronize = getattr(self._port, "synchronize", None)
         collect_evidence = getattr(self._port, "evidence", None)
         if (
-            callable(synchronize)
-            and callable(collect_evidence)
-            and (callable(prepare_all) or callable(prepare))
+            callable(collect_evidence) and (callable(prepare_all) or callable(prepare))
         ):
             if callable(prepare_all):
                 prepare_all(database, manifest)
@@ -103,27 +100,27 @@ class ScaleMaterializer:
                 if not callable(prepare):  # pragma: no cover - guarded above
                     raise AssertionError("phased materializer is missing prepare")
                 with ThreadPoolExecutor(
-                    max_workers=3, thread_name_prefix="sf-perf-prepare"
+                    max_workers=2, thread_name_prefix="sf-perf-prepare"
                 ) as pool:
                     futures = {
-                        role: pool.submit(prepare, role, database, manifest) for role in NodeRole
+                        role: pool.submit(prepare, role, database, manifest)
+                        for role in COMPARISON_ROLES
                     }
-                    for role in NodeRole:
+                    for role in COMPARISON_ROLES:
                         futures[role].result()
-            synchronize(database, manifest)
-            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-perf-evidence") as pool:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sf-perf-evidence") as pool:
                 futures = {
                     role: pool.submit(collect_evidence, role, database, manifest)
-                    for role in NodeRole
+                    for role in COMPARISON_ROLES
                 }
-                evidence = {role: futures[role].result() for role in NodeRole}
+                evidence = {role: futures[role].result() for role in COMPARISON_ROLES}
         else:
-            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-perf-setup") as pool:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sf-perf-setup") as pool:
                 futures = {
                     role: pool.submit(self._port.materialize, role, database, manifest)
-                    for role in NodeRole
+                    for role in COMPARISON_ROLES
                 }
-                evidence = {role: futures[role].result() for role in NodeRole}
+                evidence = {role: futures[role].result() for role in COMPARISON_ROLES}
         identities = {
             (
                 item.schema_digest,
@@ -134,7 +131,7 @@ class ScaleMaterializer:
         }
         if len(identities) != 1:
             raise MaterializationMismatch(
-                "three-node schema, row-count, or content evidence differs",
+                "two-instance schema, row-count, or content evidence differs",
                 database=database,
                 details={
                     "evidence_by_role": {
@@ -143,7 +140,7 @@ class ScaleMaterializer:
                             "row_counts": dict(evidence[role].row_counts),
                             "schema_digest": evidence[role].schema_digest,
                         }
-                        for role in NodeRole
+                        for role in COMPARISON_ROLES
                     }
                 },
             )

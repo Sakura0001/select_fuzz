@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 from select_fuzz.performance.materialization import (
     MaterializationEvidence,
     MaterializationMismatch,
@@ -24,14 +24,14 @@ class _Port:
         return MaterializationEvidence("schema", {"t": rows}, "content")
 
 
-def test_materializer_sends_the_exact_manifest_to_all_three_roles() -> None:
+def test_materializer_sends_the_exact_manifest_to_both_comparison_roles() -> None:
     port = _Port()
     manifest = {"rows": 100}
 
     evidence = ScaleMaterializer(port).rebuild_all("perf_1", manifest)
 
-    assert set(evidence) == set(NodeRole)
-    assert port.manifest_ids == [id(manifest)] * 3
+    assert tuple(evidence) == COMPARISON_ROLES
+    assert port.manifest_ids == [id(manifest)] * 2
 
 
 def test_materializer_rejects_role_row_count_mismatch() -> None:
@@ -57,8 +57,7 @@ def test_materializer_supports_phased_ports_without_prepare_all() -> None:
             self.calls.append(f"prepare:{role.value}:{database}:{manifest}")
 
         def synchronize(self, database: str, manifest: object) -> None:
-            assert len(self.calls) == 3
-            self.calls.append(f"sync:{database}:{manifest}")
+            raise AssertionError((database, manifest))
 
         def evidence(
             self, role: NodeRole, database: str, manifest: object
@@ -75,5 +74,8 @@ def test_materializer_supports_phased_ports_without_prepare_all() -> None:
 
     evidence = ScaleMaterializer(port).rebuild_all("perf_phased_1", {"rows": 1})
 
-    assert set(evidence) == set(NodeRole)
-    assert port.calls[3] == "sync:perf_phased_1:{'rows': 1}"
+    assert tuple(evidence) == COMPARISON_ROLES
+    assert set(port.calls[:2]) == {
+        "prepare:custom_off:perf_phased_1:{'rows': 1}",
+        "prepare:custom_on:perf_phased_1:{'rows': 1}",
+    }

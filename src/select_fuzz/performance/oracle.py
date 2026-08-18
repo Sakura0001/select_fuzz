@@ -6,7 +6,7 @@ from select_fuzz.config import NodeRole
 from select_fuzz.performance.models import Assessment, FormalRun, Outcome, Verdict
 
 
-REFERENCE_ROLES = (NodeRole.BASELINE, NodeRole.CUSTOM_OFF)
+REFERENCE_ROLE = NodeRole.CUSTOM_OFF
 
 
 def assess(
@@ -21,7 +21,7 @@ def assess(
         return Assessment(Verdict.INFRA_ERROR)
     if all(item.outcome is Outcome.TIMEOUT for item in measurements.values()):
         return Assessment(Verdict.OVER_BUDGET)
-    if any(measurements[role].outcome is Outcome.TIMEOUT for role in REFERENCE_ROLES):
+    if measurements[REFERENCE_ROLE].outcome is Outcome.TIMEOUT:
         return Assessment(Verdict.CALIBRATION_DRIFT)
     if run.start_skew_ms > max_skew_ms:
         return Assessment(Verdict.TIMING_UNRELIABLE)
@@ -32,17 +32,14 @@ def assess(
         return Assessment(Verdict.EXECUTION_ERROR)
     if custom_on.root_end_ms is None:  # protected by Measurement invariant
         return Assessment(Verdict.EXECUTION_ERROR)
-    comparisons = (
-        (NodeRole.CUSTOM_OFF, "VS_CUSTOM_OFF"),
-        (NodeRole.BASELINE, "VS_BASELINE"),
-    )
-    reasons = tuple(
-        label
-        for role, label in comparisons
-        if measurements[role].root_end_ms is not None
-        and custom_on.root_end_ms >= measurements[role].root_end_ms * (1 + threshold)  # type: ignore[operator]
+    reference = measurements[REFERENCE_ROLE]
+    reasons = (
+        ("VS_CUSTOM_OFF",)
+        if reference.root_end_ms is not None
+        and custom_on.root_end_ms >= reference.root_end_ms * (1 + threshold)
+        else ()
     )
     return Assessment(Verdict.PERF_ALERT if reasons else Verdict.PASS, reasons)
 
 
-__all__ = ["REFERENCE_ROLES", "assess"]
+__all__ = ["REFERENCE_ROLE", "assess"]

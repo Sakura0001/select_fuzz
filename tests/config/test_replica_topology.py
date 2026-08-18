@@ -28,7 +28,100 @@ def _topology() -> list[dict[str, object]]:
     ]
 
 
-def test_loads_six_endpoints_and_relative_replica_parameter_file(tmp_path: Path) -> None:
+def _comparison_nodes() -> list[dict[str, object]]:
+    return [
+        {
+            "role": "custom_off",
+            "host": "127.0.0.1",
+            "port": 3307,
+            "username_env": "SELECT_FUZZ_MYSQL_USER",
+            "password_env": "SELECT_FUZZ_MYSQL_PASSWORD",
+        },
+        {
+            "role": "custom_on",
+            "host": "127.0.0.1",
+            "port": 3308,
+            "username_env": "SELECT_FUZZ_MYSQL_USER",
+            "password_env": "SELECT_FUZZ_MYSQL_PASSWORD",
+        },
+    ]
+
+
+@pytest.mark.parametrize("mode", ["correctness", "performance"])
+def test_comparison_modes_load_exactly_two_flat_endpoints(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    config_path = tmp_path / "comparison.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"mode": mode, "nodes": _comparison_nodes()}),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert [node.role for node in config.comparison_nodes] == [
+        NodeRole.CUSTOM_OFF,
+        NodeRole.CUSTOM_ON,
+    ]
+    assert [node.port for node in config.comparison_nodes] == [3307, 3308]
+
+
+def test_comparison_mode_rejects_old_six_endpoint_topology(tmp_path: Path) -> None:
+    config_path = tmp_path / "old-comparison.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"mode": "correctness", "nodes": _topology()}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ConfigLoadError,
+        match="对比模式必须配置 custom_off 和 custom_on 两个单实例 endpoint",
+    ):
+        load_config(config_path)
+
+
+def test_comparison_mode_rejects_duplicate_endpoint(tmp_path: Path) -> None:
+    nodes = _comparison_nodes()
+    nodes[1]["port"] = 3307
+    config_path = tmp_path / "duplicate-comparison.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"mode": "performance", "nodes": nodes}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ConfigLoadError,
+        match="custom_off 和 custom_on 必须使用不同的 host/port",
+    ):
+        load_config(config_path)
+
+
+def test_comparison_mode_rejects_replica_parameter_file_before_reading_it(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "parameters-comparison.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "mode": "performance",
+                "nodes": _comparison_nodes(),
+                "replica_parameters_file": "does-not-exist.yaml",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ConfigLoadError,
+        match="两实例对比模式不使用备库参数文件",
+    ):
+        load_config(config_path)
+
+
+def test_fuzz_loads_six_endpoints_and_relative_replica_parameter_file(
+    tmp_path: Path,
+) -> None:
     parameter_path = tmp_path / "replica-parameters.yaml"
     parameter_path.write_text(
         yaml.safe_dump(
@@ -48,7 +141,7 @@ def test_loads_six_endpoints_and_relative_replica_parameter_file(tmp_path: Path)
     config_path.write_text(
         yaml.safe_dump(
             {
-                "mode": "correctness",
+                "mode": "fuzz",
                 "nodes": _topology(),
                 "replica_parameters_file": parameter_path.name,
             },
@@ -67,26 +160,6 @@ def test_loads_six_endpoints_and_relative_replica_parameter_file(tmp_path: Path)
     }
     assert len(config.replica_parameters_sha256) == 64
     assert config.replica_sync_timeout_seconds == 10
-
-
-def test_rejects_duplicate_endpoint_across_primary_and_replica(tmp_path: Path) -> None:
-    topology = _topology()
-    topology[1]["replica"] = _endpoint(33061)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump({"nodes": topology}), encoding="utf-8")
-
-    with pytest.raises(ConfigLoadError, match="Invalid configuration"):
-        load_config(config_path)
-
-
-def test_explicit_primary_and_replica_must_be_distinct(tmp_path: Path) -> None:
-    topology = _topology()
-    topology[0]["replica"] = _endpoint(33061)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump({"nodes": topology}), encoding="utf-8")
-
-    with pytest.raises(ConfigLoadError, match="Invalid configuration"):
-        load_config(config_path)
 
 
 def test_fuzz_allows_one_routing_proxy_for_primary_and_replica(tmp_path: Path) -> None:
@@ -162,9 +235,10 @@ def test_replica_parameter_file_requires_exact_roles_and_scalar_values(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(
-            {
-                "nodes": _topology(),
-                "replica_parameters_file": parameter_path.name,
+                {
+                    "mode": "fuzz",
+                    "nodes": _topology(),
+                    "replica_parameters_file": parameter_path.name,
             }
         ),
         encoding="utf-8",

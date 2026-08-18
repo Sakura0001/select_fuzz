@@ -41,15 +41,21 @@ def _node(role: str, port: int) -> dict[str, object]:
     }
 
 
-def test_loader_rejects_legacy_single_endpoint_topology(tmp_path: Path) -> None:
-    data = _config_data()
-    data["nodes"] = [
-        {"role": "baseline", "host": "127.0.0.1", "port": 3306},
-        {"role": "custom_off", "host": "127.0.0.1", "port": 3307},
-        {"role": "custom_on", "host": "127.0.0.1", "port": 3308},
-    ]
+def _comparison_node(role: str, port: int) -> dict[str, object]:
+    return {
+        "role": role,
+        "host": "127.0.0.1",
+        "port": port,
+        "username_env": "SELECT_FUZZ_MYSQL_USER",
+        "password_env": "SELECT_FUZZ_MYSQL_PASSWORD",
+    }
 
-    with pytest.raises(ConfigLoadError, match="distinct primary and replica"):
+
+def test_loader_rejects_nested_comparison_topology(tmp_path: Path) -> None:
+    data = _config_data()
+    data["nodes"] = [_node("custom_off", 3307), _node("custom_on", 3308)]
+
+    with pytest.raises(ConfigLoadError, match="不接受 primary/replica 嵌套配置"):
         load_config(_write_config(tmp_path, data))
 
 
@@ -57,11 +63,21 @@ def _config_data(**correctness: object) -> dict[str, object]:
     return {
         "mode": "correctness",
         "nodes": [
+            _comparison_node("custom_off", 3307),
+            _comparison_node("custom_on", 3308),
+        ],
+        "correctness": correctness,
+    }
+
+
+def _fuzz_config_data() -> dict[str, object]:
+    return {
+        "mode": "fuzz",
+        "nodes": [
             _node("baseline", 3306),
             _node("custom_off", 3307),
             _node("custom_on", 3308),
         ],
-        "correctness": correctness,
     }
 
 
@@ -112,8 +128,7 @@ def test_cli_overrides_follow_the_selected_mode(tmp_path: Path) -> None:
 
 
 def test_fuzz_mode_loads_concurrency_and_cli_compatibility_overrides(tmp_path: Path) -> None:
-    data = _config_data()
-    data["mode"] = "fuzz"
+    data = _fuzz_config_data()
     data["fuzz"] = {
         "databases": 2,
         "writer_threads_per_database": 3,
@@ -180,8 +195,7 @@ def test_fuzz_compatibility_backoff_defaults_bounds_and_cli_overrides(
             compatibility_error_backoff_max_seconds=0.25,
         )
 
-    data = _config_data()
-    data["mode"] = "fuzz"
+    data = _fuzz_config_data()
     config = load_config(
         _write_config(tmp_path, data),
         cli={
@@ -196,8 +210,7 @@ def test_fuzz_compatibility_backoff_defaults_bounds_and_cli_overrides(
         compatibility_error_backoff_max_seconds=0,
     ).compatibility_error_backoff_initial_seconds == 0
 
-    data = _config_data()
-    data["mode"] = "fuzz"
+    data = _fuzz_config_data()
     data["fuzz"] = {"compatibility_error_backoff_initial_seconds": True}
     with pytest.raises(ConfigLoadError):
         load_config(_write_config(tmp_path, data))
@@ -250,7 +263,10 @@ def test_fuzz_initial_rows_accepts_twenty_but_rejects_nineteen() -> None:
 
 def test_fuzz_rejects_multiple_coordinator_workers(tmp_path: Path) -> None:
     with pytest.raises(ConfigLoadError, match="one coordinator"):
-        load_config(_write_config(tmp_path, _config_data()), cli={"mode": "fuzz", "workers": 2})
+        load_config(
+            _write_config(tmp_path, _fuzz_config_data()),
+            cli={"mode": "fuzz", "workers": 2},
+        )
 
 
 def test_none_cli_mode_means_no_override(tmp_path: Path) -> None:
@@ -276,6 +292,7 @@ def test_performance_workers_must_equal_one() -> None:
 
 def test_fuzz_ranges_and_thread_sql_log_switch_are_strict() -> None:
     config = AppConfig(
+        mode=RunMode.FUZZ,
         nodes=(
             NodeConfig(role=NodeRole.BASELINE, host="127.0.0.1", port=3306),
             NodeConfig(role=NodeRole.CUSTOM_OFF, host="127.0.0.1", port=3307),
@@ -343,18 +360,13 @@ def test_correctness_row_range_is_configurable_and_ordered(tmp_path: Path) -> No
             _node("custom_off", 3307),
             _node("custom_off", 3308),
         ],
-        [
-            _node("baseline", 3306),
-            _node("custom_off", 3306),
-            _node("custom_on", 3308),
-        ],
     ],
 )
-def test_configuration_requires_three_roles_and_unique_endpoints(
+def test_fuzz_configuration_requires_three_roles(
     nodes: list[dict[str, object]],
 ) -> None:
     with pytest.raises(ValidationError):
-        AppConfig(nodes=nodes)
+        AppConfig(mode=RunMode.FUZZ, nodes=nodes)
 
 
 def test_models_forbid_unknown_fields_and_invalid_environment_names() -> None:
@@ -517,7 +529,10 @@ def test_example_configuration_loads_and_contains_no_password_literal() -> None:
 
     config = load_config(example)
 
-    assert {node.role for node in config.nodes} == set(NodeRole)
+    assert [node.role for node in config.comparison_nodes] == [
+        NodeRole.CUSTOM_OFF,
+        NodeRole.CUSTOM_ON,
+    ]
     document = example.read_text(encoding="utf-8")
     assert "password:" not in document
     assert "password_env:" in document

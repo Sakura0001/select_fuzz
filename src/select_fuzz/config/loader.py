@@ -100,7 +100,7 @@ def _validation_summary(error: ValidationError) -> str:
     issues = []
     for item in error.errors(include_url=False, include_context=False, include_input=False):
         location = ".".join(str(part) for part in item["loc"]) or "configuration"
-        issues.append(f"{location} [{item['type']}]")
+        issues.append(f"{location} [{item['type']}]: {item['msg']}")
     return "Invalid configuration: " + "; ".join(issues)
 
 
@@ -222,7 +222,18 @@ def load_config(path: str | Path, *, cli: Mapping[str, object] | None = None) ->
     raw: dict[str, Any] = deepcopy(dict(document))
     if "replica_parameters" in raw:
         raise ConfigLoadError("replica parameters must be supplied through replica_parameters_file")
+    if cli:
+        _apply_cli_overrides(raw, cli)
     parameter_reference = raw.get("replica_parameters_file")
+    try:
+        effective_mode = RunMode(raw.get("mode", RunMode.CORRECTNESS.value))
+    except (TypeError, ValueError):
+        effective_mode = None
+    if (
+        effective_mode in {RunMode.CORRECTNESS, RunMode.PERFORMANCE}
+        and parameter_reference is not None
+    ):
+        raise ConfigLoadError("两实例对比模式不使用备库参数文件")
     if parameter_reference is not None:
         if not isinstance(parameter_reference, str) or not parameter_reference.strip():
             raise ConfigLoadError("replica_parameters_file must be a nonempty path")
@@ -238,8 +249,6 @@ def load_config(path: str | Path, *, cli: Mapping[str, object] | None = None) ->
             raise ConfigLoadError("replica parameters root must be a mapping")
         raw["replica_parameters_file"] = parameter_path
         raw["replica_parameters"] = deepcopy(dict(parameter_document))
-    if cli:
-        _apply_cli_overrides(raw, cli)
     validation_message: str | None = None
     try:
         config = AppConfig.model_validate(raw)
@@ -249,12 +258,6 @@ def load_config(path: str | Path, *, cli: Mapping[str, object] | None = None) ->
         if parameter_reference is not None and "replica_parameters" in validation_message:
             raise ConfigLoadError(f"Invalid replica parameters: {validation_message}")
         raise ConfigLoadError(validation_message)
-    if config.mode is not RunMode.FUZZ and any(
-        node.legacy_single_endpoint for node in config.nodes
-    ):
-        raise ConfigLoadError(
-            "Configuration must define distinct primary and replica endpoints for all three roles"
-        )
     return config
 
 

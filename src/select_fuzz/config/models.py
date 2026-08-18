@@ -47,6 +47,13 @@ class NodeRole(StrEnum):
     CUSTOM_ON = "custom_on"
 
 
+COMPARISON_ROLES: tuple[NodeRole, NodeRole] = (
+    NodeRole.CUSTOM_OFF,
+    NodeRole.CUSTOM_ON,
+)
+COMPARISON_ROLE_SET = frozenset(COMPARISON_ROLES)
+
+
 _ENV_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
 
 
@@ -394,35 +401,34 @@ class AppConfig(StrictModel):
 
     @model_validator(mode="after")
     def require_fixed_unique_topology(self) -> Self:
-        if len(self.nodes) != len(NodeRole):
-            raise ValueError("nodes must contain exactly three entries")
-        roles = [node.role for node in self.nodes]
-        if set(roles) != set(NodeRole) or len(roles) != len(set(roles)):
-            raise ValueError("nodes must contain baseline, custom_off, and custom_on exactly once")
-
         # Fuzz mode deliberately targets one logical cluster through a routing
         # proxy.  The proxy can expose the same host/port for both the primary
         # and replica connection, and the other two fixed role entries are not
-        # used by the fuzz runner.  Differential modes retain the strict
-        # six-endpoint isolation contract below.
+        # used by the fuzz runner.
         if self.mode is RunMode.FUZZ:
+            if len(self.nodes) != len(NodeRole):
+                raise ValueError("fuzz nodes must contain exactly three entries")
+            roles = [node.role for node in self.nodes]
+            if set(roles) != set(NodeRole) or len(roles) != len(set(roles)):
+                raise ValueError(
+                    "fuzz nodes must contain baseline, custom_off, and custom_on exactly once"
+                )
             return self
 
-        if any(
-            not node.legacy_single_endpoint
-            and (node.primary.host.casefold(), node.primary.port)
-            == (node.replica.host.casefold(), node.replica.port)
-            for node in self.nodes
-        ):
-            raise ValueError("explicit primary and replica endpoints must differ")
-        endpoints_by_role = {
-            (node.role, endpoint.host.casefold(), endpoint.port)
-            for node in self.nodes
-            for endpoint in (node.primary, node.replica)
-        }
-        endpoints = [(host, port) for _role, host, port in endpoints_by_role]
-        if len(endpoints) != len(set(endpoints)):
-            raise ValueError("node host/port endpoints must be unique")
+        comparison_roles = tuple(node.role for node in self.nodes)
+        if len(self.nodes) != 2 or frozenset(comparison_roles) != COMPARISON_ROLE_SET:
+            raise ValueError(
+                "对比模式必须配置 custom_off 和 custom_on 两个单实例 endpoint"
+            )
+        if any(not node.legacy_single_endpoint for node in self.nodes):
+            raise ValueError("两实例对比模式不接受 primary/replica 嵌套配置")
+        endpoints = tuple(
+            (node.primary.host.casefold(), node.primary.port) for node in self.nodes
+        )
+        if len(set(endpoints)) != 2:
+            raise ValueError("custom_off 和 custom_on 必须使用不同的 host/port")
+        if self.replica_parameters_file is not None:
+            raise ValueError("两实例对比模式不使用备库参数文件")
         return self
 
     def node_for(self, role: NodeRole) -> NodeConfig:
@@ -435,11 +441,20 @@ class AppConfig(StrictModel):
 
     @property
     def primary_nodes(self) -> tuple[NodeConfig, ...]:
-        return tuple(self.node_for(role) for role in NodeRole)
+        roles = tuple(NodeRole) if self.mode is RunMode.FUZZ else COMPARISON_ROLES
+        return tuple(self.node_for(role) for role in roles)
 
     @property
     def replica_nodes(self) -> tuple[NodeConfig, ...]:
-        return tuple(self.replica_for(role) for role in NodeRole)
+        roles = tuple(NodeRole) if self.mode is RunMode.FUZZ else COMPARISON_ROLES
+        return tuple(self.replica_for(role) for role in roles)
+
+    @property
+    def comparison_nodes(self) -> tuple[NodeConfig, NodeConfig]:
+        if self.mode not in {RunMode.CORRECTNESS, RunMode.PERFORMANCE}:
+            raise ValueError("comparison_nodes 仅适用于 correctness/performance")
+        nodes = tuple(self.node_for(role) for role in COMPARISON_ROLES)
+        return nodes  # type: ignore[return-value]
 
     def replica_session_variables(self, role: NodeRole) -> dict[str, SessionVariableValue]:
         return dict(self.replica_parameters.replicas[role].session_variables)

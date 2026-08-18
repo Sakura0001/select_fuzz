@@ -3,6 +3,7 @@
 from select_fuzz.config.loader import ConfigLoadError, load_config, resolve_credentials
 from select_fuzz.config.models import (
     AppConfig,
+    COMPARISON_ROLES,
     CorrectnessConfig,
     FuzzConfig,
     MAX_FUZZ_READER_WORKERS,
@@ -23,6 +24,7 @@ from select_fuzz.config.models import (
 
 __all__ = [
     "AppConfig",
+    "COMPARISON_ROLES",
     "ConfigLoadError",
     "CorrectnessConfig",
     "FuzzConfig",

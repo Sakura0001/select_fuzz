@@ -1,115 +1,41 @@
 # select-fuzz 默认参数配置。
 # 建议复制为 config/local.yaml 后修改；local.yaml 已被 Git 忽略，不要在配置中直接写用户名或密码。
 
-# 运行模式：correctness=三节点结果差分；performance=三节点性能对比；fuzz=单集群并发读写压力。默认 correctness。
+# 运行模式：correctness=两实例结果差分；performance=两实例性能对比；fuzz=单集群主备并发读写压力。默认 correctness。
 mode: correctness
 
 # 是否把每条已执行 SQL 追加到 artifacts/sql/worker-NNN.sql。默认关闭，长时间运行时可减少磁盘占用。
 full_thread_sql_log: false
 
-# 副本 SESSION 参数文件。相对路径以本文件所在目录为基准；null 表示使用三个角色的空参数默认值。
+# 两实例对比模式不使用副本 SESSION 参数文件，必须保持为 null。
+# fuzz 模式如需备库 SESSION 参数，请改用 config/intranet-fuzz.example.yaml。
 replica_parameters_file: null
 
-# setup 完成后等待副本追平的最长秒数；范围 (0, 300]，默认 10 秒。
+# 仅 fuzz 主备拓扑使用；两实例 correctness/performance 不等待复制。
 replica_sync_timeout_seconds: 10
 
-# 固定三角色拓扑；correctness/performance 必须使用 6 个互不重复的 endpoint。
-# fuzz 模式只使用 fuzz.target_role，主库和备库可以配置为同一个负载均衡代理入口；
-# 可直接参考 config/intranet-fuzz.example.yaml。
+# correctness/performance 固定使用两个独立、可写的 MySQL 实例。
+# custom_off 由服务端预先关闭 PQ，custom_on 由服务端预先开启 PQ；程序不修改 PQ 开关。
+# 每个实例独立完成建库、写入和 SELECT，不要求主备复制。fuzz 请使用 config/intranet-fuzz.example.yaml。
 nodes:
-  # baseline：基线 MySQL，用于 EXPLAIN 准入和结果基准。
-  - role: baseline
-    # baseline 主库：执行建库、建表和数据准备。
-    primary:
-      # MySQL 主机名或 IP；必填。
-      host: 127.0.0.1
-      # MySQL TCP 端口；范围 1-65535，endpoint 默认值为 3306。
-      port: 3306
-      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
-      username_env: SELECT_FUZZ_MYSQL_USER
-      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
-      password_env: SELECT_FUZZ_MYSQL_PASSWORD
-      # 可选角色探针 SQL；null 表示不探测。与 role_probe_expected 必须同时设置或同时为 null。
-      role_probe_sql: null
-      # 角色探针期望返回的标量字符串；默认 null。
-      role_probe_expected: null
-    # baseline 副本：执行 SELECT 并作为差分结果基准，不能与对应主库使用同一 host/port。
-    replica:
-      # MySQL 主机名或 IP；必填。
-      host: 127.0.0.1
-      # MySQL TCP 端口；范围 1-65535。
-      port: 3316
-      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
-      username_env: SELECT_FUZZ_MYSQL_USER
-      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
-      password_env: SELECT_FUZZ_MYSQL_PASSWORD
-      # 可选角色探针 SQL；与 role_probe_expected 成对设置。
-      role_probe_sql: null
-      # 角色探针期望返回值；默认 null。
-      role_probe_expected: null
-
-  # custom_off：待测 MySQL 的关闭目标优化/特性配置角色。
+  # custom_off：关闭 PQ 的唯一基准实例。
   - role: custom_off
-    # custom_off 主库：执行建库、建表和数据准备。
-    primary:
-      # MySQL 主机名或 IP；必填。
-      host: 127.0.0.1
-      # MySQL TCP 端口；范围 1-65535。
-      port: 3307
-      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
-      username_env: SELECT_FUZZ_MYSQL_USER
-      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
-      password_env: SELECT_FUZZ_MYSQL_PASSWORD
-      # 可选角色探针 SQL；与 role_probe_expected 成对设置。
-      role_probe_sql: null
-      # 角色探针期望返回值；默认 null。
-      role_probe_expected: null
-    # custom_off 副本：使用 replica 参数文件中的 custom_off SESSION 参数执行查询。
-    replica:
-      # MySQL 主机名或 IP；必填。
-      host: 127.0.0.1
-      # MySQL TCP 端口；范围 1-65535。
-      port: 3317
-      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
-      username_env: SELECT_FUZZ_MYSQL_USER
-      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
-      password_env: SELECT_FUZZ_MYSQL_PASSWORD
-      # 可选角色探针 SQL；与 role_probe_expected 成对设置。
-      role_probe_sql: null
-      # 角色探针期望返回值；默认 null。
-      role_probe_expected: null
+    host: 127.0.0.1
+    port: 3307
+    username_env: SELECT_FUZZ_MYSQL_USER
+    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    # 可选角色探针 SQL；null 表示不探测。与 role_probe_expected 必须同时设置或同时为 null。
+    role_probe_sql: null
+    role_probe_expected: null
 
-  # custom_on：待测 MySQL 的开启目标优化/特性配置角色。
+  # custom_on：开启 PQ 的候选实例。
   - role: custom_on
-    # custom_on 主库：执行建库、建表和数据准备。
-    primary:
-      # MySQL 主机名或 IP；必填。
-      host: 127.0.0.1
-      # MySQL TCP 端口；范围 1-65535。
-      port: 3308
-      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
-      username_env: SELECT_FUZZ_MYSQL_USER
-      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
-      password_env: SELECT_FUZZ_MYSQL_PASSWORD
-      # 可选角色探针 SQL；与 role_probe_expected 成对设置。
-      role_probe_sql: null
-      # 角色探针期望返回值；默认 null。
-      role_probe_expected: null
-    # custom_on 副本：使用 replica 参数文件中的 custom_on SESSION 参数执行查询。
-    # correctness/performance 中必须与主库不同；fuzz 模式可与主库共享代理入口。
-    replica:
-      # MySQL 主机名或 IP；必填。
-      host: 127.0.0.1
-      # MySQL TCP 端口；范围 1-65535。
-      port: 3318
-      # 从该环境变量读取用户名；默认 SELECT_FUZZ_MYSQL_USER。
-      username_env: SELECT_FUZZ_MYSQL_USER
-      # 从该环境变量读取密码；默认 SELECT_FUZZ_MYSQL_PASSWORD。
-      password_env: SELECT_FUZZ_MYSQL_PASSWORD
-      # 可选角色探针 SQL；与 role_probe_expected 成对设置。
-      role_probe_sql: null
-      # 角色探针期望返回值；默认 null。
-      role_probe_expected: null
+    host: 127.0.0.1
+    port: 3308
+    username_env: SELECT_FUZZ_MYSQL_USER
+    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    role_probe_sql: null
+    role_probe_expected: null
 
 # correctness：GrammarQueryGenerator 驱动的 SELECT 结果差分模式。
 correctness:
@@ -143,10 +69,10 @@ correctness:
   query_grammar_path: null
   # 选择严格类型兼容表达式的概率百分比；范围 0-100，默认 80。
   grammar_compatible_type_percent: 80
-  # baseline EXPLAIN 准入超时秒数；范围 (0, 300]，默认 10 秒。
+  # custom_off EXPLAIN 准入超时秒数；范围 (0, 300]，默认 10 秒。
   explain_timeout_seconds: 10
 
-# performance：独立的性能 fuzz template、校准和三节点性能判定模式。
+# performance：独立的性能 fuzz template、校准和两实例性能判定模式。
 performance:
   # 性能模式固定单 worker；只能为 1。
   workers: 1
@@ -190,7 +116,7 @@ performance:
   materialization_timeout_seconds: 300
   # 性能退化判定阈值；0.20 表示慢 20% 及以上，最小 0，默认 0.20。
   regression_threshold: 0.20
-  # 三节点并发启动允许的最大偏差毫秒数；最小 0，默认 100 ms。
+  # 两实例并发启动允许的最大偏差毫秒数；最小 0，默认 100 ms。
   max_start_skew_ms: 100
 
 # fuzz：在一个指定角色的主备集群上，为多个独立数据库并发执行读写压力。

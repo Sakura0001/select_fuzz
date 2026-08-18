@@ -38,6 +38,8 @@ RUN set -eux; \
     "$BUNDLE_PYTHON" -m pip install \
       --no-cache-dir \
       --only-binary=:all: \
+      --timeout 120 \
+      --retries 10 \
       --target "$site" \
       'fastapi>=0.115,<1' \
       'mysql-connector-python>=9.0,<10' \

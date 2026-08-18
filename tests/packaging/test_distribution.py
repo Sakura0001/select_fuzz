@@ -180,3 +180,12 @@ def test_centos_bundle_copies_comparison_and_fuzz_templates() -> None:
 
     assert 'cp /src/config/example.yaml "$bundle/config/"' in dockerfile
     assert 'cp /src/config/intranet-fuzz.example.yaml "$bundle/config/"' in dockerfile
+
+
+def test_centos_bundle_tolerates_slow_package_index_downloads() -> None:
+    dockerfile = (PROJECT_ROOT / "packaging" / "centos7" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--timeout 120" in dockerfile
+    assert "--retries 10" in dockerfile

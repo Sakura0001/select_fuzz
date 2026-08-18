@@ -18,7 +18,7 @@ from select_fuzz.artifacts import (
     PassRecord,
     node_execution_to_artifact,
 )
-from select_fuzz.config import AppConfig, NodeRole
+from select_fuzz.config import AppConfig, COMPARISON_ROLES, NodeRole
 from select_fuzz.domain import (
     ExecutionStatus,
     NodeExecution,
@@ -29,6 +29,7 @@ from select_fuzz.domain import (
 )
 from select_fuzz.execution import (
     BaselineExplainResult,
+    ComparisonCoordinator,
     DatabaseNameFactory,
     MySQLConnectorFactory,
     MySQLSetupRunner,
@@ -38,11 +39,8 @@ from select_fuzz.execution import (
     PreparedRound,
     PrepareStatus,
     QueryLimits,
-    ReplicationBarrier,
+    PairMutationCoordinator,
     SetupNodeResult,
-    TriadCoordinator,
-    TriadMutationCoordinator,
-    with_replication_marker,
 )
 from select_fuzz.generation.catalog import FeatureCatalog, FeatureSpec
 from select_fuzz.generation.catalog_schema import REVIEWED_VARIANT_IDS
@@ -68,7 +66,7 @@ from select_fuzz.oracle import (
     OracleVerdict,
     QueryErrorDisposition,
     analyze_query_errors,
-    compare_three_nodes,
+    compare_two_nodes,
 )
 from select_fuzz.service import (
     CorrectnessRunService,
@@ -98,7 +96,7 @@ def _production_schema_targets(
     if replica_mode:
         allowed_profiles -= {SchemaProfile.TEMPORARY_INNODB.value}
     targets: list[FeatureSpec] = []
-    for target in catalog.signature_targets(version=(8, 0, 41), profiles=allowed_profiles):
+    for target in catalog.signature_targets(version=(8, 0, 22), profiles=allowed_profiles):
         compatible_profiles = target.compatible_profiles & allowed_profiles
         if compatible_profiles:
             targets.append(replace(target, compatible_profiles=compatible_profiles))
@@ -224,10 +222,10 @@ class MutationCoordinatorLike(Protocol):
 
 
 class ProductionCoordinatorAdapter:
-    """Widen the engine port while preserving the concrete triad type boundary."""
+    """Widen the engine port while preserving the concrete pair type boundary."""
 
-    def __init__(self, triad: TriadCoordinator) -> None:
-        self._triad = triad
+    def __init__(self, comparison: ComparisonCoordinator) -> None:
+        self._comparison = comparison
 
     def prepare_until_recovered(
         self,
@@ -236,7 +234,7 @@ class ProductionCoordinatorAdapter:
         database: str,
         should_stop: Callable[[], bool],
     ) -> PreparedRound:
-        return self._triad.prepare_until_recovered(
+        return self._comparison.prepare_until_recovered(
             bundle,
             database=database,
             should_stop=should_stop,
@@ -245,7 +243,7 @@ class ProductionCoordinatorAdapter:
     def execute(self, prepared: PreparedLike, sql: str, limits: QueryLimits) -> ExecutionBatchLike:
         if not isinstance(prepared, PreparedRound):
             raise TypeError("production coordinator requires PreparedRound")
-        return self._triad.execute(prepared, sql, limits)
+        return self._comparison.execute(prepared, sql, limits)
 
     def explain_baseline(
         self,
@@ -255,7 +253,7 @@ class ProductionCoordinatorAdapter:
     ) -> BaselineExplainResult:
         if not isinstance(prepared, PreparedRound):
             raise TypeError("production coordinator requires PreparedRound")
-        return self._triad.explain_baseline(prepared, sql, limits)
+        return self._comparison.explain_baseline(prepared, sql, limits)
 
 
 class CoverageLike(Protocol):
@@ -473,8 +471,6 @@ class GeneratedRoundSource:
             rows_per_table=rows_per_table,
             scenario=scenario,
         )
-        if self._replica_mode:
-            bundle = with_replication_marker(bundle)  # type: ignore[assignment]
         database = self._names.new(
             mode="correctness",
             worker=context.worker_id,
@@ -647,20 +643,6 @@ def _query_execution_to_log(execution: NodeExecution) -> dict[str, object]:
     }
 
 
-def _replication_observations(result: object | None) -> dict[str, object]:
-    observations = getattr(result, "observations", None)
-    if not isinstance(observations, Mapping):
-        return {}
-    encoded: dict[str, object] = {}
-    for role in NodeRole:
-        observation = observations.get(role)
-        encoded[role.value] = {
-            "error_type": getattr(observation, "error_type", None),
-            "observed_sequence": getattr(observation, "observed_sequence", None),
-        }
-    return encoded
-
-
 def _execution_error_artifact(execution: NodeExecution) -> dict[str, object] | None:
     error = execution.error
     if error is None:
@@ -690,7 +672,7 @@ def _mutation_step_artifacts(
                         "error": _execution_error_artifact(outcomes[role]),
                         "status": outcomes[role].status.value,
                     }
-                    for role in NodeRole
+                    for role in COMPARISON_ROLES
                 },
             }
         )
@@ -698,7 +680,7 @@ def _mutation_step_artifacts(
 
 
 def _has_uniform_runtime_error(executions: tuple[NodeExecution, ...]) -> bool:
-    if len(executions) != len(NodeRole):
+    if len(executions) != len(COMPARISON_ROLES):
         return False
     if any(
         execution.status is not ExecutionStatus.ERROR or execution.error is None
@@ -729,8 +711,8 @@ class CorrectnessRoundEngine:
         replica_parameters_sha256: str | None = None,
         explain_timeout_seconds: float = 10.0,
     ) -> None:
-        if set(configuration_fingerprints) != set(NodeRole):
-            raise ValueError("configuration_fingerprints require all three roles")
+        if set(configuration_fingerprints) != set(COMPARISON_ROLES):
+            raise ValueError("configuration_fingerprints require custom_off and custom_on")
         self._source = source
         self._coordinator = coordinator
         self._artifacts = artifacts
@@ -796,10 +778,7 @@ class CorrectnessRoundEngine:
                 },
             )
             try:
-                if prepared.status in {
-                    PrepareStatus.SETUP_MISMATCH,
-                    PrepareStatus.REPLICA_SYNC_TIMEOUT,
-                }:
+                if prepared.status is PrepareStatus.SETUP_MISMATCH:
                     query = materialized.queries[0] if materialized.queries else None
                     case_id = deterministic_id(
                         "case",
@@ -824,7 +803,7 @@ class CorrectnessRoundEngine:
                                     ),
                                     "status": record.results[role].status.value,
                                 }
-                                for role in NodeRole
+                                for role in COMPARISON_ROLES
                             },
                         }
                         for record in getattr(prepared, "setup_statement_records", ())
@@ -834,7 +813,7 @@ class CorrectnessRoundEngine:
                             case_id=case_id,
                             run_id=context.request.run_id,
                             mode="correctness",
-                            databases={role: prepared.database for role in NodeRole},
+                            databases={role: prepared.database for role in COMPARISON_ROLES},
                             seeds={
                                 "data": materialized.data_seed,
                                 "query": (context.round_seed if query is None else query.seed),
@@ -852,29 +831,20 @@ class CorrectnessRoundEngine:
                             },
                             payload_sha256=materialized.bundle.payload_sha256,
                             original_verdict=prepared.status.value,
-                            first_difference=(
-                                {
-                                    "category": "setup",
-                                    "status_by_role": {
-                                        role.value: results[role]["status"] for role in NodeRole
-                                    },
-                                    "failing_sql": failing_sql,
-                                    "statement_records": statement_records,
-                                }
-                                if prepared.status is PrepareStatus.SETUP_MISMATCH
-                                else {
-                                    "category": "replication",
-                                    "required_sequence": 0,
-                                    "observations": _replication_observations(
-                                        getattr(prepared, "replication_result", None)
-                                    ),
-                                }
-                            ),
+                            first_difference={
+                                "category": "setup",
+                                "status_by_role": {
+                                    role.value: results[role]["status"]
+                                    for role in COMPARISON_ROLES
+                                },
+                                "failing_sql": failing_sql,
+                                "statement_records": statement_records,
+                            },
                             statistics={
                                 role.value: {
                                     "status": results[role]["status"],
                                 }
-                                for role in NodeRole
+                                for role in COMPARISON_ROLES
                             },
                             configuration_fingerprints=self._fingerprints,
                             results=results,
@@ -890,11 +860,7 @@ class CorrectnessRoundEngine:
                 0,
                 (
                     1
-                    if prepared.status
-                    in {
-                        PrepareStatus.SETUP_MISMATCH,
-                        PrepareStatus.REPLICA_SYNC_TIMEOUT,
-                    }
+                    if prepared.status is PrepareStatus.SETUP_MISMATCH
                     else 0
                 ),
                 1 if prepared.status is PrepareStatus.REJECTED_GENERATION else 0,
@@ -1080,7 +1046,7 @@ class CorrectnessRoundEngine:
                     executions_by_role = {execution.role: execution for execution in executions}
                     nodes = {
                         role.value: _query_execution_to_log(executions_by_role[role])
-                        for role in NodeRole
+                        for role in COMPARISON_ROLES
                     }
                     has_infra_error = any(
                         execution.status is ExecutionStatus.INFRA_ERROR for execution in executions
@@ -1121,7 +1087,7 @@ class CorrectnessRoundEngine:
                             break
                     delay = min(30.0, delay * 2)
                     attempt_number += 1
-                # A successful triad dispatch that already returned must still
+                # A successful pair dispatch that already returned must still
                 # be classified and receive its durable finished record.  The
                 # stop flag prevents the next query at the top of the loop.
                 if has_infra_error:
@@ -1163,7 +1129,7 @@ class CorrectnessRoundEngine:
                     )
                     continue
                 try:
-                    oracle = compare_three_nodes(executions)
+                    oracle = compare_two_nodes(executions)
                     error_analysis = analyze_query_errors(query.expected_error, executions)
                     encoded = {
                         execution.role: node_execution_to_artifact(execution)
@@ -1208,8 +1174,8 @@ class CorrectnessRoundEngine:
                         }
                         rejected += 1
                     elif error_analysis.disposition is QueryErrorDisposition.SUCCESS:
-                        baseline = executions_by_role[NodeRole.BASELINE]
-                        baseline_artifact = encoded[NodeRole.BASELINE]
+                        baseline = executions_by_role[NodeRole.CUSTOM_OFF]
+                        baseline_artifact = encoded[NodeRole.CUSTOM_OFF]
                         pass_record = PassRecord(
                             case_id=case_id,
                             run_id=context.request.run_id,
@@ -1235,7 +1201,9 @@ class CorrectnessRoundEngine:
                             case_id=case_id,
                             run_id=context.request.run_id,
                             mode="correctness",
-                            databases={role: current_prepared.database for role in NodeRole},
+                            databases={
+                                role: current_prepared.database for role in COMPARISON_ROLES
+                            },
                             seeds={
                                 "data": materialized.data_seed,
                                 "query": query.seed,
@@ -1265,7 +1233,7 @@ class CorrectnessRoundEngine:
                                         e for e in executions if e.role is role
                                     ).status.value,
                                 }
-                                for role in NodeRole
+                                for role in COMPARISON_ROLES
                             },
                             configuration_fingerprints=self._fingerprints,
                             results=encoded,
@@ -1296,7 +1264,7 @@ class CorrectnessRoundEngine:
                         else {"errno": identity[0], "sqlstate": identity[1]}
                     )
                     for role, identity in zip(
-                        NodeRole,
+                        COMPARISON_ROLES,
                         error_analysis.observed_identities,
                         strict=True,
                     )
@@ -1432,10 +1400,7 @@ class CorrectnessRoundEngine:
                             "worker_id": context.worker_id,
                         },
                     )
-                    if mutation_result.verdict in {
-                        MutationVerdict.COMMITTED,
-                        MutationVerdict.REPLICA_SYNC_TIMEOUT,
-                    }:
+                    if mutation_result.verdict is MutationVerdict.COMMITTED:
                         committed_mutation_sql.extend(mutation_result.executed_sql)
                     if mutation_result.terminates_round:
                         mutation_case_id = deterministic_id(
@@ -1447,35 +1412,30 @@ class CorrectnessRoundEngine:
                         )
                         encoded_mutation = {
                             role: node_execution_to_artifact(mutation_result.final_results[role])
-                            for role in NodeRole
+                            for role in COMPARISON_ROLES
                         }
                         mutation_difference: dict[str, object] = {
                             "category": "mutation",
                             "affected_rows_by_role": {
                                 role.value: mutation_result.final_results[role].affected_rows
-                                for role in NodeRole
+                                for role in COMPARISON_ROLES
                             },
                             "status_by_role": {
                                 role.value: mutation_result.final_results[role].status.value
-                                for role in NodeRole
+                                for role in COMPARISON_ROLES
                             },
                             "target_rows": mutation_batch.target_rows,
                             "transaction_steps": _mutation_step_artifacts(mutation_result),
                         }
-                        if mutation_result.replication_result is not None:
-                            mutation_difference = {
-                                "category": "replication",
-                                "observations": _replication_observations(
-                                    mutation_result.replication_result
-                                ),
-                                "required_sequence": mutation_sequence,
-                            }
                         self._artifacts.write_finding(
                             FindingRecord(
                                 case_id=mutation_case_id,
                                 run_id=context.request.run_id,
                                 mode="correctness",
-                                databases={role: current_prepared.database for role in NodeRole},
+                                databases={
+                                    role: current_prepared.database
+                                    for role in COMPARISON_ROLES
+                                },
                                 seeds={
                                     "data": materialized.data_seed,
                                     "mutation": mutation_seed,
@@ -1504,7 +1464,7 @@ class CorrectnessRoundEngine:
                                         ].affected_rows,
                                         "status": mutation_result.final_results[role].status.value,
                                     }
-                                    for role in NodeRole
+                                    for role in COMPARISON_ROLES
                                 },
                                 configuration_fingerprints=self._fingerprints,
                                 results=encoded_mutation,
@@ -1533,13 +1493,11 @@ def _fingerprints(config: AppConfig) -> dict[NodeRole, str]:
     return {
         role: stable_fingerprint(
             {
-                "primary": config.node_for(role).model_dump(mode="json"),
-                "replica": config.replica_for(role).model_dump(mode="json"),
-                "replica_session_variables": config.replica_session_variables(role),
+                "endpoint": config.node_for(role).model_dump(mode="json"),
                 "role": role.value,
             }
         )
-        for role in NodeRole
+        for role in COMPARISON_ROLES
     }
 
 
@@ -1578,37 +1536,24 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
             max_indexes_per_table=config.correctness.max_indexes_per_table,
         ),
         grammar_query_generator=grammar_generator,
-        replica_mode=True,
+        replica_mode=False,
     )
-    primary_factory = MySQLConnectorFactory()
-    replica_factory = MySQLConnectorFactory(
-        session_variables_by_role={
-            role: config.replica_session_variables(role) for role in NodeRole
-        }
-    )
-    replication = ReplicationBarrier(
-        config.replica_nodes,
-        replica_factory,
-        timeout_seconds=config.replica_sync_timeout_seconds,
-    )
-    coordinator = TriadCoordinator(
-        config.primary_nodes,
-        query_nodes=config.replica_nodes,
-        setup_runner=MySQLSetupRunner(primary_factory),
-        query_runner=NodeQueryRunner(replica_factory),
-        session_factory=replica_factory,
-        replication_waiter=replication,
+    comparison_factory = MySQLConnectorFactory()
+    coordinator = ComparisonCoordinator(
+        config.comparison_nodes,
+        setup_runner=MySQLSetupRunner(comparison_factory),
+        query_runner=NodeQueryRunner(comparison_factory),
+        session_factory=comparison_factory,
     )
     mutation_limits = QueryLimits(
         config.correctness.timeout_seconds,
         max(config.correctness.row_limit, 50),
         config.correctness.byte_limit,
     )
-    mutation_coordinator = TriadMutationCoordinator(
-        config.primary_nodes,
-        factory=primary_factory,
-        runner=NodeQueryRunner(primary_factory),
-        replication_waiter=replication,
+    mutation_coordinator = PairMutationCoordinator(
+        config.comparison_nodes,
+        factory=comparison_factory,
+        runner=NodeQueryRunner(comparison_factory),
         limits=mutation_limits,
     )
     engine = CorrectnessRoundEngine(
@@ -1624,7 +1569,7 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
         configuration_fingerprints=_fingerprints(config),
         mutation_generator=MutationBatchGenerator(),
         mutation_coordinator=mutation_coordinator,
-        replica_parameters_sha256=config.replica_parameters_sha256,
+        replica_parameters_sha256=None,
         explain_timeout_seconds=config.correctness.explain_timeout_seconds,
     )
     return CorrectnessRunService(

@@ -21,7 +21,7 @@ from select_fuzz.artifacts.bundle import (
 from select_fuzz.artifacts.jsonl import JsonlWriter, read_jsonl
 from select_fuzz.artifacts.reader import ArtifactReader, ArtifactValidationError
 from select_fuzz.artifacts.report import HtmlReportBuilder
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 from select_fuzz.domain import ColumnMeta, NodeExecution
 
 
@@ -35,7 +35,7 @@ def _pass(case_id: str = "case_pass_1") -> PassRecord:
         row_count=1,
         result_digest="a" * 64,
         column_metadata_digest="b" * 64,
-        elapsed_ns_by_role={role: 1_000_000 for role in NodeRole},
+        elapsed_ns_by_role={role: 1_000_000 for role in COMPARISON_ROLES},
         coverage_tags=("join.inner", "aggregate.count"),
     )
 
@@ -45,7 +45,10 @@ def _finding(case_id: str = "case_finding_1") -> FindingRecord:
         case_id=case_id,
         run_id="run_1",
         mode="correctness",
-        databases={role: "sf_c_20260713t120000_w0_r1_sabc_n123_q0" for role in NodeRole},
+        databases={
+            role: "sf_c_20260713t120000_w0_r1_sabc_n123_q0"
+            for role in COMPARISON_ROLES
+        },
         seeds={"round": 7, "schema": 11, "query": 13},
         setup_sql=(
             "CREATE TABLE `t0` (`id` BIGINT PRIMARY KEY);",
@@ -55,9 +58,11 @@ def _finding(case_id: str = "case_finding_1") -> FindingRecord:
         query_limits={"timeout_seconds": 15, "row_limit": 10_000, "byte_limit": 32 << 20},
         payload_sha256="c" * 64,
         original_verdict="result_mismatch",
-        first_difference={"category": "rows", "pair": "baseline/custom_on"},
-        statistics={"baseline_rows": 2, "custom_on_rows": 1},
-        configuration_fingerprints={role: f"fingerprint-{role.value}" for role in NodeRole},
+        first_difference={"category": "rows", "pair": "custom_off/custom_on"},
+        statistics={"custom_off_rows": 2, "custom_on_rows": 1},
+        configuration_fingerprints={
+            role: f"fingerprint-{role.value}" for role in COMPARISON_ROLES
+        },
         results={
             role: {
                 "role": role.value,
@@ -66,7 +71,7 @@ def _finding(case_id: str = "case_finding_1") -> FindingRecord:
                 "rows": [[1], [2]] if role is not NodeRole.CUSTOM_ON else [[1]],
                 "elapsed_ns": 1_000_000,
             }
-            for role in NodeRole
+            for role in COMPARISON_ROLES
         },
         requires_same_session=False,
     )
@@ -85,7 +90,7 @@ def test_pass_is_only_a_compact_fsynced_event(tmp_path: Path) -> None:
     assert not (tmp_path / "passes").exists()
 
 
-def test_finding_atomically_publishes_manifest_and_all_three_full_results(
+def test_finding_atomically_publishes_manifest_and_both_full_results(
     tmp_path: Path,
 ) -> None:
     writer = CaseBundleWriter(tmp_path)
@@ -100,15 +105,15 @@ def test_finding_atomically_publishes_manifest_and_all_three_full_results(
     assert manifest["replay"]["setup_sql"] == list(finding.setup_sql)
     assert manifest["replay"]["query_sql"] == finding.query_sql
     assert manifest["replay"]["query_limits"] == dict(finding.query_limits)
-    assert set(manifest["result_files"]) == {role.value for role in NodeRole}
+    assert set(manifest["result_files"]) == {role.value for role in COMPARISON_ROLES}
     result_files = sorted(published.glob("*.result.json.gz"))
-    assert len(result_files) == 3
+    assert len(result_files) == 2
     assert all(path.read_bytes()[4:8] == b"\x00\x00\x00\x00" for path in result_files)
     decoded = {
         path.name.split(".", 1)[0]: json.loads(gzip.decompress(path.read_bytes()))
         for path in result_files
     }
-    assert decoded["baseline"]["rows"] == [[1], [2]]
+    assert decoded["custom_off"]["rows"] == [[1], [2]]
     assert decoded["custom_on"]["rows"] == [[1]]
     records = read_jsonl(tmp_path / "events.jsonl")
     assert records[-1]["type"] == "finding"
@@ -133,7 +138,6 @@ def test_generator_contract_event_prefers_observed_error_identity(
                 "sqlstate": "42S22",
             },
             "observed_identities": [
-                None,
                 {"errno": 1064, "sqlstate": "42000"},
                 {"errno": 1064, "sqlstate": "42000"},
             ],
@@ -167,7 +171,7 @@ def test_generator_contract_event_falls_back_to_expected_error_identity(
                 "kind": "unknown_column",
                 "sqlstate": "42S22",
             },
-            "observed_identities": [None, None, None],
+            "observed_identities": [None, None],
             "reason": "expected an error but all nodes succeeded",
         },
     )
@@ -220,8 +224,8 @@ def test_sensitive_keys_are_rejected_before_any_artifact_is_written(
 ) -> None:
     finding = _finding()
     unsafe_results = dict(finding.results)
-    unsafe_results[NodeRole.BASELINE] = {
-        "role": NodeRole.BASELINE.value,
+    unsafe_results[NodeRole.CUSTOM_OFF] = {
+        "role": NodeRole.CUSTOM_OFF.value,
         "status": "success",
         "password": "must-never-land",
     }
@@ -252,7 +256,7 @@ def test_sensitive_keys_are_rejected_before_any_artifact_is_written(
 def test_finding_rejects_result_payload_whose_role_does_not_match_file_role() -> None:
     finding = _finding()
     results = dict(finding.results)
-    results[NodeRole.BASELINE] = {
+    results[NodeRole.CUSTOM_OFF] = {
         "role": NodeRole.CUSTOM_ON.value,
         "status": "success",
     }
@@ -309,7 +313,7 @@ def test_reader_rejects_result_path_traversal_in_manifest(tmp_path: Path) -> Non
     published = CaseBundleWriter(tmp_path).write_finding(_finding())
     manifest_path = published / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    manifest["result_files"]["baseline"] = "../outside.result.json.gz"
+    manifest["result_files"]["custom_off"] = "../outside.result.json.gz"
     manifest_path.write_text(json.dumps(manifest))
 
     with pytest.raises(ArtifactValidationError, match="result_files"):
@@ -318,8 +322,8 @@ def test_reader_rejects_result_path_traversal_in_manifest(tmp_path: Path) -> Non
 
 def test_reader_enforces_decompressed_result_limit(tmp_path: Path) -> None:
     published = CaseBundleWriter(tmp_path).write_finding(_finding())
-    baseline = published / "baseline.result.json.gz"
-    baseline.write_bytes(gzip.compress(b'{"padding":"' + b"a" * 1024 + b'"}'))
+    custom_off = published / "custom_off.result.json.gz"
+    custom_off.write_bytes(gzip.compress(b'{"padding":"' + b"a" * 1024 + b'"}'))
 
     with pytest.raises(ArtifactValidationError, match="decompressed"):
         ArtifactReader(tmp_path, max_result_bytes=100).get_finding("case_finding_1")
@@ -407,7 +411,7 @@ def _typed_execution(role: NodeRole) -> NodeExecution:
     )
     return NodeExecution.success(
         role=role,
-        connection_id=100 + list(NodeRole).index(role),
+        connection_id=100 + list(COMPARISON_ROLES).index(role),
         started_ns=10,
         ended_ns=20,
         columns=columns,
@@ -420,7 +424,8 @@ def test_node_execution_artifact_preserves_every_supported_wire_value_type(
     tmp_path: Path,
 ) -> None:
     encoded_by_role = {
-        role: node_execution_to_artifact(_typed_execution(role)) for role in NodeRole
+        role: node_execution_to_artifact(_typed_execution(role))
+        for role in COMPARISON_ROLES
     }
     finding = _finding()
     typed = FindingRecord(
@@ -442,11 +447,11 @@ def test_node_execution_artifact_preserves_every_supported_wire_value_type(
 
     published = CaseBundleWriter(tmp_path).write_finding(typed)
     stored = ArtifactReader(tmp_path).get_finding(published / "manifest.json")
-    encoded_row = stored.results[NodeRole.BASELINE]["rows"][0]  # type: ignore[index]
+    encoded_row = stored.results[NodeRole.CUSTOM_OFF]["rows"][0]  # type: ignore[index]
     decoded = tuple(artifact_cell_to_value(cell) for cell in encoded_row)
 
-    assert decoded == _typed_execution(NodeRole.BASELINE).rows[0]
-    assert stored.results[NodeRole.BASELINE]["warnings"] == ["diagnostic"]
+    assert decoded == _typed_execution(NodeRole.CUSTOM_OFF).rows[0]
+    assert stored.results[NodeRole.CUSTOM_OFF]["warnings"] == ["diagnostic"]
 
 
 def test_artifact_package_exports_primary_public_contracts() -> None:

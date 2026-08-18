@@ -30,7 +30,7 @@ from select_fuzz.artifacts.sql_script import (
     write_difference_summary,
     write_minimal_failure_script,
 )
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 from select_fuzz.domain import ExecutionStatus, NodeExecution
 from select_fuzz.execution.setup import validate_database_name
 from select_fuzz.execution.triad import QueryLimits
@@ -195,10 +195,12 @@ def _validate_digest(value: object, label: str) -> str:
     return value
 
 
-def _role_mapping(value: Mapping[NodeRole, Any], label: str) -> Mapping[NodeRole, Any]:
-    if not isinstance(value, Mapping) or set(value) != set(NodeRole):
-        raise ValueError(f"{label} must contain exactly all three node roles")
-    return MappingProxyType(dict(value))
+def _comparison_role_mapping(
+    value: Mapping[NodeRole, Any], label: str
+) -> Mapping[NodeRole, Any]:
+    if not isinstance(value, Mapping) or set(value) != set(COMPARISON_ROLES):
+        raise ValueError(f"{label} must contain custom_off and custom_on")
+    return MappingProxyType({role: value[role] for role in COMPARISON_ROLES})
 
 
 def _canonical_json(value: object, *, max_bytes: int = MAX_RESULT_BYTES) -> bytes:
@@ -248,8 +250,10 @@ def _generator_contract_details(
     if "observed_identities" not in first_difference:
         raise ValueError("generator_contract requires observed_identities")
     raw_observed = first_difference["observed_identities"]
-    if not isinstance(raw_observed, (tuple, list)) or len(raw_observed) != len(NodeRole):
-        raise ValueError("generator_contract observed_identities require three roles")
+    if not isinstance(raw_observed, (tuple, list)) or len(raw_observed) != len(
+        COMPARISON_ROLES
+    ):
+        raise ValueError("generator_contract observed_identities require two roles")
     observed = tuple(
         None if identity is None else _error_identity(identity, f"observed_identities[{index}]")
         for index, identity in enumerate(raw_observed)
@@ -321,7 +325,7 @@ class PassRecord:
             raise ValueError("row_count must be nonnegative")
         _validate_digest(self.result_digest, "result_digest")
         _validate_digest(self.column_metadata_digest, "column_metadata_digest")
-        elapsed = _role_mapping(self.elapsed_ns_by_role, "elapsed_ns_by_role")
+        elapsed = _comparison_role_mapping(self.elapsed_ns_by_role, "elapsed_ns_by_role")
         if any(
             not isinstance(value, int) or isinstance(value, bool) or value < 0
             for value in elapsed.values()
@@ -339,7 +343,9 @@ class PassRecord:
             "column_metadata_digest": self.column_metadata_digest,
             "coverage_tags": self.coverage_tags,
             "database": self.database,
-            "elapsed_ns_by_role": {role.value: self.elapsed_ns_by_role[role] for role in NodeRole},
+            "elapsed_ns_by_role": {
+                role.value: self.elapsed_ns_by_role[role] for role in COMPARISON_ROLES
+            },
             "query_sql": self.query_sql,
             "result_digest": self.result_digest,
             "row_count": self.row_count,
@@ -374,7 +380,7 @@ class FindingRecord:
         _validate_id(self.run_id, "run_id")
         if self.mode not in {"correctness", "performance"}:
             raise ValueError("mode must be correctness or performance")
-        databases = _role_mapping(self.databases, "databases")
+        databases = _comparison_role_mapping(self.databases, "databases")
         for database in databases.values():
             validate_database_name(database)
         object.__setattr__(self, "databases", databases)
@@ -441,14 +447,16 @@ class FindingRecord:
         _validate_generator_contract_finding(self.original_verdict, first_difference)
         object.__setattr__(self, "first_difference", first_difference)
         object.__setattr__(self, "statistics", MappingProxyType(dict(self.statistics)))
-        fingerprints = _role_mapping(self.configuration_fingerprints, "configuration_fingerprints")
+        fingerprints = _comparison_role_mapping(
+            self.configuration_fingerprints, "configuration_fingerprints"
+        )
         if any(not isinstance(value, str) or not value for value in fingerprints.values()):
             raise ValueError("configuration fingerprints must be nonempty strings")
         object.__setattr__(self, "configuration_fingerprints", fingerprints)
-        results = _role_mapping(self.results, "results")
+        results = _comparison_role_mapping(self.results, "results")
         if any(not isinstance(value, Mapping) for value in results.values()):
             raise TypeError("results must contain JSON mappings")
-        for role in NodeRole:
+        for role in COMPARISON_ROLES:
             payload = results[role]
             if payload.get("role") != role.value:
                 raise ValueError(f"result role does not match {role.value} artifact")
@@ -467,8 +475,10 @@ class FindingRecord:
         object.__setattr__(self, "execution_sql", execution_sql)
 
     def manifest(self) -> dict[str, object]:
-        result_files = {role.value: f"{role.value}.result.json.gz" for role in NodeRole}
-        databases = {role.value: self.databases[role] for role in NodeRole}
+        result_files = {
+            role.value: f"{role.value}.result.json.gz" for role in COMPARISON_ROLES
+        }
+        databases = {role.value: self.databases[role] for role in COMPARISON_ROLES}
         replay = {
             "databases": databases,
             "payload_sha256": self.payload_sha256,
@@ -481,7 +491,8 @@ class FindingRecord:
         manifest = {
             "case_id": self.case_id,
             "configuration_fingerprints": {
-                role.value: self.configuration_fingerprints[role] for role in NodeRole
+                role.value: self.configuration_fingerprints[role]
+                for role in COMPARISON_ROLES
             },
             "databases": databases,
             "first_difference": dict(self.first_difference),
@@ -726,8 +737,13 @@ class CaseBundleWriter:
         event = _finding_event(record)
         _canonical_json(event)
         manifest_payload = _canonical_json(record.manifest())
-        compact_results = {role: _compact_stored_result(record.results[role]) for role in NodeRole}
-        result_payloads = {role: _canonical_json(compact_results[role]) for role in NodeRole}
+        compact_results = {
+            role: _compact_stored_result(record.results[role])
+            for role in COMPARISON_ROLES
+        }
+        result_payloads = {
+            role: _canonical_json(compact_results[role]) for role in COMPARISON_ROLES
+        }
         findings_root = self.root / "findings"
         final = findings_root / record.case_id
         temporary = findings_root / f".{record.case_id}.tmp-{uuid4().hex}"
@@ -748,7 +764,7 @@ class CaseBundleWriter:
                     )
                     write_minimal_failure_script(
                         temporary / "case.sql",
-                        database=record.databases[NodeRole.BASELINE],
+                        database=record.databases[NodeRole.CUSTOM_OFF],
                         setup_statements=record.setup_sql,
                         failing_query=record.query_sql,
                         metadata={
@@ -764,16 +780,16 @@ class CaseBundleWriter:
                             "first_difference": dict(record.first_difference),
                             "row_counts": {
                                 role.value: compact_results[role].get("row_count", 0)
-                                for role in NodeRole
+                                for role in COMPARISON_ROLES
                             },
                             "result_digests": {
                                 role.value: compact_results[role].get("result_digest")
-                                for role in NodeRole
+                                for role in COMPARISON_ROLES
                             },
                             "verdict": record.original_verdict,
                         },
                     )
-                    for role in NodeRole:
+                    for role in COMPARISON_ROLES:
                         compressed = gzip.compress(result_payloads[role], compresslevel=9, mtime=0)
                         _write_fsynced(
                             temporary / f"{role.value}.result.json.gz",

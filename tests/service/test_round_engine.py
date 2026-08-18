@@ -9,7 +9,7 @@ import pytest
 
 import select_fuzz.correctness as correctness_module
 from select_fuzz.artifacts import ArtifactReader, CaseBundleWriter, read_jsonl
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 from select_fuzz.correctness import (
     CorrectnessQuery,
     CorrectnessRoundEngine,
@@ -31,7 +31,7 @@ from select_fuzz.execution import (
     PrepareStatus,
     QueryLimits,
     SetupNodeResult,
-    TriadExecutionResult,
+    ComparisonExecutionResult,
 )
 from select_fuzz.generation.mutation import (
     MutationBatch,
@@ -101,7 +101,7 @@ class _Prepared:
                 status=ExecutionStatus.SUCCESS,
                 payload_sha256=bundle.payload_sha256,
             )
-            for role in NodeRole
+            for role in COMPARISON_ROLES
         )
 
     def close(self) -> None:
@@ -111,7 +111,7 @@ class _Prepared:
 def _success(role: NodeRole, rows: tuple[tuple[object, ...], ...]) -> NodeExecution:
     return NodeExecution.success(
         role=role,
-        connection_id=100 + list(NodeRole).index(role),
+        connection_id=100 + list(COMPARISON_ROLES).index(role),
         started_ns=10,
         ended_ns=20,
         columns=(ColumnMeta("id", 8, False, False, False),),
@@ -122,7 +122,7 @@ def _success(role: NodeRole, rows: tuple[tuple[object, ...], ...]) -> NodeExecut
 def _success_with_flags(role: NodeRole, flags: int) -> NodeExecution:
     return NodeExecution.success(
         role=role,
-        connection_id=100 + list(NodeRole).index(role),
+        connection_id=100 + list(COMPARISON_ROLES).index(role),
         started_ns=10,
         ended_ns=20,
         columns=(
@@ -143,12 +143,12 @@ def _success_with_flags(role: NodeRole, flags: int) -> NodeExecution:
 
 
 def _match() -> tuple[NodeExecution, ...]:
-    return tuple(_success(role, ((1,), (2,))) for role in NodeRole)
+    return tuple(_success(role, ((1,), (2,))) for role in COMPARISON_ROLES)
 
 
 def _mismatch() -> tuple[NodeExecution, ...]:
     values = list(_match())
-    values[2] = _success(NodeRole.CUSTOM_ON, ((1,),))
+    values[1] = _success(NodeRole.CUSTOM_ON, ((1,),))
     return tuple(values)
 
 
@@ -159,15 +159,15 @@ def _errors(errno: int, sqlstate: str, message: str) -> tuple[NodeExecution, ...
             status=ExecutionStatus.ERROR,
             started_ns=10,
             ended_ns=20,
-            connection_id=100 + list(NodeRole).index(role),
+            connection_id=100 + list(COMPARISON_ROLES).index(role),
             error=ErrorInfo(errno, sqlstate, message),
         )
-        for role in NodeRole
+        for role in COMPARISON_ROLES
     )
 
 
 def _errors_with_messages(
-    errno: int, sqlstate: str, messages: tuple[str, str, str]
+    errno: int, sqlstate: str, messages: tuple[str, ...]
 ) -> tuple[NodeExecution, ...]:
     return tuple(
         NodeExecution.failure(
@@ -175,10 +175,10 @@ def _errors_with_messages(
             status=ExecutionStatus.ERROR,
             started_ns=10,
             ended_ns=20,
-            connection_id=100 + list(NodeRole).index(role),
+            connection_id=100 + list(COMPARISON_ROLES).index(role),
             error=ErrorInfo(errno, sqlstate, message),
         )
-        for role, message in zip(NodeRole, messages, strict=True)
+        for role, message in zip(COMPARISON_ROLES, messages, strict=False)
     )
 
 
@@ -189,11 +189,11 @@ def _infra_errors() -> tuple[NodeExecution, ...]:
             status=ExecutionStatus.INFRA_ERROR,
             started_ns=10,
             ended_ns=20,
-            connection_id=100 + list(NodeRole).index(role),
+            connection_id=100 + list(COMPARISON_ROLES).index(role),
             error=ErrorInfo(2006, "HY000", "server has gone away"),
             connection_reusable=False,
         )
-        for role in NodeRole
+        for role in COMPARISON_ROLES
     )
 
 
@@ -214,9 +214,11 @@ class _Coordinator:
         self.prepared = _Prepared(database, bundle)
         return self.prepared
 
-    def execute(self, prepared: _Prepared, sql: str, limits: QueryLimits) -> TriadExecutionResult:
+    def execute(
+        self, prepared: _Prepared, sql: str, limits: QueryLimits
+    ) -> ComparisonExecutionResult:
         self.executed.append(sql)
-        return TriadExecutionResult(prepared, self.outcomes[sql])  # type: ignore[arg-type]
+        return ComparisonExecutionResult(prepared, self.outcomes[sql])  # type: ignore[arg-type]
 
 
 class _RetryCoordinator(_Coordinator):
@@ -224,16 +226,22 @@ class _RetryCoordinator(_Coordinator):
         super().__init__({})
         self.sequential_outcomes = list(outcomes)
 
-    def execute(self, prepared: _Prepared, sql: str, limits: QueryLimits) -> TriadExecutionResult:
+    def execute(
+        self, prepared: _Prepared, sql: str, limits: QueryLimits
+    ) -> ComparisonExecutionResult:
         self.executed.append(sql)
-        return TriadExecutionResult(prepared, self.sequential_outcomes.pop(0))  # type: ignore[arg-type]
+        return ComparisonExecutionResult(
+            prepared, self.sequential_outcomes.pop(0)
+        )  # type: ignore[arg-type]
 
 
 class _RaisingCoordinator(_Coordinator):
     def __init__(self) -> None:
         super().__init__({})
 
-    def execute(self, prepared: _Prepared, sql: str, limits: QueryLimits) -> TriadExecutionResult:
+    def execute(
+        self, prepared: _Prepared, sql: str, limits: QueryLimits
+    ) -> ComparisonExecutionResult:
         self.executed.append(sql)
         raise RuntimeError("simulated executor failure")
 
@@ -244,10 +252,12 @@ class _StopAfterExecutionCoordinator(_Coordinator):
         self.outcome = outcome
         self.stop_event = stop_event
 
-    def execute(self, prepared: _Prepared, sql: str, limits: QueryLimits) -> TriadExecutionResult:
+    def execute(
+        self, prepared: _Prepared, sql: str, limits: QueryLimits
+    ) -> ComparisonExecutionResult:
         self.executed.append(sql)
         self.stop_event.set()
-        return TriadExecutionResult(prepared, self.outcome)  # type: ignore[arg-type]
+        return ComparisonExecutionResult(prepared, self.outcome)  # type: ignore[arg-type]
 
 
 class _Source:
@@ -345,12 +355,12 @@ class _MutationCoordinator:
         final = {
             role: NodeExecution.success(
                 role=role,
-                connection_id=100 + list(NodeRole).index(role),
+                connection_id=100 + list(COMPARISON_ROLES).index(role),
                 started_ns=10,
                 ended_ns=20,
                 affected_rows=12,
             )
-            for role in NodeRole
+            for role in COMPARISON_ROLES
         }
         transaction_end = "COMMIT" if self.verdict is MutationVerdict.COMMITTED else "ROLLBACK"
         return MutationBatchResult(
@@ -389,7 +399,7 @@ def _queries(count: int) -> tuple[CorrectnessQuery, ...]:
     )
 
 
-def test_dynamic_grammar_round_explains_first_and_counts_only_successful_triads(
+def test_dynamic_grammar_round_explains_first_and_counts_only_successful_pairs(
     tmp_path: Path,
 ) -> None:
     raw_candidates = _queries(5)
@@ -415,9 +425,9 @@ def test_dynamic_grammar_round_explains_first_and_counts_only_successful_triads(
     explain_error = next(
         execution
         for execution in _errors(1064, "42000", "syntax error")
-        if execution.role is NodeRole.BASELINE
+        if execution.role is NodeRole.CUSTOM_OFF
     )
-    explain_success = _success(NodeRole.BASELINE, ((1,),))
+    explain_success = _success(NodeRole.CUSTOM_OFF, ((1,),))
     coordinator = _ExplainCoordinator(
         {
             candidates[1].sql: _errors(1366, "HY000", "uniform runtime error"),
@@ -442,7 +452,9 @@ def test_dynamic_grammar_round_explains_first_and_counts_only_successful_triads(
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
     sink = _CollectSink()
 
@@ -473,7 +485,7 @@ def test_dynamic_grammar_round_explains_first_and_counts_only_successful_triads(
     assert rejected_event.payload["query_sql"] == candidates[1].sql
     assert rejected_event.payload["observed_error_identities"] == (
         {"errno": 1366, "sqlstate": "HY000"},
-    ) * 3
+    ) * 2
     records = read_jsonl(tmp_path / "sql" / "worker-000.jsonl")
     uniform_record = next(
         record
@@ -483,7 +495,7 @@ def test_dynamic_grammar_round_explains_first_and_counts_only_successful_triads(
     assert uniform_record["query_sql"] == candidates[1].sql
     assert uniform_record["observed_error_identities"] == [
         {"errno": 1366, "sqlstate": "HY000"},
-    ] * 3
+    ] * 2
 
 
 def test_generated_round_source_defaults_to_grammar_only_generation(
@@ -538,7 +550,9 @@ def test_each_worker_triggers_one_transaction_after_ten_completed_queries(
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
         mutation_generator=generator,  # type: ignore[arg-type]
         mutation_coordinator=mutation,
     )
@@ -575,7 +589,9 @@ def test_mutation_mismatch_stops_round_at_ten_queries_and_preserves_finding(
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
         mutation_generator=_MutationGenerator(),  # type: ignore[arg-type]
         mutation_coordinator=_MutationCoordinator(MutationVerdict.MISMATCH),
         replica_parameters_sha256="f" * 64,
@@ -613,7 +629,9 @@ def test_round_engine_persists_finding_and_stops_current_database(
         CaseBundleWriter(tmp_path),
         coverage,
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     summary = engine.run_round(_context(3), EventPublisher("run_engine_1", _Sink()), Event())
@@ -664,7 +682,9 @@ def test_full_thread_sql_log_is_opt_in_append_only_and_sourceable(tmp_path: Path
         writer,
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     engine.run_round(_context(2), EventPublisher("run_engine_1", _Sink()), Event())
@@ -691,7 +711,9 @@ def test_round_engine_logs_every_infrastructure_retry_attempt(tmp_path: Path) ->
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
         sleeper=lambda _: None,
     )
 
@@ -707,7 +729,7 @@ def test_round_engine_logs_every_infrastructure_retry_attempt(tmp_path: Path) ->
         ("query_attempt_finished", "success"),
     ]
     assert [record["attempt_number"] for record in records] == [0, 0, 1, 1]
-    assert records[1]["nodes"]["baseline"]["error"] == {
+    assert records[1]["nodes"]["custom_off"]["error"] == {
         "errno": 2006,
         "message": "server has gone away",
         "sqlstate": "HY000",
@@ -733,7 +755,9 @@ def test_stop_during_infrastructure_backoff_never_dispatches_an_extra_attempt(
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
         sleeper=stop_during_backoff,
     )
 
@@ -767,7 +791,9 @@ def test_infrastructure_result_with_concurrent_stop_is_logged_as_abort(
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     summary = engine.run_round(
@@ -799,14 +825,16 @@ def test_classification_exception_is_logged_before_propagation(
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     def fail_classification(_: object) -> object:
         raise RuntimeError("simulated classification failure")
 
     monkeypatch.setattr(
-        "select_fuzz.correctness.compare_three_nodes",
+        "select_fuzz.correctness.compare_two_nodes",
         fail_classification,
     )
 
@@ -830,7 +858,6 @@ def test_advisory_metadata_differences_remain_visible_in_worker_log(
 ) -> None:
     query = _queries(1)[0]
     executions = (
-        _success_with_flags(NodeRole.BASELINE, 4129),
         _success_with_flags(NodeRole.CUSTOM_OFF, 4129),
         _success_with_flags(NodeRole.CUSTOM_ON, 20515),
     )
@@ -843,7 +870,9 @@ def test_advisory_metadata_differences_remain_visible_in_worker_log(
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     summary = engine.run_round(_context(1), EventPublisher("run_engine_1", _Sink()), Event())
@@ -851,11 +880,11 @@ def test_advisory_metadata_differences_remain_visible_in_worker_log(
     assert summary.findings == 0
     finished = read_jsonl(tmp_path / "sql" / "worker-000.jsonl")[-1]
     nodes = finished["nodes"]
-    assert nodes["baseline"]["column_metadata"][0]["flags"] == 4129
     assert nodes["custom_off"]["column_metadata"][0]["flags"] == 4129
     assert nodes["custom_on"]["column_metadata"][0]["flags"] == 20515
     assert (
-        nodes["baseline"]["column_metadata_digest"] != nodes["custom_on"]["column_metadata_digest"]
+        nodes["custom_off"]["column_metadata_digest"]
+        != nodes["custom_on"]["column_metadata_digest"]
     )
 
 
@@ -871,7 +900,9 @@ def test_round_engine_logs_executor_exception_after_started_record(tmp_path: Pat
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     with pytest.raises(RuntimeError, match="simulated executor failure"):
@@ -904,7 +935,9 @@ def test_stop_after_dispatch_still_logs_and_classifies_returned_result(
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     summary = engine.run_round(
@@ -930,10 +963,10 @@ def test_round_engine_classifies_all_timeout_as_over_budget(tmp_path: Path) -> N
             status=ExecutionStatus.TIMEOUT,
             started_ns=1,
             ended_ns=2,
-            connection_id=100 + list(NodeRole).index(role),
+            connection_id=100 + list(COMPARISON_ROLES).index(role),
             error=ErrorInfo(3024, "HY000", "maximum statement execution time exceeded"),
         )
-        for role in NodeRole
+        for role in COMPARISON_ROLES
     )
     materialized = RoundMaterialization(
         "sf_c_20260713t120000_w0_r0_sabc_n123_q0", _Bundle(), (query,), 1, 2
@@ -945,7 +978,9 @@ def test_round_engine_classifies_all_timeout_as_over_budget(tmp_path: Path) -> N
         CaseBundleWriter(tmp_path),
         coverage,
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     summary = engine.run_round(_context(1), EventPublisher("run_engine_1", _Sink()), Event())
@@ -972,7 +1007,9 @@ def test_same_error_from_valid_sql_is_a_generator_finding_not_coverage(
         CaseBundleWriter(tmp_path),
         coverage,
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     summary = engine.run_round(_context(1), EventPublisher("run_engine_1", _Sink()), Event())
@@ -1003,7 +1040,9 @@ def test_exact_expected_negative_error_is_not_a_generic_pass_or_coverage(
         CaseBundleWriter(tmp_path),
         coverage,
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     sink = _CollectSink()
@@ -1023,7 +1062,7 @@ def test_exact_expected_negative_error_is_not_a_generic_pass_or_coverage(
     }
     assert (
         completed.payload["observed_error_identities"]
-        == ({"errno": 1054, "sqlstate": "42S22"},) * 3
+        == ({"errno": 1054, "sqlstate": "42S22"},) * 2
     )
     records = read_jsonl(tmp_path / "sql" / "worker-000.jsonl")
     assert records[-1]["verdict"] == "expected_error"
@@ -1060,7 +1099,9 @@ def test_wrong_error_for_negative_sql_is_a_generator_finding(tmp_path: Path) -> 
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     summary = engine.run_round(_context(1), EventPublisher("run_engine_1", _Sink()), Event())
@@ -1088,7 +1129,9 @@ def test_negative_query_that_succeeds_is_a_finding_not_a_pass(tmp_path: Path) ->
         CaseBundleWriter(tmp_path),
         coverage,
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     summary = engine.run_round(_context(1), EventPublisher("run_engine_1", _Sink()), Event())
@@ -1113,7 +1156,7 @@ def test_differential_error_mismatch_wins_over_expected_negative_identity(
     executions = _errors_with_messages(
         1054,
         "42S22",
-        ("unknown column a", "unknown column a", "unknown column b"),
+        ("unknown column a", "unknown column b"),
     )
     materialized = RoundMaterialization(
         "sf_c_20260713t120000_w0_r0_sabc_n123_q0", _Bundle(), (query,), 1, 2
@@ -1125,7 +1168,9 @@ def test_differential_error_mismatch_wins_over_expected_negative_identity(
         CaseBundleWriter(tmp_path),
         coverage,
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     summary = engine.run_round(_context(1), EventPublisher("run_engine_1", _Sink()), Event())
@@ -1160,7 +1205,9 @@ def test_internal_result_limit_is_resource_not_finding_pass_or_coverage(
         CaseBundleWriter(tmp_path),
         coverage,
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     summary = engine.run_round(_context(1), EventPublisher("run_engine_1", _Sink()), Event())
@@ -1356,14 +1403,9 @@ def test_setup_mismatch_persists_complete_finding_bundle(tmp_path: Path) -> None
     prepared.status = PrepareStatus.SETUP_MISMATCH
     prepared.nodes = (
         SetupNodeResult(
-            NodeRole.BASELINE,
+            NodeRole.CUSTOM_OFF,
             ExecutionStatus.SUCCESS,
             payload_sha256="a" * 64,
-        ),
-        SetupNodeResult(
-            NodeRole.CUSTOM_OFF,
-            ExecutionStatus.ERROR,
-            error=ErrorInfo(1064, "42000", "syntax error"),
         ),
         SetupNodeResult(
             NodeRole.CUSTOM_ON,
@@ -1381,7 +1423,9 @@ def test_setup_mismatch_persists_complete_finding_bundle(tmp_path: Path) -> None
         CaseBundleWriter(tmp_path),
         _Coverage(),
         QueryLimits(15, 10_000, 32 << 20),
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
     )
 
     sink = _CollectSink()
@@ -1389,12 +1433,12 @@ def test_setup_mismatch_persists_complete_finding_bundle(tmp_path: Path) -> None
 
     assert summary.findings == 1
     setup_event = next(event for event in sink.events if event.kind == "setup_not_ready")
-    assert setup_event.payload["node_results"]["custom_off"]["error"] == {  # type: ignore[index]
-        "errno": 1064,
-        "message": "syntax error",
-        "sqlstate": "42000",
+    assert setup_event.payload["node_results"]["custom_on"]["error"] == {  # type: ignore[index]
+        "errno": 1054,
+        "message": "unknown column",
+        "sqlstate": "42S22",
     }
     stored = ArtifactReader(tmp_path).get_finding(next((tmp_path / "findings").iterdir()).name)
     assert stored.manifest["original_verdict"] == "setup_mismatch"
     assert stored.manifest["setup_sql"] == list(materialized.bundle.statements)
-    assert set(stored.results) == set(NodeRole)
+    assert set(stored.results) == set(COMPARISON_ROLES)

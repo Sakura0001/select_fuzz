@@ -15,13 +15,16 @@ from select_fuzz.artifacts.bundle import (
     artifact_cell_to_value,
     node_execution_to_artifact,
 )
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 
 
 DIGEST = "a" * 64
 DATABASE = "sf_c_20260713t120000_w0_r1_sabc_n123_q0"
-ROLES = {role: DATABASE for role in NodeRole}
-RESULTS = {role: {"role": role.value, "status": "success"} for role in NodeRole}
+ROLES = {role: DATABASE for role in COMPARISON_ROLES}
+RESULTS = {
+    role: {"role": role.value, "status": "success"}
+    for role in COMPARISON_ROLES
+}
 
 
 def pass_record(**overrides: object) -> PassRecord:
@@ -34,7 +37,7 @@ def pass_record(**overrides: object) -> PassRecord:
         "row_count": 1,
         "result_digest": DIGEST,
         "column_metadata_digest": DIGEST,
-        "elapsed_ns_by_role": {role: 1 for role in NodeRole},
+        "elapsed_ns_by_role": {role: 1 for role in COMPARISON_ROLES},
         "coverage_tags": ("select",),
     }
     values.update(overrides)
@@ -55,7 +58,9 @@ def finding_record(**overrides: object) -> FindingRecord:
         "original_verdict": "mismatch",
         "first_difference": {},
         "statistics": {},
-        "configuration_fingerprints": {role: "fingerprint" for role in NodeRole},
+        "configuration_fingerprints": {
+            role: "fingerprint" for role in COMPARISON_ROLES
+        },
         "results": RESULTS,
     }
     values.update(overrides)
@@ -128,7 +133,7 @@ def test_artifact_codec_rejects_lossy_or_malformed_values(
         {"row_count": -1},
         {"result_digest": "bad"},
         {"elapsed_ns_by_role": {NodeRole.BASELINE: 1}},
-        {"elapsed_ns_by_role": {role: -1 for role in NodeRole}},
+        {"elapsed_ns_by_role": {role: -1 for role in COMPARISON_ROLES}},
         {"coverage_tags": ("",)},
     ],
 )
@@ -166,9 +171,14 @@ def test_pass_records_reject_invalid_compact_event_values(overrides: dict[str, o
         },
         {"original_verdict": ""},
         {"first_difference": []},
-        {"configuration_fingerprints": {role: "" for role in NodeRole}},
-        {"results": {role: [] for role in NodeRole}},
-        {"results": {role: {"role": role.value, "status": "unknown"} for role in NodeRole}},
+        {"configuration_fingerprints": {role: "" for role in COMPARISON_ROLES}},
+        {"results": {role: [] for role in COMPARISON_ROLES}},
+        {
+            "results": {
+                role: {"role": role.value, "status": "unknown"}
+                for role in COMPARISON_ROLES
+            }
+        },
         {"requires_same_session": 1},
     ],
 )
@@ -190,7 +200,6 @@ def test_finding_records_reject_incomplete_or_inconsistent_replay_data(
                 "observed_identities": [
                     {"errno": 1064, "sqlstate": "42000"},
                     {"errno": 1064, "sqlstate": "42000"},
-                    {"errno": 1064, "sqlstate": "42000"},
                 ],
             },
         ),
@@ -201,7 +210,6 @@ def test_finding_records_reject_incomplete_or_inconsistent_replay_data(
                 "expected_error": None,
                 "observed_identities": [
                     {"errno": True, "sqlstate": "42000"},
-                    None,
                     None,
                 ],
                 "reason": "invalid observed errno",
@@ -216,7 +224,7 @@ def test_finding_records_reject_incomplete_or_inconsistent_replay_data(
                     "kind": "unknown_column",
                     "sqlstate": "invalid",
                 },
-                "observed_identities": [None, None, None],
+                "observed_identities": [None, None],
                 "reason": "invalid expected SQLSTATE",
             },
         ),
@@ -225,7 +233,7 @@ def test_finding_records_reject_incomplete_or_inconsistent_replay_data(
             {
                 "category": "generator_contract",
                 "expected_error": {"errno": 1054, "sqlstate": "42S22"},
-                "observed_identities": [None, None, None],
+                "observed_identities": [None, None],
                 "reason": "missing expected kind",
             },
         ),
@@ -238,7 +246,7 @@ def test_finding_records_reject_incomplete_or_inconsistent_replay_data(
                     "kind": "not_a_kind",
                     "sqlstate": "42S22",
                 },
-                "observed_identities": [None, None, None],
+                "observed_identities": [None, None],
                 "reason": "invalid expected kind",
             },
         ),
@@ -247,7 +255,7 @@ def test_finding_records_reject_incomplete_or_inconsistent_replay_data(
             {
                 "category": "generator_contract",
                 "expected_error": None,
-                "observed_identities": [None, None, None],
+                "observed_identities": [None, None],
                 "reason": "missing expected contract",
             },
         ),
@@ -260,7 +268,7 @@ def test_finding_records_reject_incomplete_or_inconsistent_replay_data(
                     "kind": "unknown_column",
                     "sqlstate": "42S22",
                 },
-                "observed_identities": [None, None, None],
+                "observed_identities": [None, None],
                 "reason": "valid query cannot expect an error",
             },
         ),
@@ -269,7 +277,7 @@ def test_finding_records_reject_incomplete_or_inconsistent_replay_data(
             {
                 "category": "generator_contract",
                 "expected_error": None,
-                "observed_identities": [None, None, None],
+                "observed_identities": [None, None],
                 "reason": "generator details require a generator verdict",
             },
         ),
@@ -310,7 +318,7 @@ def test_generator_contract_verdicts_accept_replay_readable_details(
         first_difference={
             "category": "generator_contract",
             "expected_error": expected_error,
-            "observed_identities": [None, None, None],
+            "observed_identities": [None, None],
             "reason": "closed generator contract",
         },
     )

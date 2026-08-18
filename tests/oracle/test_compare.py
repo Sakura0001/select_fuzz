@@ -9,7 +9,7 @@ import pytest
 
 from select_fuzz.config import NodeRole
 from select_fuzz.domain.models import ColumnMeta, ErrorInfo, ExecutionStatus, NodeExecution
-from select_fuzz.oracle import OracleVerdict, compare_three_nodes
+from select_fuzz.oracle import OracleVerdict, compare_three_nodes, compare_two_nodes
 from select_fuzz.oracle.errors import OracleCapacityError, OracleInputError, normalize_error
 
 
@@ -74,6 +74,20 @@ def _three(
         _success(NodeRole.CUSTOM_OFF, columns, baseline if custom_off is None else custom_off),
         _success(NodeRole.CUSTOM_ON, columns, baseline if custom_on is None else custom_on),
     )
+
+
+def test_compare_two_nodes_matches_equal_results_and_rejects_baseline() -> None:
+    pair = (
+        _success(NodeRole.CUSTOM_OFF, (INT,), ((1,),)),
+        _success(NodeRole.CUSTOM_ON, (INT,), ((1,),)),
+    )
+
+    result = compare_two_nodes(reversed(pair))
+
+    assert result.verdict is OracleVerdict.MATCH
+    assert len(result.pairwise) == 1
+    with pytest.raises(OracleInputError, match="custom_off and custom_on"):
+        compare_two_nodes((_success(NodeRole.BASELINE, (INT,), ((1,),)),))
 
 
 @pytest.mark.parametrize(

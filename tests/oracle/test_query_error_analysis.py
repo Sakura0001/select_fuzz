@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.execution import INTERNAL_RESULT_LIMIT_ERRNO
 from select_fuzz.generation.query_contract import ExpectedError, ExpectedErrorKind
@@ -12,7 +12,7 @@ from select_fuzz.oracle.query_errors import (
 )
 
 
-def error_triplet(errno: int, sqlstate: str, message: str) -> tuple[NodeExecution, ...]:
+def error_pair(errno: int, sqlstate: str, message: str) -> tuple[NodeExecution, ...]:
     return tuple(
         NodeExecution.failure(
             role=role,
@@ -22,11 +22,11 @@ def error_triplet(errno: int, sqlstate: str, message: str) -> tuple[NodeExecutio
             connection_id=100 + ordinal,
             error=ErrorInfo(errno, sqlstate, message),
         )
-        for ordinal, role in enumerate(NodeRole)
+        for ordinal, role in enumerate(COMPARISON_ROLES)
     )
 
 
-def success_triplet() -> tuple[NodeExecution, ...]:
+def success_pair() -> tuple[NodeExecution, ...]:
     return tuple(
         NodeExecution.success(
             role=role,
@@ -36,7 +36,7 @@ def success_triplet() -> tuple[NodeExecution, ...]:
             columns=(),
             rows=(),
         )
-        for ordinal, role in enumerate(NodeRole)
+        for ordinal, role in enumerate(COMPARISON_ROLES)
     )
 
 
@@ -45,7 +45,7 @@ def test_exact_expected_negative_error_is_accepted() -> None:
 
     analysis = analyze_query_errors(
         expected,
-        error_triplet(1054, "42S22", "Unknown column 't.missing'"),
+        error_pair(1054, "42S22", "Unknown column 't.missing'"),
     )
 
     assert analysis.disposition is QueryErrorDisposition.EXPECTED_ERROR
@@ -56,12 +56,12 @@ def test_exact_expected_negative_error_is_accepted() -> None:
 def test_same_error_from_valid_sql_is_a_generator_defect_not_a_pass() -> None:
     analysis = analyze_query_errors(
         None,
-        error_triplet(1064, "42000", "You have an error in your SQL syntax"),
+        error_pair(1064, "42000", "You have an error in your SQL syntax"),
     )
 
     assert analysis.disposition is QueryErrorDisposition.UNEXPECTED_VALID_ERROR
     assert analysis.coverage_eligible is False
-    assert analysis.observed_identities == ((1064, "42000"),) * 3
+    assert analysis.observed_identities == ((1064, "42000"),) * 2
 
 
 def test_negative_error_identity_mismatch_is_reported() -> None:
@@ -69,7 +69,7 @@ def test_negative_error_identity_mismatch_is_reported() -> None:
 
     analysis = analyze_query_errors(
         expected,
-        error_triplet(1064, "42000", "syntax error"),
+        error_pair(1064, "42000", "syntax error"),
     )
 
     assert analysis.disposition is QueryErrorDisposition.EXPECTED_ERROR_MISMATCH
@@ -80,14 +80,14 @@ def test_negative_error_identity_mismatch_is_reported() -> None:
 def test_negative_query_that_succeeds_is_reported() -> None:
     expected = ExpectedError(ExpectedErrorKind.INVALID_FUNCTION_ARITY, 1582, "42000")
 
-    analysis = analyze_query_errors(expected, success_triplet())
+    analysis = analyze_query_errors(expected, success_pair())
 
     assert analysis.disposition is QueryErrorDisposition.EXPECTED_ERROR_MISMATCH
     assert "expected an error" in analysis.reason
 
 
 def test_success_without_an_expected_error_is_accepted_for_coverage() -> None:
-    analysis = analyze_query_errors(None, success_triplet())
+    analysis = analyze_query_errors(None, success_pair())
 
     assert analysis.disposition is QueryErrorDisposition.SUCCESS
     assert analysis.coverage_eligible is True
@@ -96,7 +96,7 @@ def test_success_without_an_expected_error_is_accepted_for_coverage() -> None:
 def test_internal_result_limit_is_a_resource_outcome_not_a_valid_query_error() -> None:
     analysis = analyze_query_errors(
         None,
-        error_triplet(
+        error_pair(
             INTERNAL_RESULT_LIMIT_ERRNO,
             "HY000",
             "result row limit exceeded",
@@ -109,14 +109,14 @@ def test_internal_result_limit_is_a_resource_outcome_not_a_valid_query_error() -
 
 def test_mixed_timeout_and_result_limits_are_one_resource_outcome() -> None:
     executions = list(
-        error_triplet(
+        error_pair(
             INTERNAL_RESULT_LIMIT_ERRNO,
             "HY000",
             "result row limit exceeded",
         )
     )
     executions[0] = NodeExecution.failure(
-        role=NodeRole.BASELINE,
+        role=NodeRole.CUSTOM_OFF,
         status=ExecutionStatus.TIMEOUT,
         started_ns=1,
         ended_ns=2,
@@ -133,7 +133,7 @@ def test_mixed_timeout_and_result_limits_are_one_resource_outcome() -> None:
 
 def test_error_analysis_rejects_an_untyped_expected_error_contract() -> None:
     with pytest.raises(TypeError, match="ExpectedError"):
-        analyze_query_errors("unknown_column", success_triplet())  # type: ignore[arg-type]
+        analyze_query_errors("unknown_column", success_pair())  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

@@ -13,7 +13,7 @@ from typing import Any
 
 from select_fuzz.artifacts.bundle import MAX_RESULT_BYTES
 from select_fuzz.artifacts.jsonl import MAX_JSONL_RECORD_BYTES, read_jsonl
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 
 
 _CASE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
@@ -122,15 +122,25 @@ class ArtifactReader:
         if not isinstance(replay, dict):
             raise ArtifactValidationError("manifest replay must be an object")
         result_files = manifest.get("result_files")
-        expected = {
+        pair_expected = {
+            role.value: f"{role.value}.result.json.gz" for role in COMPARISON_ROLES
+        }
+        legacy_expected = {
             role.value: f"{role.value}.result.json.gz" for role in NodeRole
         }
-        if result_files != expected:
+        stored_roles: tuple[NodeRole, ...]
+        if result_files == pair_expected:
+            stored_roles = COMPARISON_ROLES
+            expected = pair_expected
+        elif result_files == legacy_expected:
+            stored_roles = tuple(NodeRole)
+            expected = legacy_expected
+        else:
             raise ArtifactValidationError(
-                "manifest result_files must name exactly the three local role results"
+                "manifest result_files must contain a supported role set"
             )
         results: dict[NodeRole, Mapping[str, object]] = {}
-        for role in NodeRole:
+        for role in stored_roles:
             result_path = manifest_path.parent / expected[role.value]
             try:
                 with gzip.open(result_path, "rb") as stream:

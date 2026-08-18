@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import gzip
+import json
 from pathlib import Path
 from typing import Sequence
 
@@ -8,7 +10,7 @@ import pytest
 
 from select_fuzz.artifacts.bundle import CaseBundleWriter, FindingRecord
 from select_fuzz.artifacts.reader import ArtifactReader, ArtifactValidationError
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 from select_fuzz.domain import ColumnMeta, ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.execution import DatabaseNameFactory, PrepareStatus, QueryLimits
 from select_fuzz.generation.query_contract import ExpectedErrorKind
@@ -17,7 +19,7 @@ from select_fuzz.replay import (
     ReplayCase,
     ReplayService,
     ReplayStatus,
-    TriadReplayAdapter,
+    ComparisonReplayAdapter,
 )
 
 
@@ -27,7 +29,10 @@ def _finding() -> FindingRecord:
         case_id="case_finding_1",
         run_id="run_1",
         mode="correctness",
-        databases={role: "sf_c_20260713t120000_w0_r1_sabc_n123_q0" for role in NodeRole},
+        databases={
+            role: "sf_c_20260713t120000_w0_r1_sabc_n123_q0"
+            for role in COMPARISON_ROLES
+        },
         seeds={"round": 7, "schema": 11, "query": 13},
         setup_sql=(
             "CREATE TABLE `t0` (`id` BIGINT PRIMARY KEY);",
@@ -38,11 +43,13 @@ def _finding() -> FindingRecord:
         payload_sha256="c" * 64,
         original_verdict="result_mismatch",
         first_difference={"category": "rows"},
-        statistics={"baseline_rows": 2, "custom_on_rows": 1},
-        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+        statistics={"custom_off_rows": 2, "custom_on_rows": 1},
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
         results={
             role: {"role": role.value, "status": "success", "rows": [[1], [2]]}
-            for role in NodeRole
+            for role in COMPARISON_ROLES
         },
     )
 
@@ -50,7 +57,7 @@ def _finding() -> FindingRecord:
 def _success(role: NodeRole, rows: tuple[tuple[object, ...], ...]) -> NodeExecution:
     return NodeExecution.success(
         role=role,
-        connection_id=100 + list(NodeRole).index(role),
+        connection_id=100 + list(COMPARISON_ROLES).index(role),
         started_ns=1,
         ended_ns=2,
         columns=(ColumnMeta("id", 8, False, False, False),),
@@ -60,7 +67,6 @@ def _success(role: NodeRole, rows: tuple[tuple[object, ...], ...]) -> NodeExecut
 
 def _mismatch() -> tuple[NodeExecution, ...]:
     return (
-        _success(NodeRole.BASELINE, ((1,), (2,))),
         _success(NodeRole.CUSTOM_OFF, ((1,), (2,))),
         _success(NodeRole.CUSTOM_ON, ((1,),)),
     )
@@ -73,10 +79,10 @@ def _errors(errno: int, sqlstate: str, message: str) -> tuple[NodeExecution, ...
             status=ExecutionStatus.ERROR,
             started_ns=1,
             ended_ns=2,
-            connection_id=100 + list(NodeRole).index(role),
+            connection_id=100 + list(COMPARISON_ROLES).index(role),
             error=ErrorInfo(errno, sqlstate, message),
         )
-        for role in NodeRole
+        for role in COMPARISON_ROLES
     )
 
 
@@ -128,7 +134,7 @@ def test_deterministic_finding_replays_as_reproduced_by_case_id_and_manifest_pat
 
 def test_replay_that_no_longer_mismatches_is_not_reproduced(tmp_path: Path) -> None:
     CaseBundleWriter(tmp_path).write_finding(_finding())
-    all_match = tuple(_success(role, ((1,), (2,))) for role in NodeRole)
+    all_match = tuple(_success(role, ((1,), (2,))) for role in COMPARISON_ROLES)
 
     result = _service(tmp_path, _ReplayCoordinator(all_match)).replay(
         "case_finding_1"
@@ -144,7 +150,7 @@ def test_replay_infrastructure_result_never_enters_semantic_oracle(
 ) -> None:
     CaseBundleWriter(tmp_path).write_finding(_finding())
     executions = list(_mismatch())
-    executions[2] = NodeExecution.failure(
+    executions[1] = NodeExecution.failure(
         role=NodeRole.CUSTOM_ON,
         status=ExecutionStatus.INFRA_ERROR,
         started_ns=1,
@@ -181,7 +187,7 @@ class _ExecutionBatch:
         self.executions = executions
 
 
-class _Triad:
+class _Comparison:
     def __init__(self, status: PrepareStatus = PrepareStatus.READY) -> None:
         self.prepared = _Prepared(status)
         self.received: list[tuple[ReplayCase, str, object]] = []
@@ -201,35 +207,37 @@ class _Triad:
         return _ExecutionBatch(prepared, _mismatch())
 
 
-def test_production_triad_replay_adapter_uses_stored_setup_query_limits_and_closes_round(
+def test_production_pair_replay_adapter_uses_stored_setup_query_limits_and_closes_round(
     tmp_path: Path,
 ) -> None:
     CaseBundleWriter(tmp_path).write_finding(_finding())
-    triad = _Triad()
-    service = _service(tmp_path, TriadReplayAdapter(triad))  # type: ignore[arg-type]
+    comparison = _Comparison()
+    service = _service(
+        tmp_path, ComparisonReplayAdapter(comparison)  # type: ignore[arg-type]
+    )
 
     result = service.replay("case_finding_1")
 
     assert result.status is ReplayStatus.REPRODUCED
-    replay_case, database, _retry = triad.received[0]
+    replay_case, database, _retry = comparison.received[0]
     assert replay_case.statements == _finding().setup_sql
     assert database == result.database
-    assert triad.prepared.closed is True
+    assert comparison.prepared.closed is True
 
 
-def test_production_triad_replay_adapter_classifies_semantic_setup_failure(
+def test_production_pair_replay_adapter_classifies_semantic_setup_failure(
     tmp_path: Path,
 ) -> None:
     CaseBundleWriter(tmp_path).write_finding(_finding())
-    triad = _Triad(PrepareStatus.SETUP_MISMATCH)
+    comparison = _Comparison(PrepareStatus.SETUP_MISMATCH)
 
     result = _service(
-        tmp_path, TriadReplayAdapter(triad)  # type: ignore[arg-type]
+        tmp_path, ComparisonReplayAdapter(comparison)  # type: ignore[arg-type]
     ).replay("case_finding_1")
 
     assert result.status is ReplayStatus.PREPARATION_FAILED
     assert result.executions == ()
-    assert triad.prepared.closed is True
+    assert comparison.prepared.closed is True
 
 
 def test_setup_mismatch_finding_replays_as_reproduced_setup_failure(
@@ -238,10 +246,10 @@ def test_setup_mismatch_finding_replays_as_reproduced_setup_failure(
     CaseBundleWriter(tmp_path).write_finding(
         replace(_finding(), original_verdict=PrepareStatus.SETUP_MISMATCH.value)
     )
-    triad = _Triad(PrepareStatus.SETUP_MISMATCH)
+    comparison = _Comparison(PrepareStatus.SETUP_MISMATCH)
 
     result = _service(
-        tmp_path, TriadReplayAdapter(triad)  # type: ignore[arg-type]
+        tmp_path, ComparisonReplayAdapter(comparison)  # type: ignore[arg-type]
     ).replay("case_finding_1")
 
     assert result.status is ReplayStatus.REPRODUCED
@@ -256,7 +264,7 @@ def test_unexpected_valid_error_finding_can_be_replayed(tmp_path: Path) -> None:
             "category": "generator_contract",
             "expected_error": None,
             "observed_identities": [
-                {"errno": 1064, "sqlstate": "42000"} for _ in NodeRole
+                {"errno": 1064, "sqlstate": "42000"} for _ in COMPARISON_ROLES
             ],
             "reason": "a valid-lane query returned an error on every node",
         },
@@ -290,7 +298,7 @@ def test_expected_error_mismatch_finding_replays_with_stored_contract(
                 "sqlstate": "42S22",
             },
             "observed_identities": [
-                {"errno": 1064, "sqlstate": "42000"} for _ in NodeRole
+                {"errno": 1064, "sqlstate": "42000"} for _ in COMPARISON_ROLES
             ],
             "reason": "expected identity did not match",
         },
@@ -332,3 +340,28 @@ def test_generator_finding_requires_the_generator_contract_category(
 
     with pytest.raises(ArtifactValidationError, match="generator_contract"):
         ReplayCase.from_finding(invalid)
+
+
+def test_reader_accepts_historical_triad_but_replay_rejects_it_in_chinese(
+    tmp_path: Path,
+) -> None:
+    published = CaseBundleWriter(tmp_path).write_finding(_finding())
+    manifest_path = published / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["result_files"] = {
+        role.value: f"{role.value}.result.json.gz" for role in NodeRole
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (published / "baseline.result.json.gz").write_bytes(
+        gzip.compress(b'{"role":"baseline","status":"success","rows":[]}')
+    )
+
+    stored = ArtifactReader(tmp_path).get_finding(_finding().case_id)
+    assert set(stored.results) == set(NodeRole)
+
+    service = _service(tmp_path, _ReplayCoordinator(_mismatch()))
+    with pytest.raises(
+        ArtifactValidationError,
+        match="历史三节点产物不能使用两实例配置回放",
+    ):
+        service.replay(_finding().case_id)

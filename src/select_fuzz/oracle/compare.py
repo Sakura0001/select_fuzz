@@ -1,4 +1,4 @@
-"""Three-node typed differential oracle with deterministic multiset matching."""
+"""Typed differential oracles with deterministic multiset matching."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from itertools import combinations
 
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeRole
 from select_fuzz.domain.models import ColumnMeta, ExecutionStatus, NodeExecution
 from select_fuzz.execution.mysql import INTERNAL_RESULT_LIMIT_ERRNO
 from select_fuzz.oracle.canonical import (
@@ -449,3 +449,30 @@ def compare_three_nodes(executions: Iterable[NodeExecution]) -> OracleResult:
     else:
         verdict = OracleVerdict.RESULT_MISMATCH
     return OracleResult(verdict=verdict, pairwise=pairwise)
+
+
+def compare_two_nodes(executions: Iterable[NodeExecution]) -> OracleResult:
+    """Compare custom_off and custom_on exactly once."""
+
+    values = tuple(executions)
+    by_role = {execution.role: execution for execution in values}
+    if len(values) != 2 or len(by_role) != 2 or set(by_role) != set(COMPARISON_ROLES):
+        raise OracleInputError("oracle requires custom_off and custom_on executions")
+    ordered = tuple(by_role[role] for role in COMPARISON_ROLES)
+    infra_roles = [
+        execution.role.value
+        for execution in ordered
+        if execution.status is ExecutionStatus.INFRA_ERROR
+    ]
+    if infra_roles:
+        raise OracleInputError(
+            f"infra_error executions must not enter oracle: {', '.join(infra_roles)}"
+        )
+    pair = _compare_pair(ordered[0], ordered[1], _FuzzyComparisonBudget())
+    if all(_is_resource_limited(execution) for execution in ordered):
+        verdict = OracleVerdict.OVER_BUDGET
+    elif any(_is_resource_limited(execution) for execution in ordered) and pair.matched:
+        verdict = OracleVerdict.OVER_BUDGET
+    else:
+        verdict = OracleVerdict.MATCH if pair.matched else OracleVerdict.RESULT_MISMATCH
+    return OracleResult(verdict=verdict, pairwise=(pair,))

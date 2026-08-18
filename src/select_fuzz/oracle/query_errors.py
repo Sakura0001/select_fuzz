@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypeAlias
 
-from select_fuzz.config import NodeRole
+from select_fuzz.config import COMPARISON_ROLES
 from select_fuzz.domain import ExecutionStatus, NodeExecution
 from select_fuzz.execution import INTERNAL_RESULT_LIMIT_ERRNO
 from select_fuzz.generation.query_contract import ExpectedError
@@ -18,7 +18,7 @@ ErrorIdentity: TypeAlias = tuple[int, str]
 
 
 class QueryErrorDisposition(StrEnum):
-    """Generator-level interpretation of a three-node execution outcome."""
+    """Generator-level interpretation of a two-instance execution outcome."""
 
     SUCCESS = "success"
     EXPECTED_ERROR = "expected_error"
@@ -41,9 +41,9 @@ class QueryErrorAnalysis:
 def _ordered_executions(executions: Iterable[NodeExecution]) -> tuple[NodeExecution, ...]:
     values = tuple(executions)
     by_role = {execution.role: execution for execution in values}
-    if len(values) != 3 or len(by_role) != 3 or set(by_role) != set(NodeRole):
-        raise OracleInputError("error analysis requires exactly one execution per three-node role")
-    ordered = tuple(by_role[role] for role in NodeRole)
+    if len(values) != 2 or len(by_role) != 2 or set(by_role) != set(COMPARISON_ROLES):
+        raise OracleInputError("error analysis requires custom_off and custom_on executions")
+    ordered = tuple(by_role[role] for role in COMPARISON_ROLES)
     if any(execution.status is ExecutionStatus.INFRA_ERROR for execution in ordered):
         raise OracleInputError("infra_error executions must not enter error analysis")
     return ordered

@@ -14,30 +14,28 @@ from select_fuzz.artifacts.reader import (
     ArtifactValidationError,
     StoredFinding,
 )
-from select_fuzz.config import AppConfig, NodeRole
+from select_fuzz.config import AppConfig, COMPARISON_ROLES, NodeRole
 from select_fuzz.domain import ExecutionStatus, NodeExecution
 from select_fuzz.execution.setup import validate_database_name
 from select_fuzz.execution.triad import (
     DatabaseNameFactory,
+    ComparisonCoordinator,
+    ComparisonExecutionResult,
     InfrastructureRetryPolicy,
     PrepareStatus,
     QueryLimits,
-    TriadCoordinator,
-    TriadExecutionResult,
 )
 from select_fuzz.execution import (
     MySQLConnectorFactory,
     MySQLSetupRunner,
     NodeQueryRunner,
-    ReplicationBarrier,
-    replication_sequence_from_sql,
 )
 from select_fuzz.generation.query_contract import ExpectedError, ExpectedErrorKind
 from select_fuzz.oracle import (
     OracleVerdict,
     QueryErrorDisposition,
     analyze_query_errors,
-    compare_three_nodes,
+    compare_two_nodes,
 )
 
 
@@ -64,6 +62,10 @@ class ReplayCase:
 
     @classmethod
     def from_finding(cls, finding: StoredFinding) -> ReplayCase:
+        if set(finding.results) == set(NodeRole):
+            raise ArtifactValidationError("历史三节点产物不能使用两实例配置回放")
+        if set(finding.results) != set(COMPARISON_ROLES):
+            raise ArtifactValidationError("产物角色集合无效")
         replay = finding.replay_manifest
         setup_sql = replay.get("setup_sql")
         query_sql = replay.get("query_sql")
@@ -112,11 +114,11 @@ class ReplayCase:
         ):
             raise ArtifactValidationError("replay seeds are invalid")
         if not isinstance(databases, dict) or set(databases) != {
-            role.value for role in NodeRole
+            role.value for role in COMPARISON_ROLES
         }:
             raise ArtifactValidationError("replay databases are invalid")
         typed_databases: dict[NodeRole, str] = {}
-        for role in NodeRole:
+        for role in COMPARISON_ROLES:
             database = databases[role.value]
             if not isinstance(database, str):
                 raise ArtifactValidationError("replay database must be a string")
@@ -185,14 +187,9 @@ class ReplayCase:
 
     @property
     def statements(self) -> tuple[str, ...]:
-        """SetupBundleLike compatibility for the production triad adapter."""
+        """SetupBundleLike compatibility for the production pair adapter."""
 
         return self.setup_sql
-
-    @property
-    def replication_sequence(self) -> int:
-        return replication_sequence_from_sql(self.setup_sql)
-
 
 @dataclass(frozen=True, slots=True)
 class ReplayCoordinatorResult:
@@ -212,22 +209,22 @@ class ReplayCoordinator(Protocol):
     ) -> Sequence[NodeExecution] | ReplayCoordinatorResult: ...
 
 
-class TriadReplayAdapter:
-    """Bridge a stored ReplayCase to the production three-node coordinator."""
+class ComparisonReplayAdapter:
+    """Bridge a stored ReplayCase to the production two-instance coordinator."""
 
     def __init__(
         self,
-        triad: TriadCoordinator,
+        comparison: ComparisonCoordinator,
         *,
         retry: InfrastructureRetryPolicy = InfrastructureRetryPolicy(max_attempts=3),
     ) -> None:
-        self._triad = triad
+        self._comparison = comparison
         self._retry = retry
 
     def replay(
         self, replay_case: ReplayCase, new_database: str
     ) -> ReplayCoordinatorResult:
-        prepared = self._triad.prepare_until_recovered(
+        prepared = self._comparison.prepare_until_recovered(
             replay_case,
             database=new_database,
             retry=self._retry,
@@ -235,9 +232,9 @@ class TriadReplayAdapter:
         if prepared.status is not PrepareStatus.READY:
             prepared.close()
             raise ReplayPreparationError(prepared.status)
-        batch: TriadExecutionResult | None = None
+        batch: ComparisonExecutionResult | None = None
         try:
-            batch = self._triad.execute(
+            batch = self._comparison.execute(
                 prepared,
                 replay_case.query_sql,
                 replay_case.query_limits,
@@ -336,7 +333,7 @@ class ReplayService:
                 replay_verdict=None,
                 executions=executions,
             )
-        oracle_result = compare_three_nodes(executions)
+        oracle_result = compare_two_nodes(executions)
         replay_verdict = oracle_result.verdict.value
         if oracle_result.verdict is OracleVerdict.MATCH:
             replay_verdict = analyze_query_errors(
@@ -360,32 +357,20 @@ class ReplayService:
 
 
 def build_replay_service(config: AppConfig, artifact_root: Path) -> ReplayService:
-    """Build the production three-node replay path from a correctness config."""
+    """Build the production two-instance replay path from a correctness config."""
 
     if config.mode.value != "correctness":
         raise ValueError("replay requires correctness config mode")
-    primary_factory = MySQLConnectorFactory()
-    replica_factory = MySQLConnectorFactory(
-        session_variables_by_role={
-            role: config.replica_session_variables(role) for role in NodeRole
-        }
-    )
-    replication = ReplicationBarrier(
-        config.replica_nodes,
-        replica_factory,
-        timeout_seconds=config.replica_sync_timeout_seconds,
-    )
-    triad = TriadCoordinator(
-        config.primary_nodes,
-        query_nodes=config.replica_nodes,
-        setup_runner=MySQLSetupRunner(primary_factory),
-        query_runner=NodeQueryRunner(replica_factory),
-        session_factory=replica_factory,
-        replication_waiter=replication,
+    comparison_factory = MySQLConnectorFactory()
+    comparison = ComparisonCoordinator(
+        config.comparison_nodes,
+        setup_runner=MySQLSetupRunner(comparison_factory),
+        query_runner=NodeQueryRunner(comparison_factory),
+        session_factory=comparison_factory,
     )
     return ReplayService(
         ArtifactReader(artifact_root),
-        TriadReplayAdapter(triad),
+        ComparisonReplayAdapter(comparison),
         DatabaseNameFactory(),
     )
 
@@ -398,6 +383,6 @@ __all__ = [
     "ReplayResult",
     "ReplayService",
     "ReplayStatus",
-    "TriadReplayAdapter",
+    "ComparisonReplayAdapter",
     "build_replay_service",
 ]

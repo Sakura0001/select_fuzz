@@ -1,10 +1,11 @@
-"""Typed three-node correctness oracle."""
+"""Typed correctness oracle."""
 
 from select_fuzz.oracle.compare import (
     OracleResult,
     OracleVerdict,
     PairwiseComparison,
     compare_three_nodes,
+    compare_two_nodes,
 )
 from select_fuzz.oracle.errors import OracleCapacityError, OracleInputError
 from select_fuzz.oracle.query_errors import (
@@ -25,4 +26,5 @@ __all__ = [
     "QueryErrorDisposition",
     "analyze_query_errors",
     "compare_three_nodes",
+    "compare_two_nodes",
 ]

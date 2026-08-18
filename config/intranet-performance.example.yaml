@@ -1,0 +1,55 @@
+# 内网两个独立可写实例的性能对比模式高负载模板。
+# 使用前复制为 config/intranet-performance.yaml；以后只需要修改下面两行 host。
+# custom_off 必须在服务端提前关闭 PQ，custom_on 必须在服务端提前开启 PQ。
+# 密码只通过环境变量提供，不要写入本文件。
+mode: performance
+full_thread_sql_log: false
+replica_parameters_file: null
+replica_sync_timeout_seconds: 10
+
+nodes:
+  - role: custom_off
+    # 关闭 PQ 的唯一性能基准实例 IP。
+    host: 10.0.0.10
+    port: 3306
+    username_env: SELECT_FUZZ_MYSQL_USER
+    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    role_probe_sql: null
+    role_probe_expected: null
+
+  - role: custom_on
+    # 开启 PQ 的候选实例 IP。
+    host: 10.0.0.11
+    port: 3306
+    username_env: SELECT_FUZZ_MYSQL_USER
+    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    role_probe_sql: null
+    role_probe_expected: null
+
+performance:
+  # 性能模式固定单 worker，避免不同性能查询互相争抢资源。
+  workers: 1
+  queries_per_round: 500
+  initial_table_rows: 500000
+  initial_table_rows_max: 2000000
+  max_table_rows: 50000000
+  max_total_rows: 100000000
+  insert_batch_rows: 10000
+  min_tables: 2
+  max_tables: 4
+  min_columns: 8
+  max_columns: 16
+  max_indexes_per_table: 12
+  max_query_tables: 4
+  max_query_depth: 3
+  # 下面四项保留旧配置兼容；当前 shared-round 流程不执行逐查询规模校准。
+  max_calibration_rounds: 8
+  calibration_runs_per_reference: 3
+  calibration_min_seconds: 5
+  calibration_max_seconds: 60
+  # custom_off/custom_on 单条正式查询均在 60 秒触发超时保护。
+  formal_timeout_seconds: 60
+  materialization_timeout_seconds: 300
+  # custom_on/custom_off - 1 >= 0.20，即开启 PQ 慢到 1.2 倍及以上时报警。
+  regression_threshold: 0.20
+  max_start_skew_ms: 100

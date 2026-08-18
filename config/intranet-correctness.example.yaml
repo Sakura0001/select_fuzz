@@ -1,0 +1,48 @@
+# 内网两个独立可写实例的结果对比模式高负载模板。
+# 使用前复制为 config/intranet-correctness.yaml；以后只需要修改下面两行 host。
+# custom_off 必须在服务端提前关闭 PQ，custom_on 必须在服务端提前开启 PQ。
+# 密码只通过环境变量提供，不要写入本文件。
+mode: correctness
+full_thread_sql_log: false
+replica_parameters_file: null
+replica_sync_timeout_seconds: 10
+
+nodes:
+  - role: custom_off
+    # 关闭 PQ 的独立可写实例 IP。
+    host: 10.0.0.10
+    port: 3306
+    username_env: SELECT_FUZZ_MYSQL_USER
+    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    role_probe_sql: null
+    role_probe_expected: null
+
+  - role: custom_on
+    # 开启 PQ 的独立可写实例 IP。
+    host: 10.0.0.11
+    port: 3306
+    username_env: SELECT_FUZZ_MYSQL_USER
+    password_env: SELECT_FUZZ_MYSQL_PASSWORD
+    role_probe_sql: null
+    role_probe_expected: null
+
+correctness:
+  # 64 个 round worker；--rounds 是整个进程的总轮数，不是每个 worker 的轮数。
+  workers: 64
+  # 每轮需要成功执行并比较 2000 条查询；生成拒绝不计入完成数。
+  queries_per_round: 2000
+  timeout_seconds: 10
+  row_limit: 50000
+  byte_limit: 134217728
+  min_rows_per_table: 100
+  max_rows_per_table: 5000
+  min_tables: 4
+  max_tables: 8
+  min_columns: 8
+  max_columns: 64
+  max_indexes_per_table: 32
+  # 每个 query block 最多绑定 3 张表；整条 SQL 可含多个嵌套 query block。
+  max_query_tables: 3
+  query_grammar_path: null
+  grammar_compatible_type_percent: 80
+  explain_timeout_seconds: 10

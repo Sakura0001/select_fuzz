@@ -68,14 +68,18 @@ cd select-fuzz-centos7-x86_64
 export SELECT_FUZZ_MYSQL_USER=root
 export SELECT_FUZZ_MYSQL_PASSWORD='<set-in-shell-only>'
 
-# correctness/performance：两个独立可写实例，服务端提前配置 PQ 开关
-cp config/example.yaml config/comparison.yaml
-vi config/comparison.yaml
-./select-fuzz doctor --mode correctness --config config/comparison.yaml
-./select-fuzz run --mode correctness --config config/comparison.yaml \
-  --rounds 1 --seed "$(date +%s)" --artifacts artifacts/correctness
-./select-fuzz doctor --mode performance --config config/comparison.yaml
-./select-fuzz run --mode performance --config config/comparison.yaml \
+# correctness：两个独立可写实例，custom_off 关闭 PQ，custom_on 开启 PQ
+cp config/intranet-correctness.example.yaml config/intranet-correctness.yaml
+vi config/intranet-correctness.yaml  # 只需修改两行 host
+./select-fuzz doctor --mode correctness --config config/intranet-correctness.yaml
+./select-fuzz run --mode correctness --config config/intranet-correctness.yaml \
+  --rounds 64 --seed "$(date +%s)" --artifacts artifacts/correctness
+
+# performance：正式查询 60 秒硬超时；custom_off 作基准，custom_on/custom_off >= 1.2 报警
+cp config/intranet-performance.example.yaml config/intranet-performance.yaml
+vi config/intranet-performance.yaml  # 只需修改两行 host
+./select-fuzz doctor --mode performance --config config/intranet-performance.yaml
+./select-fuzz run --mode performance --config config/intranet-performance.yaml \
   --rounds 1 --seed "$(date +%s)" --artifacts artifacts/performance
 
 # fuzz：使用单独的主备模板
@@ -105,9 +109,11 @@ Version and configuration differences are reported but do not hard-gate startup;
 missing runtime capabilities or required permissions remain fatal.
 
 ```bash
-uv run select-fuzz doctor --mode correctness --config config/local.yaml
-uv run select-fuzz run --mode correctness --config config/local.yaml --rounds 1
-uv run select-fuzz run --mode performance --config config/local.yaml --rounds 1
+uv run select-fuzz doctor --mode correctness --config config/intranet-correctness.yaml
+uv run select-fuzz run --mode correctness --config config/intranet-correctness.yaml \
+  --rounds 64 --seed "$(date +%s)" --artifacts artifacts/correctness
+uv run select-fuzz run --mode performance --config config/intranet-performance.yaml \
+  --rounds 1 --seed "$(date +%s)" --artifacts artifacts/performance
 uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml --duration-seconds 300
 ```
 
@@ -125,8 +131,9 @@ uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml \
 
 ### 通用启动流程
 
-1. 复制 `config/example.yaml` 为未纳入 Git 的 `config/local.yaml`，填写
-   `custom_off`、`custom_on` 两个独立可写 endpoint；用户名和密码只通过环境变量提供。
+1. correctness、performance、fuzz 分别复制对应的
+   `config/intranet-*.example.yaml`；每份模板只需修改两个内网 IP，用户名和密码只通过
+   环境变量提供。
 2. 由服务端提前关闭/开启对应 PQ 特性。本程序不会修改 PQ 开关，也不会为
    correctness/performance 创建或等待主备复制。
 3. 先执行 `doctor`，再执行目标模式：
@@ -135,8 +142,11 @@ uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml \
    export SELECT_FUZZ_MYSQL_USER='<local user>'
    export SELECT_FUZZ_MYSQL_PASSWORD='<set in shell only>'
 
-   uv run select-fuzz doctor --mode correctness --config config/local.yaml
-   uv run select-fuzz run --mode correctness --config config/local.yaml --rounds 1
+   uv run select-fuzz doctor --mode correctness \
+     --config config/intranet-correctness.yaml
+   uv run select-fuzz run --mode correctness \
+     --config config/intranet-correctness.yaml --rounds 64 \
+     --seed "$(date +%s)" --artifacts artifacts/correctness
    ```
 
 4. 所有运行都可以用 `--seed` 复现；使用 `--artifacts` 指定产物目录。
@@ -152,9 +162,9 @@ uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml \
 启动示例：
 
 ```bash
-uv run select-fuzz doctor --mode correctness --config config/local.yaml
-uv run select-fuzz run --mode correctness --config config/local.yaml \
-  --rounds 10 --seed 20260727 --workers 10
+uv run select-fuzz doctor --mode correctness --config config/intranet-correctness.yaml
+uv run select-fuzz run --mode correctness --config config/intranet-correctness.yaml \
+  --rounds 64 --seed "$(date +%s)" --artifacts artifacts/correctness
 ```
 
 运行方式：
@@ -169,6 +179,9 @@ uv run select-fuzz run --mode correctness --config config/local.yaml \
 当前边界：
 
 - `workers` 为 1～64，默认 10；每轮查询数默认 1000；单条查询超时不超过 300 秒。
+- `intranet-correctness.example.yaml` 高负载模板将它们设为 64 workers、每轮 2000 条
+  查询和 10 秒查询/EXPLAIN 超时；启动时使用 `--rounds 64` 才能让 64 个 worker
+  各领取一轮。
 - 每张表默认生成 10～500 行、1～8 张表、2～16 列；单个 query block 默认最多
   绑定 4 张表。
 - 每张表最多 65 个索引（默认上限 8）；单节点结果默认限制为 10000 行或 32 MiB。
@@ -184,9 +197,9 @@ uv run select-fuzz run --mode correctness --config config/local.yaml \
 启动示例：
 
 ```bash
-uv run select-fuzz doctor --mode performance --config config/local.yaml
-uv run select-fuzz run --mode performance --config config/local.yaml \
-  --rounds 3 --seed 20260727 --queries-per-round 100
+uv run select-fuzz doctor --mode performance --config config/intranet-performance.yaml
+uv run select-fuzz run --mode performance --config config/intranet-performance.yaml \
+  --rounds 1 --seed "$(date +%s)" --artifacts artifacts/performance
 ```
 
 运行方式：
@@ -203,6 +216,8 @@ uv run select-fuzz run --mode performance --config config/local.yaml \
   的阶段。
 - 默认每轮 100 条查询；每张表初始 100000 行，允许扩展到 50000000 行，整轮总行数默认
   不超过 100000000 行。
+- `intranet-performance.example.yaml` 高负载模板每轮 500 条查询，正式查询在两个实例上
+  都使用 60 秒硬超时；`custom_on/custom_off >= 1.2` 时记录性能报警。
 - 性能 schema 为 1～16 张表、每表 2～1017 列、最多 65 个索引；单条查询最多 16 张表，
   query tree 深度为 1～16。
 - 性能模式只做 `EXPLAIN ANALYZE` 性能判定，物化完成后没有周期性 INSERT/UPDATE/DELETE；
@@ -216,9 +231,10 @@ uv run select-fuzz run --mode performance --config config/local.yaml \
 启动示例：
 
 ```bash
-uv run select-fuzz doctor --mode fuzz --config config/local.yaml
-uv run select-fuzz run --mode fuzz --config config/local.yaml \
+uv run select-fuzz doctor --mode fuzz --config config/intranet-fuzz.yaml
+uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml \
   --duration-seconds 300 --seed 20260727 \
+  --artifacts artifacts/intranet-fuzz \
   --databases 4 --writer-threads-per-database 4 \
   --reader-threads-per-database 12
 ```

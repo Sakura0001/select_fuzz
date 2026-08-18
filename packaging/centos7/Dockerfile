@@ -53,6 +53,8 @@ RUN set -eux; \
     cp /src/catalog/mysql-8.0.22-select.grammar.yy "$site/select_fuzz/data/"; \
     mkdir -p "$bundle/config"; \
     cp /src/config/example.yaml "$bundle/config/"; \
+    cp /src/config/intranet-correctness.example.yaml "$bundle/config/"; \
+    cp /src/config/intranet-performance.example.yaml "$bundle/config/"; \
     cp /src/config/intranet-fuzz.example.yaml "$bundle/config/"; \
     cp /src/config/replica-parameters.example.yaml "$bundle/config/"; \
     cp /tmp/select-fuzz-launcher.sh "$bundle/select-fuzz"; \

@@ -6,7 +6,7 @@ The bundle includes:
 - CPython 3.11 built for the CentOS 7 / glibc 2.17 ABI;
 - all runtime Python dependencies, including `mysql-connector-python`;
 - the `select_fuzz` package and its bundled MySQL grammar/catalog files;
-- the two-instance comparison and intranet fuzz configuration examples.
+- one intranet configuration example for each of correctness, performance, and fuzz.
 
 The target machine does not need Python, pip, or uv. A Linux x86_64 machine
 with Docker can build the bundle without Python installed:
@@ -21,18 +21,23 @@ archive to the CentOS 7 host and run:
 For correctness or performance, configure two independently writable instances.
 `custom_off` must have PQ disabled and `custom_on` must have PQ enabled before
 the run; Select Fuzz does not change that server-side setting and does not wait
-for replication:
+for replication. Each template requires only its two `host` lines to be changed:
 
 ```bash
 cd select-fuzz-centos7-x86_64
-cp config/example.yaml config/comparison.yaml
 export SELECT_FUZZ_MYSQL_USER='<local user>'
 export SELECT_FUZZ_MYSQL_PASSWORD='<set in shell only>'
-./select-fuzz doctor --mode correctness --config config/comparison.yaml
-./select-fuzz run --mode correctness --config config/comparison.yaml \
-  --rounds 1 --seed "$(date +%s)" --artifacts artifacts/correctness
-./select-fuzz doctor --mode performance --config config/comparison.yaml
-./select-fuzz run --mode performance --config config/comparison.yaml \
+
+cp config/intranet-correctness.example.yaml config/intranet-correctness.yaml
+vi config/intranet-correctness.yaml
+./select-fuzz doctor --mode correctness --config config/intranet-correctness.yaml
+./select-fuzz run --mode correctness --config config/intranet-correctness.yaml \
+  --rounds 64 --seed "$(date +%s)" --artifacts artifacts/correctness
+
+cp config/intranet-performance.example.yaml config/intranet-performance.yaml
+vi config/intranet-performance.yaml
+./select-fuzz doctor --mode performance --config config/intranet-performance.yaml
+./select-fuzz run --mode performance --config config/intranet-performance.yaml \
   --rounds 1 --seed "$(date +%s)" --artifacts artifacts/performance
 ```
 

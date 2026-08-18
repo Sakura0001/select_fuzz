@@ -170,15 +170,24 @@ def test_sdist_is_reproducible_source_not_a_workspace_snapshot(tmp_path: Path) -
         members = [Path(member.name) for member in archive.getmembers()]
 
     assert any(path.name == "mysql-8.0.41-query-shapes.yaml" for path in members)
+    intranet_templates = {
+        "config/intranet-correctness.example.yaml",
+        "config/intranet-performance.example.yaml",
+        "config/intranet-fuzz.example.yaml",
+    }
+    assert intranet_templates <= {
+        "/".join(path.parts[-2:]) for path in members if len(path.parts) >= 2
+    }
     assert not any(_is_forbidden_sdist_member(path) for path in members)
 
 
-def test_centos_bundle_copies_comparison_and_fuzz_templates() -> None:
+def test_centos_bundle_copies_all_three_intranet_mode_templates() -> None:
     dockerfile = (PROJECT_ROOT / "packaging" / "centos7" / "Dockerfile").read_text(
         encoding="utf-8"
     )
 
-    assert 'cp /src/config/example.yaml "$bundle/config/"' in dockerfile
+    assert 'cp /src/config/intranet-correctness.example.yaml "$bundle/config/"' in dockerfile
+    assert 'cp /src/config/intranet-performance.example.yaml "$bundle/config/"' in dockerfile
     assert 'cp /src/config/intranet-fuzz.example.yaml "$bundle/config/"' in dockerfile
 
 

@@ -551,3 +551,77 @@ def test_intranet_fuzz_example_requires_only_distinct_primary_and_replica_ips() 
     assert (primary.host, primary.port) != (replica.host, replica.port)
     assert document.count("host:") == 2
     assert "password:" not in document
+
+
+def test_intranet_correctness_example_loads_requested_high_pressure_bounds() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    example = repository / "config" / "intranet-correctness.example.yaml"
+
+    config = load_config(example)
+    document = example.read_text(encoding="utf-8")
+
+    assert config.mode is RunMode.CORRECTNESS
+    assert [node.role for node in config.comparison_nodes] == [
+        NodeRole.CUSTOM_OFF,
+        NodeRole.CUSTOM_ON,
+    ]
+    assert document.count("host:") == 2
+    assert "password:" not in document
+    assert config.correctness == CorrectnessConfig(
+        workers=64,
+        queries_per_round=2_000,
+        timeout_seconds=10,
+        row_limit=50_000,
+        byte_limit=128 * 1024 * 1024,
+        min_rows_per_table=100,
+        max_rows_per_table=5_000,
+        min_tables=4,
+        max_tables=8,
+        min_columns=8,
+        max_columns=64,
+        max_indexes_per_table=32,
+        max_query_tables=3,
+        query_grammar_path=None,
+        grammar_compatible_type_percent=80,
+        explain_timeout_seconds=10,
+    )
+
+
+def test_intranet_performance_example_loads_sixty_second_twenty_percent_policy() -> None:
+    repository = Path(__file__).resolve().parents[2]
+    example = repository / "config" / "intranet-performance.example.yaml"
+
+    config = load_config(example)
+    document = example.read_text(encoding="utf-8")
+
+    assert config.mode is RunMode.PERFORMANCE
+    assert [node.role for node in config.comparison_nodes] == [
+        NodeRole.CUSTOM_OFF,
+        NodeRole.CUSTOM_ON,
+    ]
+    assert document.count("host:") == 2
+    assert "password:" not in document
+    assert config.performance == PerformanceConfig(
+        workers=1,
+        queries_per_round=500,
+        initial_table_rows=500_000,
+        initial_table_rows_max=2_000_000,
+        max_table_rows=50_000_000,
+        max_total_rows=100_000_000,
+        insert_batch_rows=10_000,
+        min_tables=2,
+        max_tables=4,
+        min_columns=8,
+        max_columns=16,
+        max_indexes_per_table=12,
+        max_query_tables=4,
+        max_query_depth=3,
+        max_calibration_rounds=8,
+        calibration_runs_per_reference=3,
+        calibration_min_seconds=5,
+        calibration_max_seconds=60,
+        formal_timeout_seconds=60,
+        materialization_timeout_seconds=300,
+        regression_threshold=0.20,
+        max_start_skew_ms=100,
+    )

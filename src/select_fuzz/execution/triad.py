@@ -1,4 +1,4 @@
-"""Three-node setup and query coordination."""
+"""Two-instance setup and query coordination."""
 
 from __future__ import annotations
 
@@ -14,7 +14,12 @@ from threading import Barrier, Lock
 import time
 from typing import Callable, Protocol, overload
 
-from select_fuzz.config import MAX_STATEMENT_TIMEOUT_SECONDS, NodeConfig, NodeRole
+from select_fuzz.config import (
+    COMPARISON_ROLES,
+    MAX_STATEMENT_TIMEOUT_SECONDS,
+    NodeConfig,
+    NodeRole,
+)
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.execution.protocols import BarrierLike, ConnectionFactory, QuerySession
 from select_fuzz.execution.setup import (
@@ -179,12 +184,8 @@ class QueryRunnerLike(Protocol):
     ) -> NodeExecution: ...
 
 
-class ReplicationWaiterLike(Protocol):
-    def wait(self, database: str, sequence: int) -> object: ...
-
-
 class PreparedRound:
-    """One retained setup and, when required, its three pinned sessions."""
+    """One retained setup and, when required, its two pinned sessions."""
 
     def __init__(
         self,
@@ -242,7 +243,7 @@ class BaselineExplainResult:
 
 
 @dataclass(frozen=True, slots=True)
-class TriadExecutionResult(Sequence[NodeExecution]):
+class ComparisonExecutionResult(Sequence[NodeExecution]):
     prepared: PreparedRound
     executions: tuple[NodeExecution, ...]
 
@@ -285,7 +286,7 @@ def _query_infra_failure(node: NodeConfig, error: Exception) -> NodeExecution:
         started_ns=now,
         ended_ns=now,
         connection_id=None,
-        error=ErrorInfo(65011, "HY000", f"triad query failed: {type(error).__name__}"),
+        error=ErrorInfo(65011, "HY000", f"comparison query failed: {type(error).__name__}"),
         connection_reusable=False,
     )
 
@@ -294,12 +295,12 @@ def _setup_infra_failure(node: NodeConfig, error: Exception) -> SetupNodeResult:
     return SetupNodeResult(
         role=node.role,
         status=ExecutionStatus.INFRA_ERROR,
-        error=ErrorInfo(65010, "HY000", f"triad setup failed: {type(error).__name__}"),
+        error=ErrorInfo(65010, "HY000", f"comparison setup failed: {type(error).__name__}"),
     )
 
 
-class TriadCoordinator:
-    """Coordinate one immutable case across all fixed node roles."""
+class ComparisonCoordinator:
+    """Coordinate one immutable case across custom_off and custom_on."""
 
     def __init__(
         self,
@@ -308,24 +309,16 @@ class TriadCoordinator:
         setup_runner: SetupRunnerLike,
         query_runner: QueryRunnerLike,
         session_factory: ConnectionFactory,
-        query_nodes: Sequence[NodeConfig] | None = None,
-        replication_waiter: ReplicationWaiterLike | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
         by_role = {node.role: node for node in nodes}
-        if len(nodes) != 3 or len(by_role) != 3 or set(by_role) != set(NodeRole):
-            raise ValueError("coordinator requires exactly one node for each fixed role")
-        query_by_role = {
-            node.role: node for node in (nodes if query_nodes is None else query_nodes)
-        }
-        if len(query_by_role) != 3 or set(query_by_role) != set(NodeRole):
-            raise ValueError("query_nodes require exactly one node for each fixed role")
-        self._nodes = tuple(by_role[role] for role in NodeRole)
-        self._query_nodes = tuple(query_by_role[role] for role in NodeRole)
+        if len(nodes) != 2 or len(by_role) != 2 or set(by_role) != set(COMPARISON_ROLES):
+            raise ValueError("comparison coordinator requires custom_off and custom_on")
+        self._nodes = tuple(by_role[role] for role in COMPARISON_ROLES)
+        self._query_nodes = self._nodes
         self._setup_runner = setup_runner
         self._query_runner = query_runner
         self._session_factory = session_factory
-        self._replication_waiter = replication_waiter
         self._sleeper = sleeper
 
     def prepare(
@@ -378,9 +371,9 @@ class TriadCoordinator:
                         return _setup_infra_failure(node, ValueError("setup role mismatch"))
                     return result
 
-                with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-setup") as pool:
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sf-setup") as pool:
                     futures = {node.role: pool.submit(apply, node) for node in self._nodes}
-                    results = tuple(futures[role].result() for role in NodeRole)
+                    results = tuple(futures[role].result() for role in COMPARISON_ROLES)
                 status = _classify_setup(results)
         except Exception as error:
             stack.close()
@@ -419,34 +412,6 @@ class TriadCoordinator:
                     None if lockstep_result is None else lockstep_result.failing_sql
                 ),
             )
-        replication_result: object | None = None
-        if self._replication_waiter is not None:
-            required_sequence = getattr(bundle, "replication_sequence", 0)
-            if (
-                not isinstance(required_sequence, int)
-                or isinstance(required_sequence, bool)
-                or required_sequence < 0
-            ):
-                raise ValueError("bundle replication_sequence must be nonnegative")
-            replication_result = self._replication_waiter.wait(database, required_sequence)
-            if not bool(getattr(replication_result, "ready", False)):
-                stack.close()
-                return PreparedRound(
-                    status=PrepareStatus.REPLICA_SYNC_TIMEOUT,
-                    database=database,
-                    bundle=bundle,
-                    nodes=results,
-                    generation=generation,
-                    replication_result=replication_result,
-                    attempted_setup_sql=(
-                        bundle.statements
-                        if lockstep_result is None
-                        else lockstep_result.attempted_bundle_sql
-                    ),
-                    setup_statement_records=(
-                        () if lockstep_result is None else lockstep_result.statement_records
-                    ),
-                )
         return PreparedRound(
             status=status,
             database=database,
@@ -455,7 +420,6 @@ class TriadCoordinator:
             generation=generation,
             sessions=sessions,
             stack=stack if sessions is not None else None,
-            replication_result=replication_result,
             attempted_setup_sql=(
                 bundle.statements
                 if lockstep_result is None
@@ -536,7 +500,7 @@ class TriadCoordinator:
         sql: str,
         limits: QueryLimits,
     ) -> BaselineExplainResult:
-        """Run a plain EXPLAIN on the baseline query node without a triad barrier."""
+        """Run a plain EXPLAIN on custom_off without a comparison barrier."""
 
         current = self.ensure_live(prepared)
         if current.status is not PrepareStatus.READY:
@@ -547,7 +511,7 @@ class TriadCoordinator:
         if statement.endswith(";"):
             statement = statement[:-1].rstrip()
         explain_sql = f"EXPLAIN {statement}"
-        node = next(node for node in self._query_nodes if node.role is NodeRole.BASELINE)
+        node = next(node for node in self._query_nodes if node.role is NodeRole.CUSTOM_OFF)
         try:
             if current.sessions is None:
                 execution = self._query_runner.run(
@@ -570,7 +534,7 @@ class TriadCoordinator:
                     byte_limit=limits.byte_limit,
                     barrier=None,
                 )
-            if execution.role is not NodeRole.BASELINE:
+            if execution.role is not NodeRole.CUSTOM_OFF:
                 raise ValueError("EXPLAIN role mismatch")
         except Exception as error:
             execution = _query_infra_failure(node, error)
@@ -586,13 +550,13 @@ class TriadCoordinator:
         prepared: PreparedRound,
         sql: str,
         limits: QueryLimits,
-    ) -> TriadExecutionResult:
+    ) -> ComparisonExecutionResult:
         current = self.ensure_live(prepared)
         if current.status is not PrepareStatus.READY:
             raise RuntimeError(f"round is not ready: {current.status.value}")
         if not isinstance(sql, str) or not sql.strip():
             raise ValueError("sql must not be empty")
-        barrier = Barrier(3)
+        barrier = Barrier(2)
 
         def run(node: NodeConfig) -> NodeExecution:
             try:
@@ -624,19 +588,26 @@ class TriadCoordinator:
                 barrier.abort()
                 return _query_infra_failure(node, error)
 
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="sf-query") as pool:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sf-query") as pool:
             futures = {node.role: pool.submit(run, node) for node in self._query_nodes}
-            executions = tuple(futures[role].result() for role in NodeRole)
+            executions = tuple(futures[role].result() for role in COMPARISON_ROLES)
         if current.sessions is not None and any(
             execution.status is ExecutionStatus.INFRA_ERROR or not execution.connection_reusable
             for execution in executions
         ):
             current.close()
-        return TriadExecutionResult(current, executions)
+        return ComparisonExecutionResult(current, executions)
+
+
+# Import compatibility for internal callers while they migrate to pair terminology.
+TriadCoordinator = ComparisonCoordinator
+TriadExecutionResult = ComparisonExecutionResult
 
 
 __all__ = [
     "BaselineExplainResult",
+    "ComparisonCoordinator",
+    "ComparisonExecutionResult",
     "DatabaseNameFactory",
     "InfrastructureRetryPolicy",
     "PrepareStatus",

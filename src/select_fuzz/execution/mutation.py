@@ -1,4 +1,4 @@
-"""Lockstep three-primary mutation transactions and replica catch-up gating."""
+"""Lockstep two-instance mutation transactions."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from threading import Barrier
 import time
-from typing import Callable, Protocol
+from typing import Callable
 
-from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeConfig, NodeRole
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.execution.protocols import ConnectionFactory, QuerySession
-from select_fuzz.execution.replication import ReplicationWaitResult, marker_upsert_sql
+from select_fuzz.execution.replication import ReplicationWaitResult
 from select_fuzz.execution.setup import validate_database_name
 from select_fuzz.execution.triad import QueryLimits, QueryRunnerLike
 from select_fuzz.generation.mutation import MutationBatch
@@ -54,10 +54,6 @@ class MutationBatchResult:
         }
 
 
-class ReplicationWaiterLike(Protocol):
-    def wait(self, database: str, sequence: int) -> ReplicationWaitResult: ...
-
-
 def _failure(node: NodeConfig, message: str) -> NodeExecution:
     now = time.monotonic_ns()
     return NodeExecution.failure(
@@ -73,7 +69,7 @@ def _failure(node: NodeConfig, message: str) -> NodeExecution:
 
 def _same(results: Mapping[NodeRole, NodeExecution], *, compare_affected_rows: bool) -> bool:
     identities: set[object] = set()
-    for role in NodeRole:
+    for role in COMPARISON_ROLES:
         result = results[role]
         if result.status is ExecutionStatus.SUCCESS:
             identities.add(
@@ -92,8 +88,8 @@ def _same(results: Mapping[NodeRole, NodeExecution], *, compare_affected_rows: b
     return len(identities) == 1
 
 
-class TriadMutationCoordinator:
-    """Execute one batch as one transaction on all primaries in statement lockstep."""
+class PairMutationCoordinator:
+    """Execute one batch as one transaction on both instances in lockstep."""
 
     def __init__(
         self,
@@ -101,16 +97,14 @@ class TriadMutationCoordinator:
         *,
         factory: ConnectionFactory,
         runner: QueryRunnerLike,
-        replication_waiter: ReplicationWaiterLike,
         limits: QueryLimits,
     ) -> None:
         by_role = {node.role: node for node in primaries}
-        if len(primaries) != 3 or set(by_role) != set(NodeRole):
-            raise ValueError("mutation coordinator requires one primary for every role")
-        self._primaries = tuple(by_role[role] for role in NodeRole)
+        if len(primaries) != 2 or set(by_role) != set(COMPARISON_ROLES):
+            raise ValueError("mutation coordinator requires custom_off and custom_on")
+        self._primaries = tuple(by_role[role] for role in COMPARISON_ROLES)
         self._factory = factory
         self._runner = runner
-        self._replication_waiter = replication_waiter
         self._limits = limits
 
     def execute_batch(self, database: str, batch: MutationBatch) -> MutationBatchResult:
@@ -151,7 +145,7 @@ class TriadMutationCoordinator:
                     )
 
                 def execute(sql: str) -> dict[NodeRole, NodeExecution]:
-                    barrier = Barrier(3)
+                    barrier = Barrier(2)
 
                     def one(node: NodeConfig) -> NodeExecution:
                         try:
@@ -175,10 +169,10 @@ class TriadMutationCoordinator:
                             )
 
                     with ThreadPoolExecutor(
-                        max_workers=3, thread_name_prefix="sf-mutation"
+                        max_workers=2, thread_name_prefix="sf-mutation"
                     ) as pool:
                         futures = {node.role: pool.submit(one, node) for node in self._primaries}
-                        return {role: futures[role].result() for role in NodeRole}
+                        return {role: futures[role].result() for role in COMPARISON_ROLES}
 
                 def rollback() -> Mapping[NodeRole, NodeExecution]:
                     record_statement("ROLLBACK")
@@ -209,7 +203,7 @@ class TriadMutationCoordinator:
                     if _same(results, compare_affected_rows=True):
                         statuses = {result.status for result in results.values()}
                         if statuses == {ExecutionStatus.SUCCESS}:
-                            affected_rows = results[NodeRole.BASELINE].affected_rows
+                            affected_rows = results[NodeRole.CUSTOM_OFF].affected_rows
                             if affected_rows is None:
                                 rollback()
                                 return MutationBatchResult(
@@ -282,25 +276,6 @@ class TriadMutationCoordinator:
                         actual_affected_rows=actual_affected_rows,
                     )
 
-                marker_sql = marker_upsert_sql(batch.sequence)
-                record_statement(marker_sql)
-                marker_results = execute(marker_sql)
-                statement_results.append(marker_results)
-                if not _same(marker_results, compare_affected_rows=True) or any(
-                    result.status is not ExecutionStatus.SUCCESS
-                    for result in marker_results.values()
-                ):
-                    rollback()
-                    return MutationBatchResult(
-                        MutationVerdict.MISMATCH,
-                        batch,
-                        tuple(executed_sql),
-                        tuple(statement_results),
-                        marker_results,
-                        marker_sql,
-                        actual_affected_rows=actual_affected_rows,
-                    )
-
                 record_statement("COMMIT")
                 committed = execute("COMMIT")
                 statement_results.append(committed)
@@ -331,31 +306,23 @@ class TriadMutationCoordinator:
                 actual_affected_rows=actual_affected_rows,
             )
 
-        replication = self._replication_waiter.wait(database, batch.sequence)
-        if not replication.ready:
-            return MutationBatchResult(
-                MutationVerdict.REPLICA_SYNC_TIMEOUT,
-                batch,
-                tuple(executed_sql),
-                tuple(statement_results),
-                committed,
-                marker_upsert_sql(batch.sequence),
-                replication,
-                actual_affected_rows,
-            )
         return MutationBatchResult(
             MutationVerdict.COMMITTED,
             batch,
             tuple(executed_sql),
             tuple(statement_results),
             committed,
-            replication_result=replication,
             actual_affected_rows=actual_affected_rows,
         )
+
+
+# Import compatibility for internal callers while they migrate to pair terminology.
+TriadMutationCoordinator = PairMutationCoordinator
 
 
 __all__ = [
     "MutationBatchResult",
     "MutationVerdict",
+    "PairMutationCoordinator",
     "TriadMutationCoordinator",
 ]

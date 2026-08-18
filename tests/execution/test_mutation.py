@@ -1,17 +1,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
 from time import monotonic_ns
 
-from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeConfig, NodeRole
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
-from select_fuzz.execution.mutation import MutationVerdict, TriadMutationCoordinator
-from select_fuzz.execution.replication import (
-    ReplicationObservation,
-    ReplicationWaitResult,
-    ReplicationWaitStatus,
-)
+from select_fuzz.execution.mutation import MutationVerdict, PairMutationCoordinator
 from select_fuzz.execution.triad import QueryLimits
 from select_fuzz.generation.mutation import (
     MutationBatch,
@@ -56,7 +50,7 @@ class _Runner:
         affected = self.affected_rows if sql.startswith(("INSERT", "UPDATE", "DELETE")) else 0
         return NodeExecution.success(
             role=node.role,
-            connection_id=100 + list(NodeRole).index(node.role),
+            connection_id=100 + list(COMPARISON_ROLES).index(node.role),
             started_ns=now,
             ended_ns=now,
             affected_rows=affected,
@@ -66,30 +60,10 @@ class _Runner:
         raise AssertionError("owned-session path is not used")
 
 
-@dataclass
-class _Waiter:
-    ready: bool = True
-    calls: list[tuple[str, int]] | None = None
-
-    def wait(self, database: str, sequence: int) -> ReplicationWaitResult:
-        if self.calls is None:
-            self.calls = []
-        self.calls.append((database, sequence))
-        observations = {
-            role: ReplicationObservation(role, sequence if self.ready else sequence - 1)
-            for role in NodeRole
-        }
-        return ReplicationWaitResult(
-            ReplicationWaitStatus.READY if self.ready else ReplicationWaitStatus.TIMEOUT,
-            sequence,
-            observations,
-        )
-
-
 def _nodes() -> tuple[NodeConfig, ...]:
     return tuple(
         NodeConfig(role=role, host="primary.example", port=33061 + index)
-        for index, role in enumerate(NodeRole)
+        for index, role in enumerate(COMPARISON_ROLES)
     )
 
 
@@ -101,33 +75,31 @@ def _batch(sql: str = "UPDATE `t0` SET `id` = `id` + 1 LIMIT 17") -> MutationBat
     )
 
 
-def _coordinator(runner: _Runner, waiter: _Waiter) -> TriadMutationCoordinator:
-    return TriadMutationCoordinator(
+def _coordinator(runner: _Runner) -> PairMutationCoordinator:
+    return PairMutationCoordinator(
         _nodes(),
         factory=_Factory(),
         runner=runner,
-        replication_waiter=waiter,
         limits=QueryLimits(10, 1, 1024),
     )
 
 
-def test_commits_identical_affected_rows_then_waits_for_replicas() -> None:
+def test_commits_identical_affected_rows_without_replication_marker_or_wait() -> None:
     runner = _Runner()
-    waiter = _Waiter()
 
-    result = _coordinator(runner, waiter).execute_batch("sf_mutation_1", _batch())
+    result = _coordinator(runner).execute_batch("sf_mutation_1", _batch())
 
     assert result.verdict is MutationVerdict.COMMITTED
     assert result.executed_sql[0] == "START TRANSACTION"
     assert result.executed_sql[-1] == "COMMIT"
-    assert waiter.calls == [("sf_mutation_1", 1)]
+    assert all("__sf_replication_marker" not in sql for sql in result.executed_sql)
 
 
 def test_logged_execution_publishes_each_statement_before_the_next_step() -> None:
     runner = _Runner()
     logged: list[str] = []
 
-    result = _coordinator(runner, _Waiter()).execute_batch_logged(
+    result = _coordinator(runner).execute_batch_logged(
         "sf_mutation_logged_1",
         _batch(),
         on_statement=logged.append,
@@ -141,22 +113,19 @@ def test_same_semantic_error_rolls_back_without_waiting_or_finding() -> None:
     sql = "INSERT INTO `t0` VALUES (1)"
     runner = _Runner()
     now = monotonic_ns()
-    for role in NodeRole:
+    for role in COMPARISON_ROLES:
         runner.by_sql_role[(sql, role)] = NodeExecution.failure(
             role=role,
             status=ExecutionStatus.ERROR,
             started_ns=now,
             ended_ns=now,
-            connection_id=100 + list(NodeRole).index(role),
+            connection_id=100 + list(COMPARISON_ROLES).index(role),
             error=ErrorInfo(1062, "23000", "Duplicate entry '1' for key 'PRIMARY'"),
         )
-    waiter = _Waiter()
-
-    result = _coordinator(runner, waiter).execute_batch("sf_mutation_2", _batch(sql))
+    result = _coordinator(runner).execute_batch("sf_mutation_2", _batch(sql))
 
     assert result.verdict is MutationVerdict.CONSISTENT_ERROR_ROLLED_BACK
     assert result.executed_sql[-1] == "ROLLBACK"
-    assert waiter.calls is None
 
 
 def test_affected_row_mismatch_rolls_back_and_terminates_round() -> None:
@@ -172,7 +141,7 @@ def test_affected_row_mismatch_rolls_back_and_terminates_round() -> None:
         affected_rows=16,
     )
 
-    result = _coordinator(runner, _Waiter()).execute_batch("sf_mutation_3", batch)
+    result = _coordinator(runner).execute_batch("sf_mutation_3", batch)
 
     assert result.verdict is MutationVerdict.MISMATCH
     assert result.terminates_round is True
@@ -180,9 +149,7 @@ def test_affected_row_mismatch_rolls_back_and_terminates_round() -> None:
 
 
 def test_successful_dml_with_actual_rows_outside_range_rolls_back_and_continues() -> None:
-    waiter = _Waiter()
-
-    result = _coordinator(_Runner(affected_rows=1), waiter).execute_batch(
+    result = _coordinator(_Runner(affected_rows=1)).execute_batch(
         "sf_mutation_actual_rows_1", _batch()
     )
 
@@ -190,15 +157,6 @@ def test_successful_dml_with_actual_rows_outside_range_rolls_back_and_continues(
     assert result.actual_affected_rows == 1
     assert result.terminates_round is False
     assert result.executed_sql[-1] == "ROLLBACK"
-    assert waiter.calls is None
-
-
-def test_committed_batch_reports_replica_sync_timeout_without_rollback() -> None:
-    result = _coordinator(_Runner(), _Waiter(ready=False)).execute_batch("sf_mutation_4", _batch())
-
-    assert result.verdict is MutationVerdict.REPLICA_SYNC_TIMEOUT
-    assert result.executed_sql[-1] == "COMMIT"
-    assert result.terminates_round is True
 
 
 def test_start_transaction_error_and_session_failure_terminate_without_queries() -> None:
@@ -212,16 +170,15 @@ def test_start_transaction_error_and_session_failure_terminate_without_queries()
         connection_id=103,
         error=ErrorInfo(1205, "HY000", "lock wait timeout"),
     )
-    started = _coordinator(runner, _Waiter()).execute_batch("sf_mutation_5", _batch())
+    started = _coordinator(runner).execute_batch("sf_mutation_5", _batch())
     assert started.verdict is MutationVerdict.MISMATCH
     assert started.failing_sql == "START TRANSACTION"
 
-    broken = TriadMutationCoordinator(
+    broken = PairMutationCoordinator(
         _nodes(),
         factory=_BrokenFactory(),
         runner=_Runner(),
-        replication_waiter=_Waiter(),
         limits=QueryLimits(10, 1, 1024),
     ).execute_batch("sf_mutation_6", _batch())
     assert broken.verdict is MutationVerdict.INFRASTRUCTURE_ERROR
-    assert set(broken.final_results) == set(NodeRole)
+    assert set(broken.final_results) == set(COMPARISON_ROLES)

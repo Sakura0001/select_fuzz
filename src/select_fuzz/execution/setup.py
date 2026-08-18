@@ -10,7 +10,7 @@ from enum import StrEnum
 import re
 from typing import Protocol
 
-from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeConfig, NodeRole
 from select_fuzz.domain import ErrorInfo, ExecutionStatus
 from select_fuzz.execution.protocols import ConnectionFactory, QuerySession
 from select_fuzz.oracle.errors import normalize_error
@@ -188,7 +188,7 @@ def _statement_verdict(
     *,
     compare_affected_rows: bool,
 ) -> LockstepSetupVerdict:
-    ordered = tuple(results[role] for role in NodeRole)
+    ordered = tuple(results[role] for role in COMPARISON_ROLES)
     statuses = {result.status for result in ordered}
     if statuses == {ExecutionStatus.SUCCESS}:
         if not compare_affected_rows:
@@ -220,7 +220,7 @@ def _setup_nodes_from_statement(
     payload_sha256: str,
 ) -> tuple[SetupNodeResult, ...]:
     nodes: list[SetupNodeResult] = []
-    for role in NodeRole:
+    for role in COMPARISON_ROLES:
         result = results[role]
         if result.status is ExecutionStatus.SUCCESS:
             nodes.append(SetupNodeResult(role, result.status, payload_sha256))
@@ -296,12 +296,12 @@ class MySQLSetupRunner:
         *,
         sessions: Mapping[NodeRole, QuerySession] | None = None,
     ) -> LockstepSetupResult:
-        """Apply every setup statement to all primaries before advancing."""
+        """Apply every setup statement to both comparison endpoints before advancing."""
 
         database = validate_database_name(database)
         by_role = {node.role: node for node in nodes}
-        if len(nodes) != 3 or set(by_role) != set(NodeRole):
-            raise ValueError("lockstep setup requires one node for every role")
+        if len(nodes) != 2 or set(by_role) != set(COMPARISON_ROLES):
+            raise ValueError("lockstep setup requires custom_off and custom_on")
         if (
             not isinstance(bundle.payload_sha256, str)
             or _PAYLOAD_SHA256.fullmatch(bundle.payload_sha256) is None
@@ -320,10 +320,10 @@ class MySQLSetupRunner:
                     role: stack.enter_context(
                         self._factory.query_session(by_role[role], "information_schema")
                     )
-                    for role in NodeRole
+                    for role in COMPARISON_ROLES
                 }
                 if sessions is None
-                else {role: sessions[role] for role in NodeRole}
+                else {role: sessions[role] for role in COMPARISON_ROLES}
             )
 
             def execute_statement(sql: str) -> dict[NodeRole, SetupStatementNodeResult]:
@@ -343,10 +343,10 @@ class MySQLSetupRunner:
                         return _statement_failure(by_role[role], error)
 
                 with ThreadPoolExecutor(
-                    max_workers=3, thread_name_prefix="sf-setup-statement"
+                    max_workers=2, thread_name_prefix="sf-setup-statement"
                 ) as pool:
-                    futures = {role: pool.submit(one, role) for role in NodeRole}
-                    return {role: futures[role].result() for role in NodeRole}
+                    futures = {role: pool.submit(one, role) for role in COMPARISON_ROLES}
+                    return {role: futures[role].result() for role in COMPARISON_ROLES}
 
             setup_sequence = (
                 (f"CREATE DATABASE IF NOT EXISTS `{database}`", False, False),
@@ -374,7 +374,10 @@ class MySQLSetupRunner:
                         sql,
                     )
         except Exception as error:
-            failure = {role: _statement_failure(by_role[role], error) for role in NodeRole}
+            failure = {
+                role: _statement_failure(by_role[role], error)
+                for role in COMPARISON_ROLES
+            }
             return LockstepSetupResult(
                 LockstepSetupVerdict.INFRASTRUCTURE_PAUSE,
                 _setup_nodes_from_statement(failure, bundle.payload_sha256),
@@ -387,7 +390,7 @@ class MySQLSetupRunner:
 
         nodes_result = tuple(
             SetupNodeResult(role, ExecutionStatus.SUCCESS, bundle.payload_sha256)
-            for role in NodeRole
+            for role in COMPARISON_ROLES
         )
         return LockstepSetupResult(
             LockstepSetupVerdict.READY,

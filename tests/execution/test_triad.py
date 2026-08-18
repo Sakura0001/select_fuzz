@@ -8,7 +8,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.config import COMPARISON_ROLES, NodeConfig, NodeRole
 from select_fuzz.domain import ColumnMeta, ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.execution.setup import (
     MySQLSetupRunner,
@@ -16,12 +16,31 @@ from select_fuzz.execution.setup import (
     SetupStatementNodeResult,
 )
 from select_fuzz.execution.triad import (
+    ComparisonCoordinator,
     DatabaseNameFactory,
     InfrastructureRetryPolicy,
     PrepareStatus,
     QueryLimits,
-    TriadCoordinator,
 )
+
+
+def test_comparison_coordinator_requires_exact_off_on_pair() -> None:
+    pair = (
+        NodeConfig(role=NodeRole.CUSTOM_OFF, host="off.example", port=3306),
+        NodeConfig(role=NodeRole.CUSTOM_ON, host="on.example", port=3306),
+    )
+
+    factory = _Factory()
+    coordinator = ComparisonCoordinator(
+        pair,
+        setup_runner=MySQLSetupRunner(factory),
+        query_runner=_QueryRunner(),
+        session_factory=factory,
+    )
+
+    prepared = coordinator.prepare(_Bundle(False), database="sf_comparison_pair_1")
+    result = coordinator.execute(prepared, "SELECT 1", _limits())
+    assert [item.role for item in result] == [NodeRole.CUSTOM_OFF, NodeRole.CUSTOM_ON]
 
 
 class _DatabaseError(Exception):
@@ -146,7 +165,7 @@ class _QueryRunner:
         now = monotonic_ns()
         return NodeExecution.success(
             role=node.role,
-            connection_id=500 + list(NodeRole).index(node.role),
+            connection_id=500 + list(COMPARISON_ROLES).index(node.role),
             started_ns=now,
             ended_ns=now,
             columns=(ColumnMeta("count", 8, False, False, False),),
@@ -185,7 +204,7 @@ class _QueryRunner:
 
 class _ExplodingQueryRunner(_QueryRunner):
     def _result(self, node: NodeConfig, barrier: Any) -> NodeExecution:
-        if node.role is NodeRole.BASELINE:
+        if node.role is NodeRole.CUSTOM_OFF:
             raise RuntimeError("worker crashed before barrier")
         return super()._result(node, barrier)
 
@@ -218,7 +237,7 @@ class _WrongRoleSetupRunner(_DigestSetupRunner):
 class _WrongRoleQueryRunner(_QueryRunner):
     def _result(self, node: NodeConfig, barrier: Any) -> NodeExecution:
         result = super()._result(node, barrier)
-        if node.role is NodeRole.BASELINE:
+        if node.role is NodeRole.CUSTOM_OFF:
             return result
         return NodeExecution.success(
             role=NodeRole.BASELINE,
@@ -246,7 +265,7 @@ class _FlakySetupRunner:
     ) -> SetupNodeResult:
         with self._lock:
             self._calls += 1
-            attempt = (self._calls - 1) // 3
+            attempt = (self._calls - 1) // 2
             self.databases.append(database)
         if attempt == 0:
             return SetupNodeResult(
@@ -261,14 +280,14 @@ class _FlakySetupRunner:
 def nodes() -> tuple[NodeConfig, ...]:
     return tuple(
         NodeConfig(role=role, host="127.0.0.1", port=33061 + index)
-        for index, role in enumerate(NodeRole)
+        for index, role in enumerate(COMPARISON_ROLES)
     )
 
 
 def _coordinator(
     nodes: tuple[NodeConfig, ...], factory: _Factory, query_runner: _QueryRunner
-) -> TriadCoordinator:
-    return TriadCoordinator(
+) -> ComparisonCoordinator:
+    return ComparisonCoordinator(
         nodes,
         setup_runner=MySQLSetupRunner(factory),
         query_runner=query_runner,
@@ -280,13 +299,9 @@ def _limits() -> QueryLimits:
     return QueryLimits(timeout_seconds=15, row_limit=10_000, byte_limit=32 << 20)
 
 
-def test_setup_uses_primaries_and_queries_use_replicas(
+def test_setup_and_queries_use_the_same_two_endpoints(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
-    replicas = tuple(
-        NodeConfig(role=role, host="replica.example", port=33161 + index)
-        for index, role in enumerate(NodeRole)
-    )
     setup_ports: list[int] = []
     query_ports: list[int] = []
 
@@ -300,9 +315,8 @@ def test_setup_uses_primaries_and_queries_use_replicas(
             query_ports.append(node.port)
             return super().run(node, database, sql, **kwargs)
 
-    coordinator = TriadCoordinator(
+    coordinator = ComparisonCoordinator(
         nodes,
-        query_nodes=replicas,
         setup_runner=Setup(),
         query_runner=Query(),
         session_factory=_Factory(),
@@ -312,7 +326,7 @@ def test_setup_uses_primaries_and_queries_use_replicas(
     coordinator.execute(prepared, "SELECT 1", _limits())
 
     assert sorted(setup_ports) == sorted(node.port for node in nodes)
-    assert sorted(query_ports) == sorted(node.port for node in replicas)
+    assert sorted(query_ports) == sorted(node.port for node in nodes)
 
 
 def test_baseline_explain_uses_one_query_node_without_a_barrier(
@@ -357,55 +371,24 @@ def test_baseline_explain_uses_one_query_node_without_a_barrier(
     assert result.execution.rows
     assert len(calls) == 1
     node, sql, timeout, barrier = calls[0]
-    assert node.role is NodeRole.BASELINE
+    assert node.role is NodeRole.CUSTOM_OFF
     assert sql == "EXPLAIN SELECT 1"
     assert timeout == 10
     assert barrier is None
-
-
-def test_initial_replica_barrier_timeout_preserves_prepared_database(
-    nodes: tuple[NodeConfig, ...],
-) -> None:
-    class Setup:
-        def apply(self, node, database, bundle, *, session=None):  # type: ignore[no-untyped-def]
-            return SetupNodeResult(node.role, ExecutionStatus.SUCCESS, bundle.payload_sha256)
-
-    class WaitResult:
-        ready = False
-        observations: dict[object, object] = {}
-
-    class Waiter:
-        def wait(self, database: str, sequence: int) -> WaitResult:
-            assert database == "sf_correctness_replica_timeout_1"
-            assert sequence == 0
-            return WaitResult()
-
-    coordinator = TriadCoordinator(
-        nodes,
-        setup_runner=Setup(),
-        query_runner=_QueryRunner(),
-        session_factory=_Factory(),
-        replication_waiter=Waiter(),
-    )
-
-    prepared = coordinator.prepare(_Bundle(False), database="sf_correctness_replica_timeout_1")
-
-    assert prepared.status is PrepareStatus.REPLICA_SYNC_TIMEOUT
-    assert prepared.database == "sf_correctness_replica_timeout_1"
 
 
 def test_same_setup_bundle_reaches_all_roles_concurrently(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
-    factory.setup_barrier = Barrier(3)
+    factory.setup_barrier = Barrier(2)
     coordinator = _coordinator(nodes, factory, _QueryRunner())
     bundle = _Bundle(requires_same_session=False)
 
     prepared = coordinator.prepare(bundle, database="sf_correctness_w0_r1_s7")
 
     assert prepared.status is PrepareStatus.READY
-    assert {result.role for result in prepared.nodes} == set(NodeRole)
+    assert {result.role for result in prepared.nodes} == set(COMPARISON_ROLES)
     assert {result.payload_sha256 for result in prepared.nodes} == {bundle.payload_sha256}
     assert all(session.saw_setup for session in factory.sessions)
     assert all(session.closed for session in factory.sessions)
@@ -425,7 +408,7 @@ def test_initial_dml_affected_row_difference_is_setup_mismatch(
     assert prepared.status is PrepareStatus.SETUP_MISMATCH
     assert prepared.setup_failing_sql == "INSERT INTO `t0` VALUES (1),(2),(3);"
     failing_record = prepared.setup_statement_records[-1]
-    assert failing_record.results[NodeRole.BASELINE].affected_rows == 3
+    assert failing_record.results[NodeRole.CUSTOM_OFF].affected_rows == 3
     assert failing_record.results[NodeRole.CUSTOM_ON].affected_rows == 2
 
 
@@ -433,7 +416,7 @@ def test_initial_dml_requires_connector_affected_rows(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
-    factory.setup_affected_rows = {role: None for role in NodeRole}
+    factory.setup_affected_rows = {role: None for role in COMPARISON_ROLES}
 
     prepared = _coordinator(nodes, factory, _QueryRunner()).prepare(
         _Bundle(requires_same_session=False),
@@ -448,7 +431,7 @@ def test_different_semantic_setup_errors_are_a_mismatch(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
-    for ordinal, role in enumerate(NodeRole):
+    for ordinal, role in enumerate(COMPARISON_ROLES):
         factory.semantic_failures[role] = _DatabaseError(
             1005 + ordinal,
             "HY000",
@@ -482,7 +465,7 @@ def test_all_same_setup_error_is_rejected_generation(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
-    for role in NodeRole:
+    for role in COMPARISON_ROLES:
         factory.semantic_failures[role] = _DatabaseError(
             1071, "42000", "Specified key was too long"
         )
@@ -499,7 +482,7 @@ def test_all_same_access_denied_is_infrastructure_pause_not_rejected_generation(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
-    for role in NodeRole:
+    for role in COMPARISON_ROLES:
         factory.semantic_failures[role] = _DatabaseError(
             1044, "42000", "Access denied for user to database"
         )
@@ -516,7 +499,7 @@ def test_partial_infrastructure_setup_failure_is_a_preserved_mismatch(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
-    factory.infrastructure_failures.add(NodeRole.BASELINE)
+    factory.infrastructure_failures.add(NodeRole.CUSTOM_OFF)
     coordinator = _coordinator(nodes, factory, _QueryRunner())
 
     prepared = coordinator.prepare(
@@ -565,11 +548,13 @@ def test_lost_temporary_session_rebuilds_the_whole_round(
     assert rebuilt.sessions is not None
     assert all(session.closed for session in old_sessions.values())
     assert all(session.saw_setup for session in rebuilt.sessions.values())
-    assert all(rebuilt.sessions[role] is not old_sessions[role] for role in NodeRole)
+    assert all(
+        rebuilt.sessions[role] is not old_sessions[role] for role in COMPARISON_ROLES
+    )
     rebuilt.close()
 
 
-def test_unusable_temporary_query_result_invalidates_all_three_sessions(
+def test_unusable_temporary_query_result_invalidates_both_sessions(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
@@ -678,7 +663,7 @@ def test_payload_checksum_divergence_is_setup_mismatch(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
-    coordinator = TriadCoordinator(
+    coordinator = ComparisonCoordinator(
         nodes,
         setup_runner=_DigestSetupRunner(),
         query_runner=_QueryRunner(),
@@ -694,7 +679,7 @@ def test_partial_pinned_session_acquisition_closes_earlier_leases(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
-    factory.pin_failures.add(NodeRole.CUSTOM_OFF)
+    factory.pin_failures.add(NodeRole.CUSTOM_ON)
     coordinator = _coordinator(nodes, factory, _QueryRunner())
 
     prepared = coordinator.prepare(_Bundle(True), database="sf_correctness_w0_r9_s15")
@@ -718,7 +703,7 @@ def test_failed_temporary_setup_closes_all_pinned_sessions(
 
     assert prepared.status is PrepareStatus.SETUP_MISMATCH
     assert prepared.sessions is None
-    assert len(factory.sessions) == 3
+    assert len(factory.sessions) == 2
     assert all(session.closed for session in factory.sessions)
 
 
@@ -742,7 +727,7 @@ def test_infrastructure_pause_retries_with_bounded_exponential_backoff(
     factory = _Factory()
     delays: list[float] = []
     setup_runner = _FlakySetupRunner()
-    coordinator = TriadCoordinator(
+    coordinator = ComparisonCoordinator(
         nodes,
         setup_runner=setup_runner,
         query_runner=_QueryRunner(),
@@ -764,8 +749,8 @@ def test_infrastructure_pause_retries_with_bounded_exponential_backoff(
     assert prepared.status is PrepareStatus.READY
     assert prepared.generation == 1
     assert delays == [0.125]
-    first_attempt_databases = set(setup_runner.databases[:3])
-    second_attempt_databases = set(setup_runner.databases[3:])
+    first_attempt_databases = set(setup_runner.databases[:2])
+    second_attempt_databases = set(setup_runner.databases[2:])
     assert first_attempt_databases == {"sf_correctness_w0_r12_s18"}
     assert len(second_attempt_databases) == 1
     assert second_attempt_databases != first_attempt_databases
@@ -787,10 +772,10 @@ def test_query_limits_reject_nonfinite_over_ceiling_or_nonpositive_values(
         QueryLimits(**limits)  # type: ignore[arg-type]
 
 
-def test_triad_contracts_are_exported_from_execution_package() -> None:
+def test_comparison_contracts_are_exported_from_execution_package() -> None:
     import select_fuzz.execution as execution
 
-    assert execution.TriadCoordinator is TriadCoordinator
+    assert execution.ComparisonCoordinator is ComparisonCoordinator
     assert execution.MySQLSetupRunner is MySQLSetupRunner
     assert execution.QueryLimits is QueryLimits
 
@@ -829,7 +814,7 @@ def test_retry_names_preserve_identity_when_external_database_names_are_64_chars
     recovered_names: list[str] = []
     for database in bases:
         setup_runner = _FlakySetupRunner()
-        coordinator = TriadCoordinator(
+        coordinator = ComparisonCoordinator(
             nodes,
             setup_runner=setup_runner,
             query_runner=_QueryRunner(),
@@ -851,7 +836,7 @@ def test_setup_result_with_wrong_role_is_infrastructure_pause(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
-    coordinator = TriadCoordinator(
+    coordinator = ComparisonCoordinator(
         nodes,
         setup_runner=_WrongRoleSetupRunner(),
         query_runner=_QueryRunner(),
@@ -861,7 +846,7 @@ def test_setup_result_with_wrong_role_is_infrastructure_pause(
     prepared = coordinator.prepare(_Bundle(False), database="sf_correctness_w0_r13_s19")
 
     assert prepared.status is PrepareStatus.INFRASTRUCTURE_PAUSE
-    assert {result.role for result in prepared.nodes} == set(NodeRole)
+    assert {result.role for result in prepared.nodes} == set(COMPARISON_ROLES)
 
 
 def test_query_result_with_wrong_role_is_sanitized_as_worker_infrastructure_error(
@@ -873,9 +858,8 @@ def test_query_result_with_wrong_role_is_sanitized_as_worker_infrastructure_erro
 
     results = coordinator.execute(prepared, "SELECT 3 ORDER BY 1", _limits())
 
-    assert {result.role for result in results} == set(NodeRole)
+    assert {result.role for result in results} == set(COMPARISON_ROLES)
     assert results[1].status is ExecutionStatus.INFRA_ERROR
-    assert results[2].status is ExecutionStatus.INFRA_ERROR
     assert all(
         result.status in {ExecutionStatus.SUCCESS, ExecutionStatus.INFRA_ERROR}
         for result in results

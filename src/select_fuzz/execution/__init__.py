@@ -10,6 +10,7 @@ from select_fuzz.execution.mysql import (
 from select_fuzz.execution.mutation import (
     MutationBatchResult,
     MutationVerdict,
+    PairMutationCoordinator,
     TriadMutationCoordinator,
 )
 from select_fuzz.execution.protocols import (
@@ -46,6 +47,8 @@ from select_fuzz.execution.setup import (
 from select_fuzz.execution.timeout import KillHandle, KillQueryWatchdog
 from select_fuzz.execution.triad import (
     BaselineExplainResult,
+    ComparisonCoordinator,
+    ComparisonExecutionResult,
     DatabaseNameFactory,
     InfrastructureRetryPolicy,
     PreparedRound,
@@ -58,6 +61,8 @@ from select_fuzz.execution.triad import (
 __all__ = [
     "BarrierLike",
     "BaselineExplainResult",
+    "ComparisonCoordinator",
+    "ComparisonExecutionResult",
     "ConnectionFactory",
     "ControlConnectionFactory",
     "CursorLike",
@@ -76,6 +81,7 @@ __all__ = [
     "MutationBatchResult",
     "MutationVerdict",
     "NodeQueryRunner",
+    "PairMutationCoordinator",
     "PreparedRound",
     "PrepareStatus",
     "QueryLimits",

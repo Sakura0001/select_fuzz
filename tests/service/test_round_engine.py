@@ -8,7 +8,7 @@ from typing import cast
 import pytest
 
 import select_fuzz.correctness as correctness_module
-from select_fuzz.artifacts import ArtifactReader, CaseBundleWriter, read_jsonl
+from select_fuzz.artifacts import ArtifactReader, CaseBundleWriter, StoredFinding, read_jsonl
 from select_fuzz.config import COMPARISON_ROLES, NodeRole
 from select_fuzz.correctness import (
     CorrectnessQuery,
@@ -55,6 +55,12 @@ from select_fuzz.service import EventPublisher, RoundContext
 class _Sink:
     def publish(self, event) -> None:  # type: ignore[no-untyped-def]
         return None
+
+
+def _only_stored_finding(root: Path) -> StoredFinding:
+    manifests = tuple((root / "findings").glob("*/manifest.json"))
+    assert len(manifests) == 1
+    return ArtifactReader(root).get_finding(manifests[0])
 
 
 def _boundary_seed(limits: SchemaLimits, boundary_ordinal: int) -> int:
@@ -601,7 +607,7 @@ def test_mutation_mismatch_stops_round_at_ten_queries_and_preserves_finding(
 
     assert summary.queries_completed == 10
     assert summary.findings == 1
-    stored = ArtifactReader(tmp_path).get_finding(next((tmp_path / "findings").iterdir()).name)
+    stored = _only_stored_finding(tmp_path)
     assert stored.manifest["original_verdict"] == MutationVerdict.MISMATCH.value
     assert stored.manifest["replica_parameters_sha256"] == "f" * 64
     assert stored.manifest["execution_sql"][-1] == "ROLLBACK"
@@ -1017,7 +1023,7 @@ def test_same_error_from_valid_sql_is_a_generator_finding_not_coverage(
     assert summary.findings == 1
     assert summary.rejected == 1
     assert coverage.hits == []
-    stored = ArtifactReader(tmp_path).get_finding(next((tmp_path / "findings").iterdir()).name)
+    stored = _only_stored_finding(tmp_path)
     assert stored.manifest["original_verdict"] == "unexpected_valid_error"
 
 
@@ -1108,7 +1114,7 @@ def test_wrong_error_for_negative_sql_is_a_generator_finding(tmp_path: Path) -> 
 
     assert summary.findings == 1
     assert summary.rejected == 1
-    stored = ArtifactReader(tmp_path).get_finding(next((tmp_path / "findings").iterdir()).name)
+    stored = _only_stored_finding(tmp_path)
     assert stored.manifest["original_verdict"] == "expected_error_mismatch"
 
 
@@ -1140,7 +1146,7 @@ def test_negative_query_that_succeeds_is_a_finding_not_a_pass(tmp_path: Path) ->
     assert summary.rejected == 1
     assert coverage.hits == []
     assert [event["type"] for event in ArtifactReader(tmp_path).events()] == ["finding"]
-    stored = ArtifactReader(tmp_path).get_finding(next((tmp_path / "findings").iterdir()).name)
+    stored = _only_stored_finding(tmp_path)
     assert stored.manifest["original_verdict"] == "expected_error_mismatch"
 
 
@@ -1178,7 +1184,7 @@ def test_differential_error_mismatch_wins_over_expected_negative_identity(
     assert summary.findings == 1
     assert summary.rejected == 0
     assert coverage.hits == []
-    stored = ArtifactReader(tmp_path).get_finding(next((tmp_path / "findings").iterdir()).name)
+    stored = _only_stored_finding(tmp_path)
     assert stored.manifest["original_verdict"] == "result_mismatch"
     assert stored.manifest["first_difference"]["category"] == "error"
 
@@ -1438,7 +1444,7 @@ def test_setup_mismatch_persists_complete_finding_bundle(tmp_path: Path) -> None
         "message": "unknown column",
         "sqlstate": "42S22",
     }
-    stored = ArtifactReader(tmp_path).get_finding(next((tmp_path / "findings").iterdir()).name)
+    stored = _only_stored_finding(tmp_path)
     assert stored.manifest["original_verdict"] == "setup_mismatch"
     assert stored.manifest["setup_sql"] == list(materialized.bundle.statements)
     assert set(stored.results) == set(COMPARISON_ROLES)

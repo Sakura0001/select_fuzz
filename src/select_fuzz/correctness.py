@@ -19,7 +19,12 @@ from select_fuzz.artifacts import (
     PassRecord,
     node_execution_to_artifact,
 )
-from select_fuzz.config import AppConfig, COMPARISON_ROLES, NodeRole
+from select_fuzz.config import (
+    MAX_STATEMENT_TIMEOUT_SECONDS,
+    AppConfig,
+    COMPARISON_ROLES,
+    NodeRole,
+)
 from select_fuzz.domain import (
     ExecutionStatus,
     NodeExecution,
@@ -1695,7 +1700,11 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
     comparison_factory = MySQLConnectorFactory(
         connection_timeout_s=config.correctness.connection_timeout_seconds,
         connect_concurrency_limit=config.correctness.connect_concurrency_limit,
-        read_timeout_s=math.ceil(config.correctness.timeout_seconds) + 10,
+        # Setup uses the same owned sessions as query execution and can write
+        # multi-megabyte INSERT batches under the 64-worker load.  Keep socket
+        # I/O generous; the query watchdog remains the authoritative 10-second
+        # statement limit and will abort an overlong SELECT independently.
+        read_timeout_s=math.ceil(MAX_STATEMENT_TIMEOUT_SECONDS) + 10,
         statement_timeout_ceiling_s=math.ceil(
             config.correctness.timeout_seconds
         ),

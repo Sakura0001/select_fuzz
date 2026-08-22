@@ -392,7 +392,7 @@ def test_runner_aborts_before_retaining_results_past_hard_limits(
     assert result.error is not None
     assert result.error.errno == INTERNAL_RESULT_LIMIT_ERRNO
     assert result.rows == ()
-    assert factory.kills == ["KILL QUERY 41"]
+    assert factory.kills == ["KILL QUERY 41", "KILL CONNECTION 41"]
     assert cursor.closed is True
     assert result.connection_reusable is False
     assert max(cursor.fetch_sizes) == 1
@@ -489,6 +489,10 @@ def test_watchdog_interruption_is_timeout(node: NodeConfig) -> None:
     assert result.error.errno == 1317
     assert result.watchdog_fired is True
     assert factory.kills == ["KILL QUERY 41"]
+    assert result.failure_evidence is not None
+    watchdog = result.failure_evidence["watchdog"]
+    assert watchdog["timed_out"] is True
+    assert watchdog["kill_query_succeeded"] is True
     assert result.connection_reusable is False
 
 

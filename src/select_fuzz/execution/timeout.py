@@ -180,6 +180,7 @@ class KillHandle:
             with self._lock:
                 manual_kill = self._action == "manual_kill"
             kill_thread: Thread | None = None
+            abort_attempted = False
             try:
                 candidate = Thread(
                     target=self._kill_query,
@@ -223,13 +224,24 @@ class KillHandle:
                                 min(0.01, max(0.0, deadline - time.monotonic()))
                             )
                 if should_abort:
-                    if not self._abort_connection():
-                        self._kill_connection()
+                    # Closing the client socket is only a local abort.  Some
+                    # servers (notably PQ execution paths) can keep running
+                    # after the socket disappears, even when KILL QUERY
+                    # returned successfully.  Always follow the local abort
+                    # with KILL CONNECTION after the in-flight control command
+                    # has joined, so the server-side work cannot leak.
+                    self._abort_connection()
+                    abort_attempted = True
             # Do not permit connection reuse until an in-flight KILL has completed:
             # a delayed KILL QUERY could otherwise target the next statement on the
             # same connection ID.
             if kill_thread is not None:
                 kill_thread.join()
+            if abort_attempted:
+                with self._lock:
+                    connection_kill_needed = not self._kill_connection_attempted
+                if connection_kill_needed:
+                    self._kill_connection()
         finally:
             self._completed.set()
 

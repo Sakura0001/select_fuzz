@@ -87,6 +87,7 @@ class _SlowControlFactory(_ControlFactory):
 class _FailingKillQuerySession(_ControlSession):
     def execute(self, sql: str) -> _ControlCursor:
         assert sql.startswith("KILL QUERY ")
+        self._kill_seen.set()
         raise RuntimeError("control connection rejected KILL QUERY")
 
 
@@ -296,7 +297,7 @@ def test_watchdog_aborts_when_control_kill_thread_cannot_start(
 
     assert handle.timed_out is True
     assert handle.kill_error_type == "RuntimeError"
-    assert factory.killed == []
+    assert factory.killed == ["KILL CONNECTION 41"]
     snapshot = handle.diagnostic_snapshot()
     assert snapshot["kill_query_started"] is False
     assert snapshot["kill_query_finished"] is True
@@ -338,6 +339,49 @@ def test_watchdog_records_control_abort_and_kill_connection_failover(
     assert snapshot["kill_connection_attempted"] is True
     assert snapshot["kill_connection_succeeded"] is True
     assert factory.killed == ["KILL CONNECTION 41"]
+
+
+def test_watchdog_kills_server_connection_after_local_abort_when_query_kill_fails(
+    node: NodeConfig,
+) -> None:
+    factory = _FallbackControlFactory()
+
+    handle = KillQueryWatchdog(factory, kill_grace_s=0.01).arm(
+        node,
+        "sf_case_1",
+        connection_id=41,
+        timeout_s=0.01,
+        fallback_abort=lambda: None,
+    )
+
+    assert factory.kill_seen.wait(1)
+    handle.cancel()
+
+    assert factory.opens == 2
+    assert factory.killed == ["KILL CONNECTION 41"]
+    snapshot = handle.diagnostic_snapshot()
+    assert snapshot["abort_succeeded"] is True
+    assert snapshot["kill_connection_attempted"] is True
+    assert snapshot["kill_connection_succeeded"] is True
+
+
+def test_watchdog_kills_server_connection_after_local_abort_even_if_query_kill_succeeds(
+    node: NodeConfig,
+) -> None:
+    factory = _ControlFactory()
+
+    handle = KillQueryWatchdog(factory, kill_grace_s=0.01).arm(
+        node,
+        "sf_case_1",
+        connection_id=41,
+        timeout_s=0.01,
+        fallback_abort=lambda: None,
+    )
+
+    assert factory.kill_seen.wait(1)
+    handle.cancel()
+
+    assert factory.killed == ["KILL QUERY 41", "KILL CONNECTION 41"]
 
 
 def test_scheduler_compacts_cancelled_handles_behind_a_live_deadline(

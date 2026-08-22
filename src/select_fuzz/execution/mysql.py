@@ -461,6 +461,18 @@ class NodeQueryRunner:
             columns = ()
             connection_reusable = False
 
+        handle_fired = bool(
+            getattr(handle, "fired", False)
+            or handle.timed_out
+            or getattr(handle, "kill_error_type", None) is not None
+        )
+        snapshot_fn = getattr(handle, "diagnostic_snapshot", None)
+        if handle_fired and callable(snapshot_fn):
+            diagnostic = snapshot_fn()
+            if failure_evidence is None:
+                failure_evidence = {}
+            failure_evidence["watchdog"] = diagnostic
+
         if status is ExecutionStatus.SUCCESS:
             return NodeExecution.success(
                 role=node.role,

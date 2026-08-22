@@ -263,7 +263,8 @@ uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml \
   `databases` 批次；全部主库初始化、备库可见和首批 SELECT 预生成完成后才启动新连接。
   设置为 `0` 可关闭周期换代。
 - 查询使用独立 pure-Python 控制连接执行 wall-clock watchdog；超时或停止时先
-  `KILL QUERY`，宽限期后仍未结束再安全断开服务端会话。控制连接并发不超过
+  `KILL QUERY`，随后关闭本地 socket，并用 `KILL CONNECTION` 清理服务端会话，避免
+  PQ 执行路径在客户端断开后继续残留。控制连接并发不超过
   `control_connection_reserve`。事件日志周期记录等待生成、执行、结果拉取和重连阶段。
 - 每条 fuzz worker 会话设置只用于观测的 `@select_fuzz_worker` 标签：
   `primary_writer`、`primary_reader` 或 `replica_reader`。共享代理 endpoint 下也能通过

@@ -230,11 +230,28 @@ class PreparedRound:
         return self._closed
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self._stack is not None:
-            self._stack.close()
+        """Close this round and every replacement retained from it.
+
+        ``ensure_live`` keeps the original round as the owner of a
+        replacement chain so callers can continue using the latest object
+        without replaying setup.  The round engine closes that original
+        object during finalization; releasing only its own stack would leave
+        the newest replacement's pinned sessions open.  Walk the chain
+        iteratively so a long-running test cannot hit Python's recursion
+        limit, and clear each link as it is consumed to make repeated closes
+        idempotent.
+        """
+        current: PreparedRound | None = self
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            replacement = current._replacement
+            current._replacement = None
+            if not current._closed:
+                current._closed = True
+                if current._stack is not None:
+                    current._stack.close()
+            current = replacement
 
     def __enter__(self) -> PreparedRound:
         return self

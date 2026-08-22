@@ -696,7 +696,11 @@ def test_ordinary_reconnect_pause_can_recover_without_replaying_setup(
         session.executed == ["USE `sf_correctness_reconnect_2`"]
         for session in recovered.sessions.values()
     )
-    recovered.close()
+    # The round engine retains the original PreparedRound and closes it after
+    # the latest replacement.  Closing the root must therefore release every
+    # session in the replacement chain, not just the root's own stack.
+    prepared.close()
+    assert all(session.closed for session in factory.sessions)
 
 
 def test_reconnect_pause_returns_typed_infrastructure_results(

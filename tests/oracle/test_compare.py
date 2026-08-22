@@ -184,6 +184,25 @@ def test_binary_character_set_id_is_advisory_when_binary_semantics_match() -> No
     assert result.verdict is OracleVerdict.MATCH
 
 
+def test_redundant_binary_protocol_flag_is_advisory_when_binary_semantics_match() -> None:
+    without_raw_binary = ColumnMeta(
+        "v", 11, True, False, True, character_set_id=63, flags=0
+    )
+    with_raw_binary = ColumnMeta(
+        "v", 11, True, False, True, character_set_id=63, flags=128
+    )
+
+    result = compare_two_nodes(
+        (
+            _success(NodeRole.CUSTOM_OFF, (without_raw_binary,), ()),
+            _success(NodeRole.CUSTOM_ON, (with_raw_binary,), ()),
+        )
+    )
+
+    assert result.verdict is OracleVerdict.MATCH
+    assert result.advisories
+
+
 def test_value_semantic_field_flags_remain_strict() -> None:
     plain = ColumnMeta("v", 254, True, False, False, flags=0)
     mysql_set = ColumnMeta("v", 254, True, False, False, flags=2048)

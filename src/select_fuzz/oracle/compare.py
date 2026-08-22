@@ -48,7 +48,14 @@ _ADVISORY_FIELD_FLAG_MASK = (
     | 0x4000  # NUM / GROUP
     | 0x8000  # PART_KEY
     | 0x10000  # UNIQUE
+    | 0x0080  # BINARY (also exposed as ColumnMeta.binary)
 )
+
+# ``BINARY`` is already represented by ``ColumnMeta.binary``.  Some MySQL
+# execution paths set the raw protocol bit on one side after materializing an
+# expression, while both connectors still expose the same binary semantics.
+# Keep the raw bit in the artifact, but do not compare it a second time.
+_BINARY_FIELD_FLAG = 0x0080
 
 
 class OracleVerdict(StrEnum):
@@ -323,7 +330,7 @@ def _semantic_column_metadata(column: ColumnMeta) -> tuple[object, ...]:
     flags = (
         None
         if column.flags is None
-        else column.flags & ~_ADVISORY_FIELD_FLAG_MASK
+        else column.flags & ~(_ADVISORY_FIELD_FLAG_MASK | _BINARY_FIELD_FLAG)
     )
     # MySQL may report the binary character-set ID as 63 or 255 depending on
     # whether an expression was materialized or merged.  Once the protocol

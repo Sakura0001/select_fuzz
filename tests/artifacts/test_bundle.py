@@ -102,8 +102,11 @@ def test_finding_atomically_publishes_manifest_and_both_full_results(
     assert not list((tmp_path / "findings").glob(".*.tmp-*"))
     manifest = json.loads((published / "manifest.json").read_text())
     assert manifest["case_id"] == finding.case_id
-    assert manifest["replay"]["setup_sql"] == list(finding.setup_sql)
-    assert manifest["replay"]["query_sql"] == finding.query_sql
+    assert manifest["schema_version"] == 2
+    assert "setup_sql" not in manifest
+    assert "setup_sql" not in manifest["replay"]
+    assert manifest["replay"]["setup_sql_ref"]["path"] == "setup.sql.jsonl.gz"
+    assert manifest["replay"]["query_sql_ref"]["path"] == "query.sql.jsonl.gz"
     assert manifest["replay"]["query_limits"] == dict(finding.query_limits)
     assert set(manifest["result_files"]) == {role.value for role in COMPARISON_ROLES}
     result_files = sorted(published.glob("*.result.json.gz"))
@@ -115,6 +118,9 @@ def test_finding_atomically_publishes_manifest_and_both_full_results(
     }
     assert decoded["custom_off"]["rows"] == [[1], [2]]
     assert decoded["custom_on"]["rows"] == [[1]]
+    stored = ArtifactReader(tmp_path).get_finding(finding.case_id)
+    assert stored.setup_sql == finding.setup_sql
+    assert stored.query_sql == finding.query_sql
     records = read_jsonl(tmp_path / "events.jsonl")
     assert records[-1]["type"] == "finding"
     assert records[-1]["case_id"] == finding.case_id
@@ -122,6 +128,41 @@ def test_finding_atomically_publishes_manifest_and_both_full_results(
     assert "errno" not in records[-1]
     assert "sqlstate" not in records[-1]
     assert "reason" not in records[-1]
+
+
+def test_finding_setup_larger_than_old_64_mib_manifest_limit_round_trips(
+    tmp_path: Path,
+) -> None:
+    huge_statement = "INSERT INTO `t0` VALUES ('" + ("x" * (65 << 20)) + "')"
+    finding = replace(
+        _finding("case_large_setup_1"),
+        setup_sql=("CREATE TABLE `t0` (`v` LONGTEXT)", huge_statement),
+    )
+
+    published = CaseBundleWriter(tmp_path).write_finding(finding)
+
+    assert (published / "manifest.json").stat().st_size < 1_000_000
+    assert (published / "case.sql").stat().st_size < 1024
+    stored = ArtifactReader(tmp_path).get_finding(finding.case_id)
+    assert stored.setup_sql == finding.setup_sql
+
+
+def test_legacy_v1_inline_replay_sql_remains_readable(tmp_path: Path) -> None:
+    finding = _finding("case_legacy_v1_1")
+    published = CaseBundleWriter(tmp_path).write_finding(finding)
+    manifest_path = published / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = 1
+    manifest["replay"].pop("setup_sql_ref")
+    manifest["replay"].pop("query_sql_ref")
+    manifest["replay"]["setup_sql"] = list(finding.setup_sql)
+    manifest["replay"]["query_sql"] = finding.query_sql
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    stored = ArtifactReader(tmp_path).get_finding(finding.case_id)
+
+    assert stored.setup_sql == finding.setup_sql
+    assert stored.query_sql == finding.query_sql
 
 
 def test_generator_contract_event_prefers_observed_error_identity(

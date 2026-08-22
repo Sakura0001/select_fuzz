@@ -610,7 +610,7 @@ def test_mutation_mismatch_stops_round_at_ten_queries_and_preserves_finding(
     stored = _only_stored_finding(tmp_path)
     assert stored.manifest["original_verdict"] == MutationVerdict.MISMATCH.value
     assert stored.manifest["replica_parameters_sha256"] == "f" * 64
-    assert stored.manifest["execution_sql"][-1] == "ROLLBACK"
+    assert stored.execution_sql[-1] == "ROLLBACK"
     assert stored.manifest["first_difference"]["transaction_steps"]  # type: ignore[index]
 
 
@@ -1481,5 +1481,5 @@ def test_setup_mismatch_persists_complete_finding_bundle(tmp_path: Path) -> None
     }
     stored = _only_stored_finding(tmp_path)
     assert stored.manifest["original_verdict"] == "setup_mismatch"
-    assert stored.manifest["setup_sql"] == list(materialized.bundle.statements)
+    assert stored.setup_sql == materialized.bundle.statements
     assert set(stored.results) == set(COMPARISON_ROLES)

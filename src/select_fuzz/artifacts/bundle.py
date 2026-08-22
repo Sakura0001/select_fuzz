@@ -41,6 +41,7 @@ _ARTIFACT_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SQLSTATE = re.compile(r"^[0-9A-Z]{5}$")
 MAX_RESULT_BYTES = 64 * 1024 * 1024
+MAX_INLINE_CASE_SQL_BYTES = 1024 * 1024
 _GENERATOR_CONTRACT_VERDICTS = frozenset({"expected_error_mismatch", "unexpected_valid_error"})
 
 
@@ -221,6 +222,36 @@ def _canonical_json(value: object, *, max_bytes: int = MAX_RESULT_BYTES) -> byte
     if len(payload) > max_bytes:
         raise ValueError(f"artifact JSON exceeds the {max_bytes}-byte safety limit")
     return payload
+
+
+def _sql_jsonl_line(statement: str) -> bytes:
+    return json.dumps(
+        statement,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8") + b"\n"
+
+
+def _sql_payload_ref(
+    path: str,
+    statements: tuple[str, ...],
+    *,
+    compressed_bytes: int = 0,
+) -> dict[str, object]:
+    digest = sha256()
+    uncompressed_bytes = 0
+    for statement in statements:
+        line = _sql_jsonl_line(statement)
+        digest.update(line)
+        uncompressed_bytes += len(line)
+    return {
+        "compressed_bytes": compressed_bytes,
+        "path": path,
+        "sha256": digest.hexdigest(),
+        "statement_count": len(statements),
+        "uncompressed_bytes": uncompressed_bytes,
+    }
 
 
 def _error_identity(value: object, label: str) -> tuple[int, str]:
@@ -477,19 +508,33 @@ class FindingRecord:
             raise ValueError("execution_sql must contain only nonempty statements")
         object.__setattr__(self, "execution_sql", execution_sql)
 
-    def manifest(self) -> dict[str, object]:
+    def manifest(
+        self,
+        *,
+        setup_sql_ref: Mapping[str, object] | None = None,
+        query_sql_ref: Mapping[str, object] | None = None,
+        execution_sql_ref: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
         result_files = {
             role.value: f"{role.value}.result.json.gz" for role in COMPARISON_ROLES
         }
         databases = {role.value: self.databases[role] for role in COMPARISON_ROLES}
+        setup_ref = dict(
+            setup_sql_ref
+            or _sql_payload_ref("setup.sql.jsonl.gz", self.setup_sql)
+        )
+        query_ref = dict(
+            query_sql_ref
+            or _sql_payload_ref("query.sql.jsonl.gz", (self.query_sql,))
+        )
         replay = {
             "databases": databases,
             "payload_sha256": self.payload_sha256,
-            "query_sql": self.query_sql,
+            "query_sql_ref": query_ref,
             "query_limits": dict(self.query_limits),
             "requires_same_session": self.requires_same_session,
             "seeds": dict(self.seeds),
-            "setup_sql": self.setup_sql,
+            "setup_sql_ref": setup_ref,
         }
         manifest = {
             "case_id": self.case_id,
@@ -502,22 +547,26 @@ class FindingRecord:
             "mode": self.mode,
             "original_verdict": self.original_verdict,
             "payload_sha256": self.payload_sha256,
-            "query_sql": self.query_sql,
+            "query_sql_ref": query_ref,
             "query_limits": dict(self.query_limits),
             "replay": replay,
             "result_files": result_files,
             "run_id": self.run_id,
-            "schema_version": 1,
+            "schema_version": 2,
             "seeds": dict(self.seeds),
-            "setup_sql": self.setup_sql,
+            "setup_sql_ref": setup_ref,
             "statistics": dict(self.statistics),
         }
         if self.replica_parameters_sha256 is not None:
             manifest["replica_parameters_sha256"] = self.replica_parameters_sha256
             replay["replica_parameters_sha256"] = self.replica_parameters_sha256
         if self.execution_sql:
-            manifest["execution_sql"] = self.execution_sql
-            replay["execution_sql"] = self.execution_sql
+            execution_ref = dict(
+                execution_sql_ref
+                or _sql_payload_ref("execution.sql.jsonl.gz", self.execution_sql)
+            )
+            manifest["execution_sql_ref"] = execution_ref
+            replay["execution_sql_ref"] = execution_ref
         return manifest
 
 
@@ -557,6 +606,37 @@ def _write_fsynced(path: Path, payload: bytes, fsync: Callable[[int], None]) -> 
         fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _write_sql_jsonl_gz(
+    path: Path,
+    statements: tuple[str, ...],
+    fsync: Callable[[int], None],
+) -> dict[str, object]:
+    """Stream a deterministic compressed SQL payload without building one giant JSON."""
+
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    digest = sha256()
+    uncompressed_bytes = 0
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as raw:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, compresslevel=9, mtime=0) as stream:
+                for statement in statements:
+                    line = _sql_jsonl_line(statement)
+                    digest.update(line)
+                    uncompressed_bytes += len(line)
+                    stream.write(line)
+            raw.flush()
+        fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return {
+        "compressed_bytes": path.stat().st_size,
+        "path": path.name,
+        "sha256": digest.hexdigest(),
+        "statement_count": len(statements),
+        "uncompressed_bytes": uncompressed_bytes,
+    }
 
 
 def _fsync_directory(path: Path, fsync: Callable[[int], None]) -> None:
@@ -739,7 +819,6 @@ class CaseBundleWriter:
             raise TypeError("write_finding requires FindingRecord")
         event = _finding_event(record)
         _canonical_json(event)
-        manifest_payload = _canonical_json(record.manifest())
         compact_results = {
             role: _compact_stored_result(record.results[role])
             for role in COMPARISON_ROLES
@@ -760,22 +839,61 @@ class CaseBundleWriter:
                     raise FileExistsError(f"finding already exists: {record.case_id}")
                 temporary.mkdir(mode=0o700)
                 try:
+                    setup_sql_ref = _write_sql_jsonl_gz(
+                        temporary / "setup.sql.jsonl.gz",
+                        record.setup_sql,
+                        self._fsync,
+                    )
+                    query_sql_ref = _write_sql_jsonl_gz(
+                        temporary / "query.sql.jsonl.gz",
+                        (record.query_sql,),
+                        self._fsync,
+                    )
+                    execution_sql_ref = (
+                        _write_sql_jsonl_gz(
+                            temporary / "execution.sql.jsonl.gz",
+                            record.execution_sql,
+                            self._fsync,
+                        )
+                        if record.execution_sql
+                        else None
+                    )
+                    manifest_payload = _canonical_json(
+                        record.manifest(
+                            setup_sql_ref=setup_sql_ref,
+                            query_sql_ref=query_sql_ref,
+                            execution_sql_ref=execution_sql_ref,
+                        )
+                    )
                     _write_fsynced(
                         temporary / "manifest.json",
                         manifest_payload,
                         self._fsync,
                     )
-                    write_minimal_failure_script(
-                        temporary / "case.sql",
-                        database=record.databases[NodeRole.CUSTOM_OFF],
-                        setup_statements=record.setup_sql,
-                        failing_query=record.query_sql,
-                        metadata={
-                            "case_id": record.case_id,
-                            "run_id": record.run_id,
-                            "verdict": record.original_verdict,
-                        },
-                    )
+                    setup_payload_bytes = setup_sql_ref["uncompressed_bytes"]
+                    assert isinstance(setup_payload_bytes, int)
+                    if setup_payload_bytes <= MAX_INLINE_CASE_SQL_BYTES:
+                        write_minimal_failure_script(
+                            temporary / "case.sql",
+                            database=record.databases[NodeRole.CUSTOM_OFF],
+                            setup_statements=record.setup_sql,
+                            failing_query=record.query_sql,
+                            metadata={
+                                "case_id": record.case_id,
+                                "run_id": record.run_id,
+                                "verdict": record.original_verdict,
+                            },
+                        )
+                    else:
+                        _write_fsynced(
+                            temporary / "case.sql",
+                            (
+                                "-- SQL 体积过大，已存入 setup.sql.jsonl.gz 和 "
+                                "query.sql.jsonl.gz。\n"
+                                "-- 请使用 select-fuzz replay 回放 manifest.json。\n"
+                            ).encode("utf-8"),
+                            self._fsync,
+                        )
                     write_difference_summary(
                         temporary / "case.diff",
                         {

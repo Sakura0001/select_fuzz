@@ -77,6 +77,18 @@ from select_fuzz.service import (
 )
 
 
+def _bounded_sql_evidence(sql: str | None, *, preview_characters: int = 512) -> object:
+    if sql is None:
+        return None
+    encoded = sql.encode("utf-8")
+    return {
+        "byte_length": len(encoded),
+        "preview": sql[:preview_characters],
+        "sha256": sha256(encoded).hexdigest(),
+        "truncated": len(sql) > preview_characters,
+    }
+
+
 _PRODUCTION_SCHEMA_PROFILES = frozenset(
     {
         SchemaProfile.REGULAR_INNODB.value,
@@ -799,7 +811,8 @@ class CorrectnessRoundEngine:
                     failing_sql = getattr(prepared, "setup_failing_sql", None)
                     statement_records = tuple(
                         {
-                            "sql": record.sql,
+                            "ordinal": ordinal,
+                            "sql": _bounded_sql_evidence(record.sql),
                             "roles": {
                                 role.value: {
                                     "affected_rows": record.results[role].affected_rows,
@@ -813,7 +826,9 @@ class CorrectnessRoundEngine:
                                 for role in COMPARISON_ROLES
                             },
                         }
-                        for record in getattr(prepared, "setup_statement_records", ())
+                        for ordinal, record in enumerate(
+                            getattr(prepared, "setup_statement_records", ())
+                        )
                     )
                     self._artifacts.write_finding(
                         FindingRecord(
@@ -844,7 +859,7 @@ class CorrectnessRoundEngine:
                                     role.value: results[role]["status"]
                                     for role in COMPARISON_ROLES
                                 },
-                                "failing_sql": failing_sql,
+                                "failing_sql": _bounded_sql_evidence(failing_sql),
                                 "statement_records": statement_records,
                             },
                             statistics={

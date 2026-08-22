@@ -333,4 +333,4 @@ def test_bundle_writer_requires_typed_records(tmp_path: Path) -> None:
     with pytest.raises(TypeError, match="FindingRecord"):
         writer.write_finding("finding")
     assert pass_record().to_event()["type"] == "pass"
-    assert finding_record().manifest()["schema_version"] == 1
+    assert finding_record().manifest()["schema_version"] == 2

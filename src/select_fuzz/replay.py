@@ -67,8 +67,8 @@ class ReplayCase:
         if set(finding.results) != set(COMPARISON_ROLES):
             raise ArtifactValidationError("产物角色集合无效")
         replay = finding.replay_manifest
-        setup_sql = replay.get("setup_sql")
-        query_sql = replay.get("query_sql")
+        setup_sql = finding.setup_sql
+        query_sql = finding.query_sql
         query_limits = replay.get("query_limits")
         payload_sha256 = replay.get("payload_sha256")
         seeds = replay.get("seeds")
@@ -80,7 +80,7 @@ class ReplayCase:
         if mode != "correctness":
             raise ArtifactValidationError("replay currently requires correctness mode")
         if (
-            not isinstance(setup_sql, list)
+            not isinstance(setup_sql, tuple)
             or not setup_sql
             or any(not isinstance(sql, str) or not sql.strip() for sql in setup_sql)
         ):
@@ -166,7 +166,7 @@ class ReplayCase:
         return cls(
             case_id=finding.case_id,
             mode=mode,
-            setup_sql=tuple(setup_sql),
+            setup_sql=setup_sql,
             query_sql=query_sql,
             query_limits=typed_limits,
             payload_sha256=payload_sha256,

@@ -64,6 +64,27 @@ query:
     assert alternatives[0].source_line != alternatives[1].source_line
 
 
+def test_mysql_8022_generator_rejects_known_crashing_exists_table_shape() -> None:
+    generator = GrammarQueryGenerator()
+
+    with pytest.raises(CandidateRejected, match=r"EXISTS\s*\(\s*TABLE"):
+        generator.generate(_schema(), seed=1)
+
+
+def test_custom_grammar_keeps_exists_table_validation_witness() -> None:
+    grammar = SelectGrammar.from_text(
+        """
+query:
+    SELECT CASE WHEN EXISTS ( TABLE _query_table ) THEN 1 ELSE 0 END AS `q1`
+"""
+    )
+    generator = GrammarQueryGenerator(grammar)
+
+    candidate = generator.generate(_schema(), seed=17)
+
+    assert "EXISTS (TABLE" in candidate.sql
+
+
 def test_type_compatibility_ratio_can_force_either_soft_lane() -> None:
     grammar = SelectGrammar.from_text(
         """
@@ -271,7 +292,11 @@ def test_generated_identifiers_are_bound_to_real_schema_or_derived_outputs() -> 
     qualified_reference = re.compile(r"`(r\d+)`\.`([^`]+)`")
 
     for seed in range(250):
-        candidate = generator.generate(schema, seed=seed)
+        try:
+            candidate = generator.generate(schema, seed=seed)
+        except CandidateRejected as error:
+            assert "known-crashing EXISTS (TABLE" in str(error)
+            continue
         defined_aliases = set(any_alias_definition.findall(candidate.sql))
         base_bindings = {
             alias: base_columns[table] for table, alias in definition.findall(candidate.sql)
@@ -430,7 +455,11 @@ def test_candidates_exclude_runtime_randomness_and_side_effects() -> None:
     )
 
     for seed in range(200):
-        candidate = generator.generate(_schema(), seed=seed)
+        try:
+            candidate = generator.generate(_schema(), seed=seed)
+        except CandidateRejected as error:
+            assert "known-crashing EXISTS (TABLE" in str(error)
+            continue
         assert forbidden.search(candidate.sql) is None
         assert ";" not in candidate.sql
         assert candidate.grammar_hash == generator.grammar.sha256

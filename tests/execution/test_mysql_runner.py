@@ -877,6 +877,41 @@ def test_connector_adapter_preserves_flags_and_fetches_warnings_after_result(
     assert connection.closed is True
 
 
+def test_pure_connector_decodes_rollup_bit_values_returned_as_decimal_text(
+    node: NodeConfig,
+) -> None:
+    connection = _RawConnection()
+    connect_kwargs: dict[str, object] = {}
+
+    def connect(**kwargs: object) -> _RawConnection:
+        connect_kwargs.update(kwargs)
+        return connection
+
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=connect,
+    )
+
+    with factory.query_session(node, "sf_case_1"):
+        pass
+
+    converter_class = connect_kwargs.get("converter_class")
+    assert converter_class is not None
+    converter = converter_class()  # type: ignore[operator]
+    rollup_descriptor = ("c3", 16, None, None, None, None, 1, 128, 63)
+    assert converter._bit_to_python(b"0", rollup_descriptor) == 0
+    assert (
+        converter._bit_to_python(b"576460752303423487", rollup_descriptor)
+        == 576460752303423487
+    )
+    aggregate_descriptor = ("q1", 16, None, None, None, None, 1, 160, 63)
+    assert converter._bit_to_python(b"7", aggregate_descriptor) == 7
+    assert converter._bit_to_python(b"17357906993533", aggregate_descriptor) == 17357906993533
+
+
 def test_connector_can_select_c_extension_for_fuzz_sessions(
     node: NodeConfig,
 ) -> None:

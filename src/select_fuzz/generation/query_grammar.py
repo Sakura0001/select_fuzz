@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from functools import cache
 from hashlib import sha256
 from importlib import resources
 from pathlib import Path
@@ -32,6 +33,10 @@ _PRODUCTION_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _TOKEN = re.compile(
     r"'(?:''|\\.|[^'])*'|\"(?:\\.|[^\"])*\"|"
     r"<=>|<=|>=|<>|!=|<<|>>|&&|\|\||[(),.]|[^\s(),.]+"
+)
+_MYSQL_8022_CRASHING_EXISTS_TABLE = re.compile(
+    r"\bEXISTS\s*\(\s*TABLE\b",
+    re.IGNORECASE,
 )
 
 
@@ -249,6 +254,11 @@ class SelectGrammar:
         )
         digest = sha256(f"{production_name}\x00{normalized}".encode("utf-8")).hexdigest()[:16]
         return f"v1:{production_name}:{digest}"
+
+
+@cache
+def _canonical_mysql_8022_grammar_sha256() -> str:
+    return SelectGrammar.default().sha256
 
 
 class TypeFamily(StrEnum):
@@ -848,6 +858,9 @@ class GrammarQueryGenerator:
         validator: ReadOnlyValidator | None = None,
     ) -> None:
         self.grammar = grammar or SelectGrammar.default()
+        self._uses_canonical_mysql_8022_grammar = (
+            self.grammar.sha256 == _canonical_mysql_8022_grammar_sha256()
+        )
         self.config = config or GrammarQueryConfig()
         self.validator = validator or ReadOnlyValidator()
 
@@ -881,6 +894,14 @@ class GrammarQueryGenerator:
         tokens = self._expand(self.grammar.root, context, depth=1)
         sql = _render_tokens(tokens)
         candidate = CandidateQuery(sql, seed, self.grammar.sha256, tuple(context.trace))
+        if (
+            self._uses_canonical_mysql_8022_grammar
+            and _MYSQL_8022_CRASHING_EXISTS_TABLE.search(sql)
+        ):
+            raise CandidateRejected(
+                "MySQL 8.0.22 known-crashing EXISTS (TABLE ...) shape",
+                candidate=candidate,
+            )
         try:
             self.validator.validate_text(sql)
         except UnsafeQuery as error:

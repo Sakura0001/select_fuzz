@@ -665,6 +665,31 @@ def test_timeout_vs_success_with_identical_results_is_over_budget() -> None:
     assert compare_three_nodes(mixed_resource).verdict is OracleVerdict.OVER_BUDGET
 
 
+def test_timeout_vs_database_error_is_over_budget_without_complete_results() -> None:
+    executions = (
+        _failure(
+            NodeRole.CUSTOM_OFF,
+            ExecutionStatus.TIMEOUT,
+            "Query execution was interrupted",
+            errno=1317,
+            sqlstate="70100",
+        ),
+        _failure(
+            NodeRole.CUSTOM_ON,
+            ExecutionStatus.ERROR,
+            "Can't write; duplicate key in temporary table",
+            errno=1022,
+            sqlstate="23000",
+        ),
+    )
+
+    result = compare_two_nodes(executions)
+
+    assert result.verdict is OracleVerdict.OVER_BUDGET
+    assert result.pairwise[0].matched
+    assert result.pairwise[0].category == "resource_limit"
+
+
 def test_success_error_mix_is_result_mismatch() -> None:
     executions = (
         _success(NodeRole.BASELINE, (INT,), ((1,),)),

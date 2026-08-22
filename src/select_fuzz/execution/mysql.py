@@ -13,6 +13,7 @@ from typing import Any
 
 import mysql.connector
 from mysql.connector.constants import FieldFlag
+from mysql.connector.conversion import MySQLConverter
 
 from select_fuzz.config import (
     MAX_STATEMENT_TIMEOUT_SECONDS,
@@ -39,6 +40,21 @@ _INTERNAL_SQLSTATE = "HY000"
 _TIMEOUT_SQLSTATE = "HYT00"
 _MYSQL_CLIENT_ERROR_RANGE = range(2000, 3000)
 _QUERY_SESSION_INITIALIZATION_SQL = "SET SESSION time_zone = '+00:00'"
+
+
+class _SelectFuzzMySQLConverter(MySQLConverter):
+    @staticmethod
+    def _bit_to_python(value: bytes, dsc: Any = None) -> int:
+        flags = dsc[7] if dsc is not None and len(dsc) > 7 else 0
+        if (
+            value.isdigit()
+            and (
+                len(value) > 8
+                or (isinstance(flags, int) and flags & FieldFlag.BINARY)
+            )
+        ):
+            return int(value)
+        return MySQLConverter._bit_to_python(value, dsc)
 
 
 def _session_value_sql(value: bool | int | float | str) -> str:
@@ -664,6 +680,8 @@ class MySQLConnectorFactory:
             "write_timeout": read_timeout_s,
             "use_pure": use_pure,
         }
+        if use_pure:
+            connect_kwargs["converter_class"] = _SelectFuzzMySQLConverter
         if use_pure:
             connection = self._connect(**connect_kwargs)
         else:

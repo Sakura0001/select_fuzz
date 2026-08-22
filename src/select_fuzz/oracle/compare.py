@@ -397,42 +397,21 @@ def _compare_pair(
     right: NodeExecution,
     budget: _FuzzyComparisonBudget,
 ) -> PairwiseComparison:
+    left_resource_limited = _is_resource_limited(left)
+    right_resource_limited = _is_resource_limited(right)
+    if left_resource_limited or right_resource_limited:
+        return PairwiseComparison(
+            left.role,
+            right.role,
+            True,
+            "resource_limit",
+            (
+                "both nodes reached the execution resource limit"
+                if left_resource_limited and right_resource_limited
+                else "one node reached the execution resource limit"
+            ),
+        )
     if left.status is not right.status:
-        if _is_resource_limited(left) and _is_resource_limited(right):
-            return PairwiseComparison(
-                left.role,
-                right.role,
-                True,
-                "resource_limit",
-                "both nodes reached the execution resource limit",
-            )
-        if _is_resource_limited(left) and right.status is ExecutionStatus.SUCCESS:
-            return PairwiseComparison(
-                left.role,
-                right.role,
-                True,
-                "resource_limit",
-                "one node reached the execution resource limit",
-            )
-        if _is_resource_limited(right) and left.status is ExecutionStatus.SUCCESS:
-            return PairwiseComparison(
-                left.role,
-                right.role,
-                True,
-                "resource_limit",
-                "one node reached the execution resource limit",
-            )
-        if {
-            left.status,
-            right.status,
-        } == {ExecutionStatus.TIMEOUT, ExecutionStatus.SUCCESS}:
-            return PairwiseComparison(
-                left.role,
-                right.role,
-                True,
-                "timeout",
-                "one node reached the execution resource limit",
-            )
         return PairwiseComparison(
             left.role,
             right.role,
@@ -440,8 +419,6 @@ def _compare_pair(
             "status",
             f"status differs: {left.status.value} != {right.status.value}",
         )
-    if left.status is ExecutionStatus.TIMEOUT:
-        return PairwiseComparison(left.role, right.role, True, "timeout", "both timed out")
     if left.status is ExecutionStatus.ERROR:
         if left.error is None or right.error is None:  # pragma: no cover - domain invariant
             raise OracleInputError("error execution lacks ErrorInfo")

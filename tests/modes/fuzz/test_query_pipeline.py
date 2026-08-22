@@ -425,7 +425,11 @@ def test_process_results_use_one_direct_response_queue_per_reader() -> None:
             outcomes = tuple(
                 pool.map(lambda ticket: ticket.result(Event()), tickets)
             )
-        assert all(outcome.query is not None for outcome in outcomes)
+        assert all(
+            outcome.query is not None or outcome.error_type == "CandidateRejected"
+            for outcome in outcomes
+        )
+        assert any(outcome.query is not None for outcome in outcomes)
     finally:
         pipeline.close()
 

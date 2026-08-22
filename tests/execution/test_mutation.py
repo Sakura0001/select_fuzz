@@ -139,6 +139,38 @@ def test_mutation_infrastructure_retry_safety_distinguishes_commit_ambiguity() -
     assert commit.retry_safety is MutationRetrySafety.COMMIT_AMBIGUOUS
 
 
+def test_mutation_timeout_is_infrastructure_not_mismatch() -> None:
+    now = monotonic_ns()
+
+    def timeout(role: NodeRole) -> NodeExecution:
+        return NodeExecution.failure(
+            role=role,
+            status=ExecutionStatus.TIMEOUT,
+            started_ns=now,
+            ended_ns=now,
+            connection_id=100,
+            error=ErrorInfo(65003, "HYT00", "query exceeded watchdog deadline"),
+            connection_reusable=False,
+        )
+
+    precommit_runner = _Runner()
+    precommit_runner.by_sql_role[(_batch().statements[0].sql, NodeRole.CUSTOM_ON)] = (
+        timeout(NodeRole.CUSTOM_ON)
+    )
+    precommit = _coordinator(precommit_runner).execute_batch(
+        "sf_mutation_timeout_1", _batch()
+    )
+
+    commit_runner = _Runner()
+    commit_runner.by_sql_role[("COMMIT", NodeRole.CUSTOM_ON)] = timeout(NodeRole.CUSTOM_ON)
+    commit = _coordinator(commit_runner).execute_batch("sf_mutation_timeout_2", _batch())
+
+    assert precommit.verdict is MutationVerdict.INFRASTRUCTURE_ERROR
+    assert precommit.retry_safety is MutationRetrySafety.SAFE_AFTER_RECONNECT
+    assert commit.verdict is MutationVerdict.INFRASTRUCTURE_ERROR
+    assert commit.retry_safety is MutationRetrySafety.COMMIT_AMBIGUOUS
+
+
 def test_commits_identical_affected_rows_without_replication_marker_or_wait() -> None:
     runner = _Runner()
 

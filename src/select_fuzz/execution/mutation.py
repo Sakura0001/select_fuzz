@@ -105,6 +105,12 @@ def _same(results: Mapping[NodeRole, NodeExecution], *, compare_affected_rows: b
     return len(identities) == 1
 
 
+def _is_infrastructure(result: NodeExecution) -> bool:
+    """Timeouts invalidate lockstep just like connection-level infrastructure errors."""
+
+    return result.status in {ExecutionStatus.INFRA_ERROR, ExecutionStatus.TIMEOUT}
+
+
 class PairMutationCoordinator:
     """Execute one batch as one transaction on both instances in lockstep."""
 
@@ -232,10 +238,7 @@ class PairMutationCoordinator:
                     result.status is not ExecutionStatus.SUCCESS for result in started.values()
                 ):
                     rolled_back = rollback()
-                    infrastructure = any(
-                        result.status is ExecutionStatus.INFRA_ERROR
-                        for result in started.values()
-                    )
+                    infrastructure = any(_is_infrastructure(result) for result in started.values())
                     return MutationBatchResult(
                         (
                             MutationVerdict.INFRASTRUCTURE_ERROR
@@ -299,10 +302,7 @@ class PairMutationCoordinator:
                     return MutationBatchResult(
                         verdict := (
                             MutationVerdict.INFRASTRUCTURE_ERROR
-                            if any(
-                                result.status is ExecutionStatus.INFRA_ERROR
-                                for result in results.values()
-                            )
+                            if any(_is_infrastructure(result) for result in results.values())
                             else MutationVerdict.MISMATCH
                         ),
                         batch,
@@ -345,10 +345,7 @@ class PairMutationCoordinator:
                 if not _same(committed, compare_affected_rows=False) or any(
                     result.status is not ExecutionStatus.SUCCESS for result in committed.values()
                 ):
-                    infrastructure = any(
-                        result.status is ExecutionStatus.INFRA_ERROR
-                        for result in committed.values()
-                    )
+                    infrastructure = any(_is_infrastructure(result) for result in committed.values())
                     return MutationBatchResult(
                         (
                             MutationVerdict.INFRASTRUCTURE_ERROR

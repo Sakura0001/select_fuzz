@@ -85,6 +85,12 @@ from select_fuzz.service import (
 )
 
 
+# A broken node must not pin a correctness worker in EXPLAIN retry forever.
+# Eight attempts retain short-lived reconnect tolerance while bounding the
+# amount of time a round can spend without executing a comparison query.
+BASELINE_EXPLAIN_MAX_INFRA_ATTEMPTS = 8
+
+
 def _bounded_sql_evidence(sql: str | None, *, preview_characters: int = 512) -> object:
     if sql is None:
         return None
@@ -1014,7 +1020,9 @@ class CorrectnessRoundEngine:
                     continue
                 if dynamic_queries:
                     explain_delay = 0.25
+                    explain_attempt_number = 0
                     while True:
+                        explain_attempt_number += 1
                         admission = self._coordinator.explain_baseline(
                             current_prepared,
                             query.sql,
@@ -1024,14 +1032,22 @@ class CorrectnessRoundEngine:
                         explain_execution = admission.execution
                         if explain_execution.status is not ExecutionStatus.INFRA_ERROR:
                             break
-                        events.publish(
-                            "infrastructure_pause",
-                            {
-                                "database": current_prepared.database,
-                                "stage": "baseline_explain",
-                                "worker_id": context.worker_id,
-                            },
-                        )
+                        pause_payload: dict[str, object] = {
+                            "attempt_number": explain_attempt_number,
+                            "database": current_prepared.database,
+                            "stage": "baseline_explain",
+                            "worker_id": context.worker_id,
+                        }
+                        if (
+                            explain_attempt_number
+                            >= BASELINE_EXPLAIN_MAX_INFRA_ATTEMPTS
+                        ):
+                            pause_payload["reason"] = (
+                                "baseline_explain_retry_budget_exhausted"
+                            )
+                        events.publish("infrastructure_pause", pause_payload)
+                        if "reason" in pause_payload:
+                            break
                         if stop_event.is_set():
                             break
                         if self._interruptible_backoff:

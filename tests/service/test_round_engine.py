@@ -358,6 +358,21 @@ class _ExplainCoordinator(_Coordinator):
         return _ExplainResult(prepared, self.explain_outcomes[sql])
 
 
+class _AlwaysInfraExplainCoordinator(_Coordinator):
+    def __init__(self) -> None:
+        super().__init__({})
+        self.explained: list[tuple[str, QueryLimits]] = []
+
+    def explain_baseline(
+        self,
+        prepared: _Prepared,
+        sql: str,
+        limits: QueryLimits,
+    ) -> _ExplainResult:
+        self.explained.append((sql, limits))
+        return _ExplainResult(prepared, _lost_connection(NodeRole.CUSTOM_OFF))
+
+
 class _Coverage:
     def __init__(self) -> None:
         self.hits: list[str] = []
@@ -580,6 +595,55 @@ def test_dynamic_grammar_round_explains_first_and_counts_only_successful_pairs(
     assert uniform_record["observed_error_identities"] == [
         {"errno": 1366, "sqlstate": "HY000"},
     ] * 2
+
+
+def test_baseline_explain_infrastructure_retry_budget_ends_round_without_finding(
+    tmp_path: Path,
+) -> None:
+    query = _queries(1)[0]
+    materialized = RoundMaterialization(
+        database="sf_c_20260713t120000_w0_r0_sgrammar_n123_q0",
+        bundle=_Bundle(),
+        queries=(),
+        schema_seed=21,
+        data_seed=22,
+        schema=cast(SchemaManifest, object()),
+        dynamic_queries=True,
+    )
+    source = _DynamicSource(materialized, (query,))
+    coordinator = _AlwaysInfraExplainCoordinator()
+    sleeper_calls: list[float] = []
+
+    def sleeper(delay: float) -> None:
+        sleeper_calls.append(delay)
+        if len(sleeper_calls) > 8:
+            raise AssertionError("baseline EXPLAIN retries did not stop")
+
+    sink = _CollectSink()
+    engine = CorrectnessRoundEngine(
+        source,
+        coordinator,
+        CaseBundleWriter(tmp_path),
+        _Coverage(),
+        QueryLimits(15, 10_000, 32 << 20),
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
+        sleeper=sleeper,
+    )
+
+    summary = engine.run_round(
+        _context(1), EventPublisher("run_engine_1", sink), Event()
+    )
+
+    assert summary.queries_completed == 0
+    assert summary.findings == 0
+    assert summary.rejected == 0
+    assert len(coordinator.explained) == 8
+    pauses = [event for event in sink.events if event.kind == "infrastructure_pause"]
+    assert pauses[-1].payload["stage"] == "baseline_explain"
+    assert pauses[-1].payload["reason"] == "baseline_explain_retry_budget_exhausted"
+    assert pauses[-1].payload["attempt_number"] == 8
 
 
 def test_generated_round_source_defaults_to_grammar_only_generation(

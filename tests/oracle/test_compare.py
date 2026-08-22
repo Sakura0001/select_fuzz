@@ -93,14 +93,10 @@ def test_compare_two_nodes_matches_equal_results_and_rejects_baseline() -> None:
 @pytest.mark.parametrize(
     "changed",
     [
-        ColumnMeta("other", 3, False, False, False),
         ColumnMeta("k", 8, False, False, False),
-        ColumnMeta("k", 3, True, False, False),
         ColumnMeta("k", 3, False, True, False),
         ColumnMeta("k", 3, False, False, True),
         ColumnMeta("k", 3, False, False, False, character_set_id=45),
-        ColumnMeta("k", 3, False, False, False, column_length=11),
-        ColumnMeta("k", 3, False, False, False, decimals=2),
         ColumnMeta("k", 3, False, False, False, flags=32),
     ],
 )
@@ -114,6 +110,28 @@ def test_complete_column_metadata_is_compared(changed: ColumnMeta) -> None:
     assert result.verdict is OracleVerdict.RESULT_MISMATCH
     assert len(result.pairwise) == 3
     assert any(pair.category == "metadata" for pair in result.pairwise if not pair.matched)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        ColumnMeta("other", 3, False, False, False),
+        ColumnMeta("k", 3, True, False, False),
+        ColumnMeta("k", 3, False, False, False, column_length=11),
+        ColumnMeta("k", 3, False, False, False, decimals=2),
+    ],
+)
+def test_connector_only_metadata_is_advisory(changed: ColumnMeta) -> None:
+    result = compare_two_nodes(
+        (
+            _success(NodeRole.CUSTOM_OFF, (INT,), ((1,),)),
+            _success(NodeRole.CUSTOM_ON, (changed,), ((1,),)),
+        )
+    )
+
+    assert result.verdict is OracleVerdict.MATCH
+    assert result.advisories
+    assert result.advisories[0].category == "metadata"
 
 
 def test_plan_dependent_field_origin_flags_are_advisory() -> None:

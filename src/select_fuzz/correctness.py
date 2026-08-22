@@ -49,6 +49,7 @@ from select_fuzz.generation.coverage import CoverageLedger
 from select_fuzz.generation.mutation import MutationBatch, MutationBatchGenerator
 from select_fuzz.generation.data import DataScenario
 from select_fuzz.generation.query_contract import ExpectedError, QueryLane
+from select_fuzz.generation.query_determinism import assess_query_determinism
 from select_fuzz.generation.query_grammar import (
     CandidateRejected,
     GrammarQueryConfig,
@@ -927,6 +928,28 @@ class CorrectnessRoundEngine:
                         break
                 if stop_event.is_set():
                     break
+                determinism = assess_query_determinism(query.sql)
+                if not determinism.admissible:
+                    rejected += 1
+                    rejection_payload = {
+                        "case_ordinal": query.case_ordinal,
+                        "database": current_prepared.database,
+                        "query_seed": query.seed,
+                        "query_sql": query.sql,
+                        "reason": determinism.reason,
+                        "row_limits": determinism.row_limits,
+                        "round_number": context.round_number,
+                        "worker_id": context.worker_id,
+                    }
+                    self._artifacts.write_query_record(
+                        context.worker_id,
+                        {
+                            **rejection_payload,
+                            "type": "query_candidate_rejected",
+                        },
+                    )
+                    events.publish("query_rejected", rejection_payload)
+                    continue
                 if dynamic_queries:
                     explain_delay = 0.25
                     while True:
@@ -1152,6 +1175,21 @@ class CorrectnessRoundEngine:
                     continue
                 try:
                     oracle = compare_two_nodes(executions)
+                    for advisory in oracle.advisories:
+                        events.publish(
+                            "metadata_advisory",
+                            {
+                                "case_id": case_id,
+                                "case_ordinal": query.case_ordinal,
+                                "category": advisory.category,
+                                "database": current_prepared.database,
+                                "detail": advisory.detail,
+                                "left_role": advisory.left_role.value,
+                                "query_seed": query.seed,
+                                "right_role": advisory.right_role.value,
+                                "worker_id": context.worker_id,
+                            },
+                        )
                     error_analysis = analyze_query_errors(query.expected_error, executions)
                     encoded = {
                         execution.role: node_execution_to_artifact(execution)

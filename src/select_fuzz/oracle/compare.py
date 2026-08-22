@@ -38,7 +38,8 @@ ORDERED_FAST_PATH_MIN_ROWS = 256
 # remove PRI_KEY/NUM from an otherwise identical JOIN result.  Preserve the raw
 # flags in artifacts, but exclude non-value semantics from correctness.
 _ADVISORY_FIELD_FLAG_MASK = (
-    0x0002  # PRI_KEY
+    0x0001  # NOT_NULL
+    | 0x0002  # PRI_KEY
     | 0x0004  # UNIQUE_KEY
     | 0x0008  # MULTIPLE_KEY
     | 0x0200  # AUTO_INCREMENT
@@ -66,9 +67,18 @@ class PairwiseComparison:
 
 
 @dataclass(frozen=True, slots=True)
+class OracleAdvisory:
+    left_role: NodeRole
+    right_role: NodeRole
+    category: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
 class OracleResult:
     verdict: OracleVerdict
     pairwise: tuple[PairwiseComparison, ...]
+    advisories: tuple[OracleAdvisory, ...] = ()
 
     @property
     def matched(self) -> bool:
@@ -322,15 +332,55 @@ def _semantic_column_metadata(column: ColumnMeta) -> tuple[object, ...]:
     # differential finding.
     character_set_id = None if column.binary else column.character_set_id
     return (
-        column.name,
         column.type_code,
-        column.nullable,
         column.unsigned,
         column.binary,
         character_set_id,
+        flags,
+    )
+
+
+def _advisory_column_metadata(column: ColumnMeta) -> tuple[object, ...]:
+    advisory_flags = (
+        None if column.flags is None else column.flags & _ADVISORY_FIELD_FLAG_MASK
+    )
+    return (
+        column.name,
+        column.nullable,
         column.column_length,
         column.decimals,
-        flags,
+        column.character_set_id,
+        advisory_flags,
+    )
+
+
+def _metadata_advisory(
+    left: NodeExecution,
+    right: NodeExecution,
+    comparison: PairwiseComparison,
+) -> OracleAdvisory | None:
+    if (
+        not comparison.matched
+        or left.status is not ExecutionStatus.SUCCESS
+        or right.status is not ExecutionStatus.SUCCESS
+    ):
+        return None
+    left_metadata = tuple(_advisory_column_metadata(column) for column in left.columns)
+    right_metadata = tuple(_advisory_column_metadata(column) for column in right.columns)
+    if left_metadata == right_metadata:
+        return None
+    differing_ordinals = tuple(
+        index
+        for index, (left_column, right_column) in enumerate(
+            zip(left_metadata, right_metadata, strict=True)
+        )
+        if left_column != right_column
+    )
+    return OracleAdvisory(
+        left.role,
+        right.role,
+        "metadata",
+        f"connector-only column metadata differs at ordinals {differing_ordinals}",
     )
 
 
@@ -433,6 +483,13 @@ def compare_three_nodes(executions: Iterable[NodeExecution]) -> OracleResult:
     pairwise = tuple(
         _compare_pair(left, right, budget) for left, right in combinations(ordered, 2)
     )
+    advisories = tuple(
+        advisory
+        for (left, right), comparison in zip(
+            combinations(ordered, 2), pairwise, strict=True
+        )
+        if (advisory := _metadata_advisory(left, right, comparison)) is not None
+    )
     if all(_is_resource_limited(execution) for execution in ordered):
         verdict = OracleVerdict.OVER_BUDGET
     elif (
@@ -448,7 +505,7 @@ def compare_three_nodes(executions: Iterable[NodeExecution]) -> OracleResult:
         verdict = OracleVerdict.MATCH
     else:
         verdict = OracleVerdict.RESULT_MISMATCH
-    return OracleResult(verdict=verdict, pairwise=pairwise)
+    return OracleResult(verdict=verdict, pairwise=pairwise, advisories=advisories)
 
 
 def compare_two_nodes(executions: Iterable[NodeExecution]) -> OracleResult:
@@ -469,10 +526,15 @@ def compare_two_nodes(executions: Iterable[NodeExecution]) -> OracleResult:
             f"infra_error executions must not enter oracle: {', '.join(infra_roles)}"
         )
     pair = _compare_pair(ordered[0], ordered[1], _FuzzyComparisonBudget())
+    advisory = _metadata_advisory(ordered[0], ordered[1], pair)
     if all(_is_resource_limited(execution) for execution in ordered):
         verdict = OracleVerdict.OVER_BUDGET
     elif any(_is_resource_limited(execution) for execution in ordered) and pair.matched:
         verdict = OracleVerdict.OVER_BUDGET
     else:
         verdict = OracleVerdict.MATCH if pair.matched else OracleVerdict.RESULT_MISMATCH
-    return OracleResult(verdict=verdict, pairwise=(pair,))
+    return OracleResult(
+        verdict=verdict,
+        pairwise=(pair,),
+        advisories=() if advisory is None else (advisory,),
+    )

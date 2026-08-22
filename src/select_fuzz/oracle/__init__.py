@@ -1,6 +1,7 @@
 """Typed correctness oracle."""
 
 from select_fuzz.oracle.compare import (
+    OracleAdvisory,
     OracleResult,
     OracleVerdict,
     PairwiseComparison,
@@ -17,6 +18,7 @@ from select_fuzz.oracle.query_errors import (
 
 __all__ = [
     "OracleInputError",
+    "OracleAdvisory",
     "OracleCapacityError",
     "OracleResult",
     "OracleVerdict",

@@ -405,6 +405,46 @@ def _queries(count: int) -> tuple[CorrectnessQuery, ...]:
     )
 
 
+def test_nondeterministic_limit_is_rejected_before_mysql_execution(tmp_path: Path) -> None:
+    query = CorrectnessQuery(
+        sql="SELECT `id` FROM `t0` LIMIT 1",
+        target_feature_id="limit",
+        coverage_tags=frozenset({"limit"}),
+        coverage_eligible=True,
+        seed=123,
+        case_ordinal=0,
+    )
+    materialized = RoundMaterialization(
+        "sf_c_20260713t120000_w0_r0_sabc_n123_q0",
+        _Bundle(),
+        (query,),
+        21,
+        22,
+    )
+    coordinator = _Coordinator({query.sql: _match()})
+    sink = _CollectSink()
+    engine = CorrectnessRoundEngine(
+        _Source(materialized),
+        coordinator,
+        CaseBundleWriter(tmp_path),
+        _Coverage(),
+        QueryLimits(15, 10_000, 32 << 20),
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
+    )
+
+    summary = engine.run_round(
+        _context(1), EventPublisher("run_engine_1", sink), Event()
+    )
+
+    assert summary.queries_completed == 0
+    assert summary.rejected == 1
+    assert coordinator.executed == []
+    rejected = next(event for event in sink.events if event.kind == "query_rejected")
+    assert rejected.payload["reason"] == "nondeterministic_row_limit"
+
+
 def test_dynamic_grammar_round_explains_first_and_counts_only_successful_pairs(
     tmp_path: Path,
 ) -> None:

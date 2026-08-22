@@ -1631,6 +1631,7 @@ def test_setup_mismatch_persists_complete_finding_bundle(tmp_path: Path) -> None
     coordinator = _Coordinator({query.sql: _match()})
     prepared = _Prepared(materialized.database, materialized.bundle)
     prepared.status = PrepareStatus.SETUP_MISMATCH
+    prepared.setup_failing_sql = materialized.bundle.statements[0]
     prepared.nodes = (
         SetupNodeResult(
             NodeRole.CUSTOM_OFF,
@@ -1668,6 +1669,7 @@ def test_setup_mismatch_persists_complete_finding_bundle(tmp_path: Path) -> None
         "message": "unknown column",
         "sqlstate": "42S22",
     }
+    assert setup_event.payload["setup_failing_sql"]["preview"] == materialized.bundle.statements[0]  # type: ignore[index]
     stored = _only_stored_finding(tmp_path)
     assert stored.manifest["original_verdict"] == "setup_mismatch"
     assert stored.setup_sql == materialized.bundle.statements

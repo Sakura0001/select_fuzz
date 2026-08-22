@@ -432,6 +432,32 @@ def test_initial_dml_affected_row_difference_is_setup_mismatch(
     assert failing_record.results[NodeRole.CUSTOM_ON].affected_rows == 2
 
 
+@pytest.mark.parametrize(
+    ("errno", "message"),
+    [
+        (1114, "The table 't0' is full"),
+        (3675, "Create table/tablespace 't0' failed, as disk is full"),
+    ],
+)
+def test_capacity_setup_errors_are_infrastructure_pauses_not_findings(
+    nodes: tuple[NodeConfig, ...], errno: int, message: str
+) -> None:
+    factory = _Factory()
+    factory.semantic_failures[NodeRole.CUSTOM_OFF] = _DatabaseError(
+        errno, "HY000", message
+    )
+
+    prepared = _coordinator(nodes, factory, _QueryRunner()).prepare(
+        _Bundle(requires_same_session=False),
+        database="sf_correctness_setup_capacity_1",
+    )
+
+    assert prepared.status is PrepareStatus.INFRASTRUCTURE_PAUSE
+    # The failed setup statement remains available for crash/storage
+    # investigation even though the differential verdict is not a finding.
+    assert prepared.setup_failing_sql == "CREATE TABLE `t0` (`id` BIGINT PRIMARY KEY);"
+
+
 def test_initial_dml_requires_connector_affected_rows(
     nodes: tuple[NodeConfig, ...],
 ) -> None:

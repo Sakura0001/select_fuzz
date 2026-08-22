@@ -22,12 +22,14 @@ _PAYLOAD_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DML_STATEMENT = re.compile(r"^\s*(?:INSERT|UPDATE|DELETE|REPLACE)\b", re.IGNORECASE)
 _INFRA_MYSQL_ERRNOS = frozenset(
     {
+        1038,  # out of sort memory; capacity depends on the node's buffers
         1040,  # too many connections
         1042,  # hostname resolution failure
         1043,  # bad handshake
         1044,  # database access denied
         1045,  # authentication denied
         1053,  # server shutdown in progress
+        1114,  # table is full / storage capacity exhausted
         1129,  # host blocked
         1130,  # host not allowed
         *range(1152, 1162),  # packet/read/write transport failures
@@ -42,6 +44,24 @@ _INFRA_MYSQL_ERRNOS = frozenset(
         3024,  # statement execution timeout
     }
 )
+
+
+def _is_infrastructure_database_error(error: ErrorInfo | None) -> bool:
+    """Return whether an error is caused by node capacity/transport.
+
+    3675 is used by MySQL 8.0 for several tablespace-create failures.  Only
+    the explicit disk-full form is infrastructure; other 3675 messages can
+    still represent a semantic setup problem and must remain comparable.
+    """
+
+    if error is None:
+        return False
+    if error.errno in _INFRA_MYSQL_ERRNOS or 2000 <= error.errno < 3000:
+        return True
+    return error.errno == 3675 and any(
+        marker in error.message.casefold()
+        for marker in ("disk is full", "no space left", "disk full", "tablespace is full")
+    )
 
 
 class SetupBundleLike(Protocol):
@@ -166,11 +186,7 @@ class LockstepSetupResult:
 
 def _statement_failure(node: NodeConfig, error: Exception) -> SetupStatementNodeResult:
     database_error = _database_error(error)
-    if (
-        database_error is not None
-        and database_error.errno not in _INFRA_MYSQL_ERRNOS
-        and not 2000 <= database_error.errno < 3000
-    ):
+    if database_error is not None and not _is_infrastructure_database_error(database_error):
         return SetupStatementNodeResult(
             node.role,
             ExecutionStatus.ERROR,
@@ -264,11 +280,7 @@ class MySQLSetupRunner:
                     _execute_and_close(active_session, statement)
         except Exception as error:
             database_error = _database_error(error)
-            if (
-                database_error is not None
-                and database_error.errno not in _INFRA_MYSQL_ERRNOS
-                and not 2000 <= database_error.errno < 3000
-            ):
+            if database_error is not None and not _is_infrastructure_database_error(database_error):
                 return SetupNodeResult(
                     role=node.role,
                     status=ExecutionStatus.ERROR,

@@ -789,6 +789,7 @@ class CorrectnessRoundEngine:
         def publish_setup_pause(prepared: PreparedRound, attempt_number: int) -> None:
             """Persist every setup-retry cause before the next backoff sleep."""
 
+            setup_failing_sql = getattr(prepared, "setup_failing_sql", None)
             events.publish(
                 "infrastructure_pause",
                 {
@@ -801,6 +802,7 @@ class CorrectnessRoundEngine:
                     },
                     "schema_seed": materialized.schema_seed,
                     "data_seed": materialized.data_seed,
+                    "setup_failing_sql": _bounded_sql_evidence(setup_failing_sql),
                     "setup_payload_sha256": materialized.bundle.payload_sha256,
                     "setup_statement_count": len(materialized.bundle.statements),
                     "round_number": context.round_number,
@@ -836,6 +838,8 @@ class CorrectnessRoundEngine:
         )
         if prepared.status is not PrepareStatus.READY:
             kind = prepared.status.value
+            setup_failing_sql = getattr(prepared, "setup_failing_sql", None)
+            setup_statement_records = getattr(prepared, "setup_statement_records", ())
             events.publish(
                 "setup_not_ready",
                 {
@@ -844,6 +848,8 @@ class CorrectnessRoundEngine:
                         result.role.value: _setup_result_to_artifact(result)
                         for result in prepared.nodes
                     },
+                    "setup_failing_sql": _bounded_sql_evidence(setup_failing_sql),
+                    "setup_statement_count": len(setup_statement_records),
                     "status": kind,
                 },
             )
@@ -859,7 +865,7 @@ class CorrectnessRoundEngine:
                     results = {
                         result.role: _setup_result_to_artifact(result) for result in prepared.nodes
                     }
-                    failing_sql = getattr(prepared, "setup_failing_sql", None)
+                    failing_sql = setup_failing_sql
                     statement_records = tuple(
                         {
                             "ordinal": ordinal,
@@ -878,7 +884,7 @@ class CorrectnessRoundEngine:
                             },
                         }
                         for ordinal, record in enumerate(
-                            getattr(prepared, "setup_statement_records", ())
+                            setup_statement_records
                         )
                     )
                     self._artifacts.write_finding(

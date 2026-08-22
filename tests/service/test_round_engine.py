@@ -614,6 +614,41 @@ def test_mutation_mismatch_stops_round_at_ten_queries_and_preserves_finding(
     assert stored.manifest["first_difference"]["transaction_steps"]  # type: ignore[index]
 
 
+def test_mutation_infrastructure_error_stops_round_without_false_finding(
+    tmp_path: Path,
+) -> None:
+    queries = _queries(12)
+    materialized = RoundMaterialization(
+        "sf_c_20260713t120000_w0_r0_sabc_n123_q0",
+        _Bundle(),
+        queries,
+        21,
+        22,
+    )
+    sink = _CollectSink()
+    engine = CorrectnessRoundEngine(
+        _Source(materialized),
+        _Coordinator({query.sql: _match() for query in queries}),
+        CaseBundleWriter(tmp_path),
+        _Coverage(),
+        QueryLimits(15, 10_000, 32 << 20),
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
+        mutation_generator=_MutationGenerator(),  # type: ignore[arg-type]
+        mutation_coordinator=_MutationCoordinator(MutationVerdict.INFRASTRUCTURE_ERROR),
+    )
+
+    summary = engine.run_round(
+        _context(12), EventPublisher("run_engine_1", sink), Event()
+    )
+
+    assert summary.queries_completed == 10
+    assert summary.findings == 0
+    assert not tuple((tmp_path / "findings").glob("*/manifest.json"))
+    assert any(event.kind == "mutation_infrastructure_error" for event in sink.events)
+
+
 def test_round_engine_persists_finding_and_stops_current_database(
     tmp_path: Path,
 ) -> None:

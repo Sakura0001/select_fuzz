@@ -38,6 +38,7 @@ from select_fuzz.execution import (
     NodeQueryRunner,
     PreparedRound,
     PrepareStatus,
+    QuerySession,
     QueryLimits,
     PairMutationCoordinator,
     SetupNodeResult,
@@ -218,7 +219,13 @@ class CoordinatorLike(Protocol):
 
 
 class MutationCoordinatorLike(Protocol):
-    def execute_batch(self, database: str, batch: MutationBatch) -> MutationBatchResult: ...
+    def execute_batch(
+        self,
+        database: str,
+        batch: MutationBatch,
+        *,
+        sessions: Mapping[NodeRole, QuerySession] | None = None,
+    ) -> MutationBatchResult: ...
 
 
 class ProductionCoordinatorAdapter:
@@ -1359,6 +1366,12 @@ class CorrectnessRoundEngine:
                     logged_execute = getattr(
                         self._mutation_coordinator, "execute_batch_logged", None
                     )
+                    prepared_sessions = getattr(current_prepared, "sessions", None)
+                    session_arguments = (
+                        {"sessions": prepared_sessions}
+                        if isinstance(prepared_sessions, Mapping)
+                        else {}
+                    )
                     if callable(logged_execute):
                         self._artifacts.begin_round_dml_batch(
                             context.worker_id, current_prepared.database
@@ -1372,6 +1385,7 @@ class CorrectnessRoundEngine:
                                     current_prepared.database,
                                     sql,
                                 ),
+                                **session_arguments,
                             )
                         finally:
                             self._artifacts.end_round_dml_batch(
@@ -1381,6 +1395,7 @@ class CorrectnessRoundEngine:
                         mutation_result = self._mutation_coordinator.execute_batch(
                             current_prepared.database,
                             mutation_batch,
+                            **session_arguments,
                         )
                         self._artifacts.append_round_dml_batch(
                             context.worker_id,
@@ -1397,11 +1412,25 @@ class CorrectnessRoundEngine:
                             "actual_affected_rows": mutation_result.actual_affected_rows,
                             "target_rows": mutation_batch.target_rows,
                             "verdict": mutation_result.verdict.value,
+                            "retry_safety": mutation_result.retry_safety.value,
                             "worker_id": context.worker_id,
                         },
                     )
                     if mutation_result.verdict is MutationVerdict.COMMITTED:
                         committed_mutation_sql.extend(mutation_result.executed_sql)
+                    if mutation_result.verdict is MutationVerdict.INFRASTRUCTURE_ERROR:
+                        events.publish(
+                            "mutation_infrastructure_error",
+                            {
+                                "database": current_prepared.database,
+                                "failing_sql": mutation_result.failing_sql,
+                                "retry_safety": mutation_result.retry_safety.value,
+                                "sequence": mutation_sequence,
+                                "worker_id": context.worker_id,
+                            },
+                        )
+                        current_prepared.close()
+                        break
                     if mutation_result.terminates_round:
                         mutation_case_id = deterministic_id(
                             "case",

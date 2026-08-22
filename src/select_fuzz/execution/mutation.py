@@ -30,6 +30,12 @@ class MutationVerdict(StrEnum):
     REPLICA_SYNC_TIMEOUT = "replica_sync_timeout"
 
 
+class MutationRetrySafety(StrEnum):
+    NONE = "none"
+    SAFE_AFTER_RECONNECT = "safe_after_reconnect"
+    COMMIT_AMBIGUOUS = "commit_ambiguous"
+
+
 @dataclass(frozen=True, slots=True)
 class MutationBatchResult:
     verdict: MutationVerdict
@@ -40,6 +46,7 @@ class MutationBatchResult:
     failing_sql: str | None = None
     replication_result: ReplicationWaitResult | None = None
     actual_affected_rows: int | None = None
+    retry_safety: MutationRetrySafety = MutationRetrySafety.NONE
 
     @property
     def committed(self) -> bool:
@@ -107,8 +114,19 @@ class PairMutationCoordinator:
         self._runner = runner
         self._limits = limits
 
-    def execute_batch(self, database: str, batch: MutationBatch) -> MutationBatchResult:
-        return self._execute_batch(database, batch, on_statement=None)
+    def execute_batch(
+        self,
+        database: str,
+        batch: MutationBatch,
+        *,
+        sessions: Mapping[NodeRole, QuerySession] | None = None,
+    ) -> MutationBatchResult:
+        return self._execute_batch(
+            database,
+            batch,
+            sessions=sessions,
+            on_statement=None,
+        )
 
     def execute_batch_logged(
         self,
@@ -116,20 +134,27 @@ class PairMutationCoordinator:
         batch: MutationBatch,
         *,
         on_statement: Callable[[str], None],
+        sessions: Mapping[NodeRole, QuerySession] | None = None,
     ) -> MutationBatchResult:
-        return self._execute_batch(database, batch, on_statement=on_statement)
+        return self._execute_batch(
+            database,
+            batch,
+            sessions=sessions,
+            on_statement=on_statement,
+        )
 
     def _execute_batch(
         self,
         database: str,
         batch: MutationBatch,
         *,
+        sessions: Mapping[NodeRole, QuerySession] | None,
         on_statement: Callable[[str], None] | None,
     ) -> MutationBatchResult:
         database = validate_database_name(database)
         executed_sql: list[str] = []
         statement_results: list[Mapping[NodeRole, NodeExecution]] = []
-        sessions: dict[NodeRole, QuerySession] = {}
+        active_sessions: dict[NodeRole, QuerySession] = {}
         actual_affected_rows = 0
 
         def record_statement(sql: str) -> None:
@@ -139,10 +164,15 @@ class PairMutationCoordinator:
 
         try:
             with ExitStack() as stack:
-                for node in self._primaries:
-                    sessions[node.role] = stack.enter_context(
-                        self._factory.query_session(node, database)
-                    )
+                if sessions is None:
+                    for node in self._primaries:
+                        active_sessions[node.role] = stack.enter_context(
+                            self._factory.query_session(node, database)
+                        )
+                else:
+                    active_sessions = {
+                        role: sessions[role] for role in COMPARISON_ROLES
+                    }
 
                 def execute(sql: str) -> dict[NodeRole, NodeExecution]:
                     barrier = Barrier(2)
@@ -150,7 +180,7 @@ class PairMutationCoordinator:
                     def one(node: NodeConfig) -> NodeExecution:
                         try:
                             result = self._runner.run_session(
-                                sessions[node.role],
+                                active_sessions[node.role],
                                 node,
                                 database,
                                 sql,
@@ -187,13 +217,26 @@ class PairMutationCoordinator:
                     result.status is not ExecutionStatus.SUCCESS for result in started.values()
                 ):
                     rolled_back = rollback()
+                    infrastructure = any(
+                        result.status is ExecutionStatus.INFRA_ERROR
+                        for result in started.values()
+                    )
                     return MutationBatchResult(
-                        MutationVerdict.MISMATCH,
+                        (
+                            MutationVerdict.INFRASTRUCTURE_ERROR
+                            if infrastructure
+                            else MutationVerdict.MISMATCH
+                        ),
                         batch,
                         tuple(executed_sql),
                         tuple(statement_results),
                         started,
                         "START TRANSACTION",
+                        retry_safety=(
+                            MutationRetrySafety.SAFE_AFTER_RECONNECT
+                            if infrastructure
+                            else MutationRetrySafety.NONE
+                        ),
                     )
 
                 for statement in batch.statements:
@@ -239,7 +282,7 @@ class PairMutationCoordinator:
                             )
                     rollback()
                     return MutationBatchResult(
-                        (
+                        verdict := (
                             MutationVerdict.INFRASTRUCTURE_ERROR
                             if any(
                                 result.status is ExecutionStatus.INFRA_ERROR
@@ -253,6 +296,11 @@ class PairMutationCoordinator:
                         results,
                         statement.sql,
                         actual_affected_rows=actual_affected_rows,
+                        retry_safety=(
+                            MutationRetrySafety.SAFE_AFTER_RECONNECT
+                            if verdict is MutationVerdict.INFRASTRUCTURE_ERROR
+                            else MutationRetrySafety.NONE
+                        ),
                     )
 
                 if not 12 <= actual_affected_rows <= 50:
@@ -282,14 +330,27 @@ class PairMutationCoordinator:
                 if not _same(committed, compare_affected_rows=False) or any(
                     result.status is not ExecutionStatus.SUCCESS for result in committed.values()
                 ):
+                    infrastructure = any(
+                        result.status is ExecutionStatus.INFRA_ERROR
+                        for result in committed.values()
+                    )
                     return MutationBatchResult(
-                        MutationVerdict.MISMATCH,
+                        (
+                            MutationVerdict.INFRASTRUCTURE_ERROR
+                            if infrastructure
+                            else MutationVerdict.MISMATCH
+                        ),
                         batch,
                         tuple(executed_sql),
                         tuple(statement_results),
                         committed,
                         "COMMIT",
                         actual_affected_rows=actual_affected_rows,
+                        retry_safety=(
+                            MutationRetrySafety.COMMIT_AMBIGUOUS
+                            if infrastructure
+                            else MutationRetrySafety.NONE
+                        ),
                     )
         except Exception as error:
             failures = {
@@ -304,6 +365,7 @@ class PairMutationCoordinator:
                 failures,
                 executed_sql[-1] if executed_sql else "START TRANSACTION",
                 actual_affected_rows=actual_affected_rows,
+                retry_safety=MutationRetrySafety.SAFE_AFTER_RECONNECT,
             )
 
         return MutationBatchResult(
@@ -322,6 +384,7 @@ TriadMutationCoordinator = PairMutationCoordinator
 
 __all__ = [
     "MutationBatchResult",
+    "MutationRetrySafety",
     "MutationVerdict",
     "PairMutationCoordinator",
     "TriadMutationCoordinator",

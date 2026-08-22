@@ -5,7 +5,11 @@ from time import monotonic_ns
 
 from select_fuzz.config import COMPARISON_ROLES, NodeConfig, NodeRole
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
-from select_fuzz.execution.mutation import MutationVerdict, PairMutationCoordinator
+from select_fuzz.execution.mutation import (
+    MutationRetrySafety,
+    MutationVerdict,
+    PairMutationCoordinator,
+)
 from select_fuzz.execution.triad import QueryLimits
 from select_fuzz.generation.mutation import (
     MutationBatch,
@@ -20,8 +24,12 @@ class _Session:
 
 
 class _Factory:
+    def __init__(self) -> None:
+        self.query_session_calls = 0
+
     @contextmanager
     def query_session(self, node, database):  # type: ignore[no-untyped-def]
+        self.query_session_calls += 1
         yield _Session()
 
     control_session = query_session
@@ -75,13 +83,60 @@ def _batch(sql: str = "UPDATE `t0` SET `id` = `id` + 1 LIMIT 17") -> MutationBat
     )
 
 
-def _coordinator(runner: _Runner) -> PairMutationCoordinator:
+def _coordinator(
+    runner: _Runner, factory: _Factory | None = None
+) -> PairMutationCoordinator:
     return PairMutationCoordinator(
         _nodes(),
-        factory=_Factory(),
+        factory=factory or _Factory(),
         runner=runner,
         limits=QueryLimits(10, 1, 1024),
     )
+
+
+def test_mutation_uses_caller_owned_pair_without_opening_connections() -> None:
+    runner = _Runner()
+    factory = _Factory()
+    sessions = {role: _Session() for role in COMPARISON_ROLES}
+
+    result = _coordinator(runner, factory).execute_batch(
+        "sf_mutation_owned_1", _batch(), sessions=sessions
+    )
+
+    assert result.verdict is MutationVerdict.COMMITTED
+    assert factory.query_session_calls == 0
+
+
+def test_mutation_infrastructure_retry_safety_distinguishes_commit_ambiguity() -> None:
+    now = monotonic_ns()
+
+    def infrastructure(role: NodeRole) -> NodeExecution:
+        return NodeExecution.failure(
+            role=role,
+            status=ExecutionStatus.INFRA_ERROR,
+            started_ns=now,
+            ended_ns=now,
+            connection_id=100,
+            error=ErrorInfo(2013, "HY000", "lost connection"),
+            connection_reusable=False,
+        )
+
+    update_runner = _Runner()
+    update_runner.by_sql_role[(_batch().statements[0].sql, NodeRole.CUSTOM_ON)] = (
+        infrastructure(NodeRole.CUSTOM_ON)
+    )
+    precommit = _coordinator(update_runner).execute_batch("sf_mutation_retry_1", _batch())
+
+    commit_runner = _Runner()
+    commit_runner.by_sql_role[("COMMIT", NodeRole.CUSTOM_ON)] = infrastructure(
+        NodeRole.CUSTOM_ON
+    )
+    commit = _coordinator(commit_runner).execute_batch("sf_mutation_retry_2", _batch())
+
+    assert precommit.verdict is MutationVerdict.INFRASTRUCTURE_ERROR
+    assert precommit.retry_safety is MutationRetrySafety.SAFE_AFTER_RECONNECT
+    assert commit.verdict is MutationVerdict.INFRASTRUCTURE_ERROR
+    assert commit.retry_safety is MutationRetrySafety.COMMIT_AMBIGUOUS
 
 
 def test_commits_identical_affected_rows_without_replication_marker_or_wait() -> None:

@@ -9,6 +9,7 @@ from select_fuzz.execution.mysql import (
 )
 from select_fuzz.execution.mutation import (
     MutationBatchResult,
+    MutationRetrySafety,
     MutationVerdict,
     PairMutationCoordinator,
     TriadMutationCoordinator,
@@ -87,6 +88,7 @@ __all__ = [
     "MySQLConnectorFactory",
     "MySQLSetupRunner",
     "MutationBatchResult",
+    "MutationRetrySafety",
     "MutationVerdict",
     "NodeQueryRunner",
     "PairMutationCoordinator",

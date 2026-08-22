@@ -24,11 +24,12 @@ uv run python scripts/run_taurus_feature_campaign.py \
 
 异常分类遵循以下边界：
 
-- 查询执行阶段的非超时 2006/2013/2055 会标为 `crash_candidate`，并保留完整复现 case；
+- 查询执行阶段的非超时 2006/2013/2055 标为 `connection_lost_infra`，保留完整 SQL/case
+  供外部进程监控复核，但不会仅凭断链证据生成 crash finding；
 - watchdog timeout 后产生的 lost connection 标为 `timeout_connection`；
-- 建连或 setup 阶段的 lost connection 标为 `connection_lost_infra`，不会直接误报 crash；
+- 建连或 setup 阶段的 lost connection 同样标为 `connection_lost_infra`，不会直接误报 crash；
+- 只有上游明确提供 `crash_candidate` 分类时才生成 crash finding；
 - 本地节点预期不支持 Taurus-only 变量/DDL 时记录为 `capability_probe`，不生成正确性 finding。
 
 停止方式：`Ctrl-C` 或发送 SIGTERM。当前 case 完成后 campaign 写入 `run_finished`，已创建的
 测试数据库保留，便于人工复现。
-

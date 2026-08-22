@@ -1491,9 +1491,9 @@ class GrammarQueryGenerator:
                 raise CandidateRejected("window ordering requires a sortable column")
             return ", ".join(binding.render() for binding in bindings)
         if symbol == "_window_numeric_order":
-            return self._strict_column(context, TypeFamily.NUMERIC)
+            return self._window_order_with_primary_key(context, TypeFamily.NUMERIC)
         if symbol == "_window_temporal_order":
-            return self._strict_column(context, TypeFamily.TEMPORAL)
+            return self._window_order_with_primary_key(context, TypeFamily.TEMPORAL)
         if symbol == "_deterministic_group_concat":
             binding = self._strict_binding(context, TypeFamily.TEXT)
             expression = f"LEFT(HEX({binding.render()}), 1)"
@@ -1583,6 +1583,37 @@ class GrammarQueryGenerator:
             if binding.column.family is not TypeFamily.SPATIAL
         }
         return [bindings[identity] for identity in sorted(bindings)]
+
+    def _window_order_with_primary_key(
+        self,
+        context: _GenerationContext,
+        desired: TypeFamily,
+    ) -> str:
+        """Make scalar window ordering stable when the source table has ``id``.
+
+        Numeric/temporal window alternatives previously selected one ordinary
+        column.  Duplicate values then let ``ROW_NUMBER``/``LAG`` and similar
+        functions assign rows in plan-dependent order, producing differential
+        findings even when both engines returned the same underlying rows.
+        Add the generated table's primary-key-shaped ``id`` as a deterministic
+        tie-breaker whenever it is visible; derived relations without an id
+        retain their existing shape and are handled by later admission checks.
+        """
+        selected = self._strict_binding(context, desired)
+        order = [selected.render()]
+        if selected.column.name != "id":
+            primary_key = next(
+                (
+                    binding
+                    for binding in self._visible_column_pool(context)
+                    if binding.relation_alias == selected.relation_alias
+                    and binding.column.name == "id"
+                ),
+                None,
+            )
+            if primary_key is not None:
+                order.append(primary_key.render())
+        return ", ".join(order)
 
     @staticmethod
     def _render_registered_function(

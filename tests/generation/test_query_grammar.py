@@ -118,6 +118,29 @@ relation:
     assert ".`s`" in cross_type.sql
 
 
+def test_window_numeric_order_appends_primary_key_tiebreaker() -> None:
+    grammar = SelectGrammar.from_text(
+        """
+query:
+    _scope_begin _prepare_relation SELECT ROW_NUMBER ( ) OVER ( ORDER BY _window_numeric_order ) AS _projection_alias FROM _emit_relation _scope_end
+relation:
+    _table
+"""
+    )
+    schema = GrammarSchema(
+        (
+            GrammarTable(
+                "ordered",
+                (GrammarColumn("id", "BIGINT"), GrammarColumn("n", "INT")),
+            ),
+        )
+    )
+
+    candidate = GrammarQueryGenerator(grammar).generate(schema, seed=0)
+
+    assert "ORDER BY `r1`.`n`, `r1`.`id`" in candidate.sql
+
+
 def test_single_table_optimizer_hint_always_names_a_real_alias() -> None:
     grammar = SelectGrammar.from_text(
         """

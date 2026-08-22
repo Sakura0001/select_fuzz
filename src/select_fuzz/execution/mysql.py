@@ -27,6 +27,7 @@ from select_fuzz.execution.protocols import (
     CursorLike,
     QuerySession,
 )
+from select_fuzz.execution.evidence import capture_exception_evidence
 from select_fuzz.execution.timeout import KillQueryWatchdog
 
 
@@ -133,6 +134,12 @@ def _internal_error(message: str, *, errno: int = INTERNAL_RUNNER_ERRNO) -> Erro
     return ErrorInfo(errno, _INTERNAL_SQLSTATE, message)
 
 
+def _internal_exception_error(prefix: str, error: BaseException) -> ErrorInfo:
+    rendered = str(error)
+    suffix = f": {rendered}" if rendered else ""
+    return _internal_error(f"{prefix}：{type(error).__name__}{suffix}")
+
+
 def _database_error(error: Exception) -> ErrorInfo | None:
     errno = getattr(error, "errno", None)
     sqlstate = getattr(error, "sqlstate", None)
@@ -203,8 +210,11 @@ class NodeQueryRunner:
                 started_ns=started_ns,
                 ended_ns=max(started_ns, ended_ns),
                 connection_id=None,
-                error=_internal_error(f"query session lifecycle failed: {type(error).__name__}"),
+                error=_internal_exception_error("查询会话建立失败", error),
                 connection_reusable=False,
+                failure_evidence=capture_exception_evidence(
+                    error, "query_session_connect"
+                ),
             )
 
     def run_session(
@@ -239,8 +249,11 @@ class NodeQueryRunner:
                 started_ns=initial_ns,
                 ended_ns=max(initial_ns, ended_ns),
                 connection_id=None,
-                error=_internal_error(f"connection identity lookup failed: {type(error).__name__}"),
+                error=_internal_exception_error("连接标识读取失败", error),
                 connection_reusable=False,
+                failure_evidence=capture_exception_evidence(
+                    error, "connection_identity"
+                ),
             )
 
         try:
@@ -253,10 +266,11 @@ class NodeQueryRunner:
                 started_ns=initial_ns,
                 ended_ns=max(initial_ns, ended_ns),
                 connection_id=connection_id,
-                error=_internal_error(
-                    f"query session initialization failed: {type(error).__name__}"
-                ),
+                error=_internal_exception_error("查询会话初始化失败", error),
                 connection_reusable=False,
+                failure_evidence=capture_exception_evidence(
+                    error, "query_session_initialization"
+                ),
             )
 
         if barrier is not None:
@@ -264,13 +278,17 @@ class NodeQueryRunner:
                 barrier.wait(timeout=float(timeout_s))
             except Exception as error:
                 ended_ns = self._monotonic_ns()
+                sanitized = RuntimeError(type(error).__name__)
                 return NodeExecution.failure(
                     role=node.role,
                     status=ExecutionStatus.INFRA_ERROR,
                     started_ns=initial_ns,
                     ended_ns=max(initial_ns, ended_ns),
                     connection_id=connection_id,
-                    error=_internal_error(f"start barrier failed: {type(error).__name__}"),
+                    error=_internal_error(f"查询启动同步失败：{type(error).__name__}"),
+                    failure_evidence=capture_exception_evidence(
+                        sanitized, "start_barrier"
+                    ),
                 )
 
         statement_token = object()
@@ -293,7 +311,8 @@ class NodeQueryRunner:
                 started_ns=initial_ns,
                 ended_ns=max(initial_ns, ended_ns),
                 connection_id=connection_id,
-                error=_internal_error(f"watchdog arm failed: {type(error).__name__}"),
+                error=_internal_exception_error("查询超时监控启动失败", error),
+                failure_evidence=capture_exception_evidence(error, "watchdog_arm"),
             )
 
         started_ns = self._monotonic_ns()

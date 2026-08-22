@@ -168,6 +168,9 @@ def node_execution_to_artifact(execution: NodeExecution) -> dict[str, object]:
         "elapsed_ns": execution.elapsed_ns,
         "ended_ns": execution.ended_ns,
         "error": error,
+        "failure_evidence": (
+            None if execution.failure_evidence is None else dict(execution.failure_evidence)
+        ),
         "performance_payload": (
             None
             if execution.performance_payload is None

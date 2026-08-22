@@ -119,6 +119,7 @@ class NodeExecution:
     watchdog_error_type: str | None = None
     connection_reusable: bool = True
     performance_payload: Mapping[str, object] | None = None
+    failure_evidence: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "columns", tuple(self.columns))
@@ -158,6 +159,12 @@ class NodeExecution:
                 self,
                 "performance_payload",
                 _freeze_mapping(self.performance_payload),
+            )
+        if self.failure_evidence is not None:
+            object.__setattr__(
+                self,
+                "failure_evidence",
+                _freeze_mapping(self.failure_evidence),
             )
 
     @property
@@ -210,6 +217,7 @@ class NodeExecution:
         connection_reusable: bool = True,
         performance_payload: Mapping[str, object] | None = None,
         affected_rows: int | None = None,
+        failure_evidence: Mapping[str, object] | None = None,
     ) -> NodeExecution:
         if status is ExecutionStatus.SUCCESS:
             raise ValueError("failure status cannot be success")
@@ -227,6 +235,7 @@ class NodeExecution:
             watchdog_error_type=watchdog_error_type,
             connection_reusable=connection_reusable,
             performance_payload=performance_payload,
+            failure_evidence=failure_evidence,
         )
 
 

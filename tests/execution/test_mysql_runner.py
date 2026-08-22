@@ -166,6 +166,13 @@ class _Factory:
         yield _ControlSession(self)
 
 
+class _FailingQueryFactory(_Factory):
+    @contextmanager
+    def query_session(self, node: NodeConfig, database: str):  # type: ignore[no-untyped-def]
+        raise ConnectionError("peer reset during handshake")
+        yield self.session  # pragma: no cover
+
+
 @pytest.fixture
 def node() -> NodeConfig:
     return NodeConfig(role=NodeRole.BASELINE, host="127.0.0.1", port=33061)
@@ -199,6 +206,26 @@ def test_runner_streams_typed_rows_and_closes_owned_session(node: NodeConfig) ->
     assert cursor.closed is True
     assert factory.query_context_entries == 1
     assert max(cursor.fetch_sizes) == 1
+
+
+def test_query_session_failure_preserves_original_evidence(node: NodeConfig) -> None:
+    result = _runner(_FailingQueryFactory(_Session(_Cursor()))).run(
+        node,
+        "sf_case_1",
+        "SELECT 1",
+        timeout_s=15,
+        row_limit=10,
+        byte_limit=1024,
+    )
+
+    assert result.status is ExecutionStatus.INFRA_ERROR
+    assert result.error is not None
+    assert result.error.message == (
+        "查询会话建立失败：ConnectionError: peer reset during handshake"
+    )
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["failure_stage"] == "query_session_connect"
+    assert result.failure_evidence["exception"]["message"] == "peer reset during handshake"
 
 
 def test_run_session_keeps_caller_owned_temporary_session_open(node: NodeConfig) -> None:
@@ -292,7 +319,11 @@ def test_session_initialization_failure_is_infrastructure_and_skips_user_sql(
     assert result.connection_id == 41
     assert result.connection_reusable is False
     assert result.error is not None
-    assert result.error.message == "query session initialization failed: _DatabaseError"
+    assert result.error.message == (
+        "查询会话初始化失败：_DatabaseError: Unknown or incorrect time zone"
+    )
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["failure_stage"] == "query_session_initialization"
     assert session.executed == ["SET SESSION time_zone = '+00:00'"]
     assert factory.control_context_entries == 0
 

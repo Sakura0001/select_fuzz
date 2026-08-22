@@ -38,6 +38,25 @@ def test_node_execution_success_records_typed_timing_and_immutable_payload() -> 
         result.performance_payload["tree"] = "changed"  # type: ignore[index]
 
 
+def test_node_execution_freezes_failure_evidence() -> None:
+    evidence = {"failure_stage": "connect", "exception": {"message": "reset"}}
+
+    result = NodeExecution.failure(
+        role=NodeRole.CUSTOM_OFF,
+        status=ExecutionStatus.INFRA_ERROR,
+        started_ns=1,
+        ended_ns=2,
+        connection_id=None,
+        error=ErrorInfo(65002, "HY000", "查询会话建立失败：ConnectionError: reset"),
+        failure_evidence=evidence,
+        connection_reusable=False,
+    )
+    evidence["exception"]["message"] = "mutated"  # type: ignore[index]
+
+    assert isinstance(result.failure_evidence, MappingProxyType)
+    assert result.failure_evidence["exception"] == {"message": "reset"}
+
+
 def test_execution_normalizes_sequences_and_freezes_nested_row_values() -> None:
     json_value = {"items": [1, 2]}
     result = NodeExecution.success(

@@ -1,0 +1,46 @@
+# 8 小时测试前 4 小时：本地开源 MySQL 8.0.22 对比远端 TaurusDB PQ。
+# 只保存地址和环境变量名；密码不要写入配置或日志。
+mode: correctness
+full_thread_sql_log: false
+replica_parameters_file: null
+replica_sync_timeout_seconds: 10
+
+nodes:
+  - role: custom_off
+    host: 127.0.0.1
+    port: 13307
+    username_env: SELECT_FUZZ_LOCAL_MYSQL_USER
+    password_env: SELECT_FUZZ_LOCAL_MYSQL_PASSWORD
+    role_probe_sql: "SELECT @@version_comment"
+    role_probe_expected: "MySQL Community Server - GPL"
+
+  - role: custom_on
+    host: 116.63.205.246
+    port: 3306
+    username_env: SELECT_FUZZ_TAURUS_MYSQL_USER
+    password_env: SELECT_FUZZ_TAURUS_MYSQL_PASSWORD
+    role_probe_sql: "SELECT @@force_parallel_execute"
+    role_probe_expected: "ON"
+
+correctness:
+  # 远端为 8 vCPU/16 GiB；64 个 worker 用于提高 PQ 触发概率。
+  workers: 64
+  queries_per_round: 2000
+  timeout_seconds: 10
+  row_limit: 50000
+  byte_limit: 134217728
+  min_rows_per_table: 100
+  max_rows_per_table: 5000
+  min_tables: 4
+  max_tables: 8
+  min_columns: 8
+  max_columns: 64
+  max_indexes_per_table: 32
+  max_query_tables: 3
+  query_grammar_path: null
+  grammar_compatible_type_percent: 80
+  explain_timeout_seconds: 10
+  connection_timeout_seconds: 30
+  connect_concurrency_limit: 64
+  query_attempt_json_log: true
+  diagnostics_interval_seconds: 5

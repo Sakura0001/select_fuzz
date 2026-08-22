@@ -158,6 +158,34 @@ def test_one_sided_server_sort_memory_error_is_a_resource_outcome() -> None:
     assert analysis.coverage_eligible is False
 
 
+def test_temporary_table_full_is_a_resource_outcome() -> None:
+    analysis = analyze_query_errors(
+        None,
+        mixed_error_success_pair(
+            1114,
+            "HY000",
+            "The table '/var/lib/engine/tmp/#sql56c5_123a5_0' is full",
+        ),
+    )
+
+    assert analysis.disposition is QueryErrorDisposition.RESOURCE_LIMIT
+    assert analysis.coverage_eligible is False
+
+
+def test_user_table_full_is_not_treated_as_a_resource_outcome() -> None:
+    analysis = analyze_query_errors(
+        None,
+        mixed_error_success_pair(
+            1114,
+            "HY000",
+            "The table 'application_rows' is full",
+        ),
+    )
+
+    assert analysis.disposition is QueryErrorDisposition.DEFER_TO_ORACLE
+    assert analysis.coverage_eligible is False
+
+
 def test_error_analysis_rejects_an_untyped_expected_error_contract() -> None:
     with pytest.raises(TypeError, match="ExpectedError"):
         analyze_query_errors("unknown_column", success_pair())  # type: ignore[arg-type]

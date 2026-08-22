@@ -16,6 +16,8 @@ from select_fuzz.oracle.errors import OracleInputError
 
 ErrorIdentity: TypeAlias = tuple[int, str]
 _SERVER_RESOURCE_ERRNOS = frozenset({1038})
+_TEMP_TABLE_FULL_ERRNO = 1114
+_TEMP_TABLE_MARKERS = ("#sql", "/tmp/", "\\tmp\\")
 
 
 class QueryErrorDisposition(StrEnum):
@@ -58,6 +60,33 @@ def _identity(execution: NodeExecution) -> ErrorIdentity | None:
     return execution.error.errno, execution.error.sqlstate
 
 
+def is_temporary_table_full_error(execution: NodeExecution) -> bool:
+    """Return whether MySQL reported a full internal temporary table."""
+
+    if (
+        execution.status is not ExecutionStatus.ERROR
+        or execution.error is None
+        or execution.error.errno != _TEMP_TABLE_FULL_ERRNO
+    ):
+        return False
+    message = execution.error.message.casefold()
+    return any(marker in message for marker in _TEMP_TABLE_MARKERS)
+
+
+def is_resource_limited_execution(execution: NodeExecution) -> bool:
+    """Return whether an execution stopped at a configured/server resource limit."""
+
+    if execution.status is ExecutionStatus.TIMEOUT:
+        return True
+    if execution.status is not ExecutionStatus.ERROR or execution.error is None:
+        return False
+    return (
+        execution.error.errno in _SERVER_RESOURCE_ERRNOS
+        | {INTERNAL_RESULT_LIMIT_ERRNO}
+        or is_temporary_table_full_error(execution)
+    )
+
+
 def analyze_query_errors(
     expected: ExpectedError | None,
     executions: Iterable[NodeExecution],
@@ -70,22 +99,7 @@ def analyze_query_errors(
     identities = tuple(_identity(execution) for execution in ordered)
     statuses = tuple(execution.status for execution in ordered)
 
-    def is_resource_outcome(
-        status: ExecutionStatus,
-        identity: ErrorIdentity | None,
-    ) -> bool:
-        return status is ExecutionStatus.TIMEOUT or (
-            identity is not None
-            and (
-                identity[0] in _SERVER_RESOURCE_ERRNOS
-                or identity[0] == INTERNAL_RESULT_LIMIT_ERRNO
-            )
-        )
-
-    resource_outcomes = tuple(
-        is_resource_outcome(status, identity)
-        for status, identity in zip(statuses, identities, strict=True)
-    )
+    resource_outcomes = tuple(is_resource_limited_execution(execution) for execution in ordered)
     if any(resource_outcomes) and all(
         status is ExecutionStatus.SUCCESS or resource
         for status, resource in zip(statuses, resource_outcomes, strict=True)

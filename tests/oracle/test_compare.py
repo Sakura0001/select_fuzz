@@ -709,6 +709,42 @@ def test_timeout_vs_database_error_is_over_budget_without_complete_results() -> 
     assert result.pairwise[0].category == "resource_limit"
 
 
+def test_temporary_table_full_vs_success_is_over_budget() -> None:
+    executions = (
+        _success(NodeRole.CUSTOM_OFF, (INT,), ((1,),)),
+        _failure(
+            NodeRole.CUSTOM_ON,
+            ExecutionStatus.ERROR,
+            "The table '/var/lib/engine/tmp/#sql56c5_123a5_0' is full",
+            errno=1114,
+        ),
+    )
+
+    result = compare_two_nodes(executions)
+
+    assert result.verdict is OracleVerdict.OVER_BUDGET
+    assert result.pairwise[0].matched
+    assert result.pairwise[0].category == "resource_limit"
+
+
+def test_user_table_full_vs_success_remains_a_status_mismatch() -> None:
+    executions = (
+        _success(NodeRole.CUSTOM_OFF, (INT,), ((1,),)),
+        _failure(
+            NodeRole.CUSTOM_ON,
+            ExecutionStatus.ERROR,
+            "The table 'application_rows' is full",
+            errno=1114,
+        ),
+    )
+
+    result = compare_two_nodes(executions)
+
+    assert result.verdict is OracleVerdict.RESULT_MISMATCH
+    assert not result.pairwise[0].matched
+    assert result.pairwise[0].category == "status"
+
+
 def test_success_error_mix_is_result_mismatch() -> None:
     executions = (
         _success(NodeRole.BASELINE, (INT,), ((1,),)),

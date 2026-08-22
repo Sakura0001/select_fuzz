@@ -28,6 +28,7 @@ from select_fuzz.oracle.errors import (
     OracleInputError,
     normalize_error,
 )
+from select_fuzz.oracle.query_errors import is_temporary_table_full_error
 
 
 MAX_FUZZY_SCALAR_COMPARISONS = 4_000_000
@@ -395,7 +396,10 @@ def _is_resource_limited(execution: NodeExecution) -> bool:
     return execution.status is ExecutionStatus.TIMEOUT or (
         execution.status is ExecutionStatus.ERROR
         and execution.error is not None
-        and execution.error.errno == INTERNAL_RESULT_LIMIT_ERRNO
+        and (
+            execution.error.errno == INTERNAL_RESULT_LIMIT_ERRNO
+            or is_temporary_table_full_error(execution)
+        )
     )
 
 

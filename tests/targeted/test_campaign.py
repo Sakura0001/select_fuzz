@@ -121,6 +121,28 @@ def test_connection_open_loss_is_an_infrastructure_pause_not_a_finding() -> None
     }
 
 
+def test_query_lost_connection_is_an_infrastructure_pause_not_a_finding() -> None:
+    off = {
+        "status": "success",
+        "setup_error": None,
+        "queries": [
+            {
+                "status": "error",
+                "error": {
+                    "classification": "connection_lost_infra",
+                    "errno": 2013,
+                },
+            }
+        ],
+    }
+    on = {"status": "success", "setup_error": None, "queries": [{"status": "success"}]}
+    assert _comparison("flashback", off, on) == {
+        "matched": True,
+        "category": "infrastructure_pause",
+        "infrastructure_roles": ["custom_off"],
+    }
+
+
 def test_optimizer_switch_capability_gap_is_not_a_finding() -> None:
     off = {
         "setup_error": {"errno": 1193},

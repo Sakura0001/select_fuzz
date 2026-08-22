@@ -64,14 +64,12 @@ def comparison_session_variables() -> dict[NodeRole, dict[str, str]]:
 class _SelectFuzzMySQLConverter(MySQLConverter):
     @staticmethod
     def _bit_to_python(value: bytes, dsc: Any = None) -> int:
-        flags = dsc[7] if dsc is not None and len(dsc) > 7 else 0
-        if (
-            value.isdigit()
-            and (
-                len(value) > 8
-                or (isinstance(flags, int) and flags & FieldFlag.BINARY)
-            )
-        ):
+        # MySQL and Taurus can both return a materialized BIT value as
+        # decimal ASCII bytes, but Taurus may omit the protocol BINARY flag.
+        # Gate on the byte representation itself so the same value is decoded
+        # consistently on both nodes; non-ASCII wire bytes still use the
+        # connector's normal BIT decoder.
+        if value.isdigit():
             return int(value)
         return MySQLConverter._bit_to_python(value, dsc)
 

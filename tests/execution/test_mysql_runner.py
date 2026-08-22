@@ -933,6 +933,12 @@ def test_pure_connector_decodes_rollup_bit_values_returned_as_decimal_text(
     aggregate_descriptor = ("q1", 16, None, None, None, None, 1, 160, 63)
     assert converter._bit_to_python(b"7", aggregate_descriptor) == 7
     assert converter._bit_to_python(b"17357906993533", aggregate_descriptor) == 17357906993533
+    unmarked_descriptor = ("q1", 16, None, None, None, None, 1, 0, 63)
+    # Taurus may omit the BINARY flag on a materialized BIT expression while
+    # still returning decimal ASCII bytes.  The value must normalize the same
+    # way as stock MySQL's flagged result instead of becoming ASCII code 48.
+    assert converter._bit_to_python(b"0", unmarked_descriptor) == 0
+    assert converter._bit_to_python(b"12592", unmarked_descriptor) == 12592
 
 
 def test_connector_can_select_c_extension_for_fuzz_sessions(

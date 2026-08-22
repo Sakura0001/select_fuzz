@@ -1,11 +1,58 @@
 from __future__ import annotations
 
 from select_fuzz.targeted_campaign import (
+    CampaignNode,
     _comparison,
+    _kill_server_connection,
     classify_connection_event,
     compare_result_payloads,
     make_database_name,
 )
+
+
+class _ControlConnection:
+    connection_id = 9001
+
+    def __init__(self) -> None:
+        self.sql: list[str] = []
+        self.closed = False
+
+    def cursor(self):  # type: ignore[no-untyped-def]
+        connection = self
+
+        class Cursor:
+            with_rows = False
+
+            def execute(self, sql: str) -> None:
+                connection.sql.append(sql)
+
+            def fetchall(self) -> list[object]:
+                return []
+
+            def close(self) -> None:
+                return None
+
+        return Cursor()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_kill_server_connection_uses_separate_control_session(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    control = _ControlConnection()
+    node = CampaignNode("custom_on", "127.0.0.1", 3306, "USER", "PASSWORD")
+    monkeypatch.setattr(
+        "select_fuzz.targeted_campaign._connect",
+        lambda _node, _database: control,
+    )
+
+    result = _kill_server_connection(node, 41)
+
+    assert result == {"attempted": True, "succeeded": True}
+    assert control.sql == ["KILL CONNECTION 41"]
+    assert control.closed is True
 
 
 def test_non_timeout_lost_connection_is_infrastructure_not_a_finding() -> None:

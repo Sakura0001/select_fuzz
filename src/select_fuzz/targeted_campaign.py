@@ -298,6 +298,39 @@ def _connect(node: CampaignNode, database: str) -> Any:
     )
 
 
+def _kill_server_connection(
+    node: CampaignNode,
+    connection_id: object,
+) -> dict[str, object]:
+    """Terminate a timed-out query from an independent control session."""
+
+    if not isinstance(connection_id, int) or isinstance(connection_id, bool) or connection_id <= 0:
+        return {"attempted": False, "succeeded": False, "error": "invalid connection id"}
+    control: Any | None = None
+    try:
+        control = _connect(node, "information_schema")
+        cursor = control.cursor()
+        try:
+            cursor.execute(f"KILL CONNECTION {connection_id}")
+            if getattr(cursor, "with_rows", False):
+                cursor.fetchall()
+        finally:
+            cursor.close()
+        return {"attempted": True, "succeeded": True}
+    except Exception as error:
+        return {
+            "attempted": True,
+            "succeeded": False,
+            "error": _error_payload(error),
+        }
+    finally:
+        if control is not None:
+            try:
+                control.close()
+            except Exception:
+                pass
+
+
 def _run_node(
     node: CampaignNode,
     database: str,
@@ -307,8 +340,10 @@ def _run_node(
 ) -> dict[str, object]:
     started = time.monotonic()
     connection: Any | None = None
+    connection_id: object = None
     try:
         connection = _connect(node, "information_schema")
+        connection_id = getattr(connection, "connection_id", None)
         cursor = connection.cursor()
         try:
             cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{database}`")
@@ -386,6 +421,21 @@ def _run_node(
                             "sql": query,
                         }
                     )
+                    if error_payload["classification"] in {
+                        "timeout",
+                        "timeout_connection",
+                        "connection_lost_infra",
+                    }:
+                        error_payload["server_connection_cleanup"] = _kill_server_connection(
+                            node,
+                            connection_id,
+                        )
+                        try:
+                            connection.close()
+                        except Exception:
+                            pass
+                        connection = None
+                        break
                     try:
                         connection.rollback()
                     except Exception:
@@ -405,6 +455,15 @@ def _run_node(
                 watchdog_fired=False,
                 stage="setup",
             )
+            if payload["classification"] in {
+                "timeout",
+                "timeout_connection",
+                "connection_lost_infra",
+            }:
+                payload["server_connection_cleanup"] = _kill_server_connection(
+                    node,
+                    connection_id,
+                )
             return {
                 "role": node.role,
                 "status": "setup_error",

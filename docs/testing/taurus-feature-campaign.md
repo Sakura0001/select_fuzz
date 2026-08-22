@@ -29,6 +29,8 @@ uv run python scripts/run_taurus_feature_campaign.py \
 - watchdog timeout 后产生的 lost connection 标为 `timeout_connection`；
 - 建连或 setup 阶段的 lost connection 同样标为 `connection_lost_infra`，不会直接误报 crash；
 - 只有上游明确提供 `crash_candidate` 分类时才生成 crash finding；
+- 定向查询超时或断链后，先关闭本地连接，再通过独立控制连接执行 `KILL CONNECTION`，并在
+  case JSON 中记录清理结果，避免 Taurus/PQ 服务端残留执行线程；
 - 本地节点预期不支持 Taurus-only 变量/DDL 时记录为 `capability_probe`，不生成正确性 finding。
 
 停止方式：`Ctrl-C` 或发送 SIGTERM。当前 case 完成后 campaign 写入 `run_finished`，已创建的

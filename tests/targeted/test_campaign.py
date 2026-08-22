@@ -115,6 +115,24 @@ def test_other_errors_are_preserved_as_database_errors() -> None:
     ) == "database_error"
 
 
+def test_internal_temporary_table_full_is_a_resource_pause() -> None:
+    assert classify_connection_event(
+        status="error",
+        errno=1114,
+        watchdog_fired=False,
+        message="The table '/var/lib/engine/tmp/#sql56c5_123a5_0' is full",
+    ) == "resource_limit"
+
+
+def test_user_table_full_remains_a_database_error() -> None:
+    assert classify_connection_event(
+        status="error",
+        errno=1114,
+        watchdog_fired=False,
+        message="The table 'application_rows' is full",
+    ) == "database_error"
+
+
 def test_database_names_are_unique_and_safe() -> None:
     first = make_database_name("worker 1", 7, 123)
     second = make_database_name("worker 1", 7, 124)
@@ -184,6 +202,30 @@ def test_query_lost_connection_is_an_infrastructure_pause_not_a_finding() -> Non
     }
     on = {"status": "success", "setup_error": None, "queries": [{"status": "success"}]}
     assert _comparison("flashback", off, on) == {
+        "matched": True,
+        "category": "infrastructure_pause",
+        "infrastructure_roles": ["custom_off"],
+    }
+
+
+def test_internal_temporary_table_full_is_an_infrastructure_pause() -> None:
+    off = {
+        "status": "success",
+        "setup_error": None,
+        "queries": [
+            {
+                "status": "error",
+                "error": {
+                    "classification": "resource_limit",
+                    "errno": 1114,
+                    "message": "The table '/var/lib/engine/tmp/#sql56c5_123a5_0' is full",
+                },
+            }
+        ],
+    }
+    on = {"status": "success", "setup_error": None, "queries": [{"status": "success"}]}
+
+    assert _comparison("pq_parallel", off, on) == {
         "matched": True,
         "category": "infrastructure_pause",
         "infrastructure_roles": ["custom_off"],

@@ -41,6 +41,7 @@ OPTIMIZER_SWITCHES = (
     "icp_cost_based",
 )
 FLASHBACK_STABILIZATION_SECONDS = 1.5
+_TEMP_TABLE_FULL_MARKERS = ("#sql", "/tmp/", "\\tmp\\")
 
 
 def classify_connection_event(
@@ -49,6 +50,7 @@ def classify_connection_event(
     errno: int | None,
     watchdog_fired: bool,
     stage: str = "execute",
+    message: str = "",
 ) -> str:
     """Classify connection loss without treating it as proof of a server crash.
 
@@ -59,6 +61,10 @@ def classify_connection_event(
     timeout remains a separate timeout/connection outcome.
     """
 
+    if errno == 1114 and any(
+        marker in message.casefold() for marker in _TEMP_TABLE_FULL_MARKERS
+    ):
+        return "resource_limit"
     if errno in LOST_CONNECTION_ERRNOS:
         return "timeout_connection" if watchdog_fired else "connection_lost_infra"
     if status == "timeout" or watchdog_fired:
@@ -410,6 +416,7 @@ def _run_node(
                         errno=error_payload["errno"] if isinstance(error_payload["errno"], int) else None,
                         watchdog_fired=watchdog,
                         stage="execute",
+                        message=str(error_payload.get("message", "")),
                     )
                     query_results.append(
                         {
@@ -454,6 +461,7 @@ def _run_node(
                 errno=payload["errno"] if isinstance(payload["errno"], int) else None,
                 watchdog_fired=False,
                 stage="setup",
+                message=str(payload.get("message", "")),
             )
             if payload["classification"] in {
                 "timeout",
@@ -478,6 +486,7 @@ def _run_node(
             errno=payload["errno"] if isinstance(payload["errno"], int) else None,
             watchdog_fired=False,
             stage="connection_open",
+            message=str(payload.get("message", "")),
         )
         return {
             "role": node.role,
@@ -519,7 +528,12 @@ def _comparison(
         return False
 
     def has_infrastructure_pause(value: Mapping[str, object]) -> bool:
-        infrastructure_classes = {"connection_lost_infra", "timeout_connection", "timeout"}
+        infrastructure_classes = {
+            "connection_lost_infra",
+            "resource_limit",
+            "timeout_connection",
+            "timeout",
+        }
         setup_error = error_mapping(value.get("setup_error"))
         if setup_error is not None and setup_error.get("classification") in infrastructure_classes:
             return True

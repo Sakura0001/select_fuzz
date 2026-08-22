@@ -597,6 +597,11 @@ def test_connection_loss_is_infrastructure_and_invalidates_the_session(
     assert result.error is not None
     assert result.error.errno == errno
     assert result.connection_reusable is False
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["failure_stage"] == "execute"
+    assert result.failure_evidence["exception"]["message"] == (
+        "client/protocol execution failure"
+    )
 
 
 def test_warning_diagnostic_connection_loss_does_not_change_query_result_but_invalidates(
@@ -623,6 +628,33 @@ def test_warning_diagnostic_connection_loss_does_not_change_query_result_but_inv
     assert result.rows == ((1,),)
     assert result.warnings == ()
     assert result.connection_reusable is False
+
+
+def test_server_shutdown_connection_error_is_infrastructure(
+    node: NodeConfig,
+) -> None:
+    factory = _Factory(
+        _Session(_DatabaseError(1053, "08S01", "Server shutdown in progress"))
+    )
+
+    result = _runner(factory).run_session(
+        factory.session,
+        node,
+        "sf_case_1",
+        "SELECT x FROM t",
+        timeout_s=15,
+        row_limit=10,
+        byte_limit=1024,
+    )
+
+    assert result.status is ExecutionStatus.INFRA_ERROR
+    assert result.connection_reusable is False
+    assert result.error is not None
+    assert result.error.errno == 1053
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["exception"]["message"] == (
+        "Server shutdown in progress"
+    )
 
 
 @dataclass
@@ -939,6 +971,12 @@ def test_c_connector_abort_reports_unsupported_without_private_socket_close(
 def test_connector_read_timeout_must_leave_grace_beyond_product_deadline() -> None:
     with pytest.raises(ValueError, match="greater than 300"):
         MySQLConnectorFactory(read_timeout_s=300)
+
+    factory = MySQLConnectorFactory(
+        read_timeout_s=20,
+        statement_timeout_ceiling_s=10,
+    )
+    assert factory is not None
 
 
 def test_connector_abort_shuts_down_socket_without_sending_quit(node: NodeConfig) -> None:

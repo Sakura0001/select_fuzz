@@ -19,11 +19,11 @@ class ActiveSessionRegistry:
 
     def __init__(self) -> None:
         self._lock = Lock()
-        self._sessions: dict[int, QuerySession] = {}
+        self._sessions: dict[int, tuple[NodeRole | None, QuerySession]] = {}
 
-    def register(self, session: QuerySession) -> None:
+    def register(self, session: QuerySession, role: NodeRole | None = None) -> None:
         with self._lock:
-            self._sessions[id(session)] = session
+            self._sessions[id(session)] = (role, session)
 
     def unregister(self, session: QuerySession) -> None:
         with self._lock:
@@ -33,7 +33,7 @@ class ActiveSessionRegistry:
         """Abort a stable snapshot and return how many sessions were targeted."""
 
         with self._lock:
-            sessions = tuple(self._sessions.values())
+            sessions = tuple(session for _role, session in self._sessions.values())
         for session in sessions:
             try:
                 session.abort()
@@ -50,7 +50,7 @@ class ActiveSessionRegistry:
 
     def connection_ids(self) -> tuple[int, ...]:
         with self._lock:
-            sessions = tuple(self._sessions.values())
+            sessions = tuple(session for _role, session in self._sessions.values())
         identifiers: list[int] = []
         for session in sessions:
             try:
@@ -64,6 +64,40 @@ class ActiveSessionRegistry:
             ):
                 identifiers.append(connection_id)
         return tuple(sorted(identifiers))
+
+    def connection_snapshot(self) -> tuple[Mapping[str, object], ...]:
+        with self._lock:
+            sessions = tuple(self._sessions.values())
+        snapshot: list[Mapping[str, object]] = []
+        for role, session in sessions:
+            try:
+                connection_id = session.connection_id()
+            except Exception as error:
+                snapshot.append(
+                    {
+                        "connection_id": None,
+                        "identity_error": f"{type(error).__name__}: {str(error)[:512]}",
+                        "role": None if role is None else role.value,
+                    }
+                )
+                continue
+            snapshot.append(
+                {
+                    "connection_id": connection_id,
+                    "role": None if role is None else role.value,
+                }
+            )
+        def sort_key(item: Mapping[str, object]) -> tuple[str, int]:
+            raw_connection_id = item.get("connection_id")
+            connection_id = (
+                raw_connection_id
+                if isinstance(raw_connection_id, int)
+                and not isinstance(raw_connection_id, bool)
+                else -1
+            )
+            return str(item.get("role")), connection_id
+
+        return tuple(sorted(snapshot, key=sort_key))
 
 
 @dataclass(slots=True)

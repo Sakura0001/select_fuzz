@@ -1,6 +1,6 @@
 # select-fuzz 项目结构
 
-> 更新日期：2026-07-24。项目面向 MySQL 8.0.41 的个人研究，包括 SELECT correctness 差分测试、性能测试、并发读写 fuzz、覆盖验证、回放和可视化控制台。
+> 更新日期：2026-08-22。项目以 MySQL 8.0.22 为兼容基线，包括 SELECT correctness 差分测试、性能测试、并发读写 fuzz、覆盖验证、回放和可视化控制台。
 
 ## 总体架构
 
@@ -17,13 +17,13 @@ flowchart LR
     Fuzz --> FuzzRunner["Per-database read/write workers"]
     Runner --> Schema["Schema + data setup"]
     Runner --> Grammar["GrammarQueryGenerator"]
-    Catalog["MySQL 8.0.41 historical catalog"] --> Schema
+    Catalog["MySQL 8.0.22 compatibility catalog"] --> Schema
     GrammarFile["MySQL 8.0.22 .grammar.yy"] --> Grammar
     Registry["Deterministic function registry"] --> Grammar
     Grammar --> Safety["Read-only safety gate"]
     Safety --> Explain["Baseline EXPLAIN admission"]
-    Explain --> Triad["Three-node execution"]
-    Triad --> Oracle["Canonicalization + differential oracle"]
+    Explain --> Pair["Persistent custom_off/custom_on session pair"]
+    Pair --> Oracle["Canonicalization + differential oracle"]
     Oracle --> Artifacts["JSONL / SQL / finding bundle / report"]
     Artifacts --> API["Loopback control plane"]
     API --> UI["React UI"]
@@ -77,6 +77,7 @@ CentOS 7 目标机只需运行 bundle 内的 `select-fuzz`，不需要预装 Pyt
 | [`generation/function_registry.py`](../src/select_fuzz/generation/function_registry.py) | 确定性函数安全签名、参数类型、NULL witness 和 warning 契约 |
 | [`generation/query_scope.py`](../src/select_fuzz/generation/query_scope.py) | 默认排除 JSON、FULLTEXT、SPATIAL family/profile |
 | [`generation/query_safety.py`](../src/select_fuzz/generation/query_safety.py) | 单语句、只读、无会话变量和副作用语法校验 |
+| [`generation/query_determinism.py`](../src/select_fuzz/generation/query_determinism.py) | 非零 LIMIT 的保守确定性准入，阻止不稳定 Top-N 进入差分 Oracle |
 | [`generation/query_contract.py`](../src/select_fuzz/generation/query_contract.py) | artifact/replay 共用的 lane 与 expected-error 数据契约，不生成 SQL |
 
 correctness 的实际调用链：
@@ -105,9 +106,9 @@ select-fuzz run --mode correctness
 | [`config/`](../src/select_fuzz/config) | 严格 Pydantic 配置、YAML/CLI 覆盖和凭据环境变量解析 |
 | [`domain/`](../src/select_fuzz/domain) | 节点结果、运行请求、种子树、稳定指纹等领域模型 |
 | [`generation/`](../src/select_fuzz/generation) | schema、data、setup、mutation、grammar、coverage 和安全策略 |
-| [`execution/`](../src/select_fuzz/execution) | MySQL 连接、超时、复制屏障、setup、triad 与 mutation 执行 |
-| [`oracle/`](../src/select_fuzz/oracle) | 结果规范化、两实例差分、错误分类 |
-| [`artifacts/`](../src/select_fuzz/artifacts) | finding bundle、JSONL、线程 SQL、HTML 报告和读取索引 |
+| [`execution/`](../src/select_fuzz/execution) | MySQL 连接租约、活动连接注册表、成对建连、超时、setup、pair 与 mutation 执行 |
+| [`oracle/`](../src/select_fuzz/oracle) | 结果规范化、两实例差分、错误分类和连接器元数据 advisory |
+| [`artifacts/`](../src/select_fuzz/artifacts) | finding v2（外置 gzip SQL）、查询尝试 JSONL、线程 SQL、HTML 报告和读取索引；reader 兼容 v1 |
 | [`api/`](../src/select_fuzz/api) | loopback FastAPI 控制面、事件流、运行监督和 replay API |
 | [`performance/`](../src/select_fuzz/performance) | 独立性能 fuzz template、校准、物化、执行和性能 oracle |
 | [`validation/`](../src/select_fuzz/validation) | 官方候选发现、shape signature、grammar 见证、reachability、ledger 和报告 |

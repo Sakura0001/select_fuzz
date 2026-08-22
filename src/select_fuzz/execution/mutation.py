@@ -14,6 +14,7 @@ from typing import Callable
 from select_fuzz.config import COMPARISON_ROLES, NodeConfig, NodeRole
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.execution.protocols import ConnectionFactory, QuerySession
+from select_fuzz.execution.evidence import capture_exception_evidence
 from select_fuzz.execution.replication import ReplicationWaitResult
 from select_fuzz.execution.setup import validate_database_name
 from select_fuzz.execution.triad import QueryLimits, QueryRunnerLike
@@ -61,7 +62,11 @@ class MutationBatchResult:
         }
 
 
-def _failure(node: NodeConfig, message: str) -> NodeExecution:
+def _failure(
+    node: NodeConfig,
+    message: str,
+    error: BaseException | None = None,
+) -> NodeExecution:
     now = time.monotonic_ns()
     return NodeExecution.failure(
         role=node.role,
@@ -71,6 +76,11 @@ def _failure(node: NodeConfig, message: str) -> NodeExecution:
         connection_id=None,
         error=ErrorInfo(65012, "HY000", message),
         connection_reusable=False,
+        failure_evidence=(
+            None
+            if error is None
+            else capture_exception_evidence(error, "mutation_execution")
+        ),
     )
 
 
@@ -195,7 +205,12 @@ class PairMutationCoordinator:
                         except Exception as error:
                             barrier.abort()
                             return _failure(
-                                node, f"mutation execution failed: {type(error).__name__}"
+                                node,
+                                (
+                                    "突变语句执行器失败: "
+                                    f"{type(error).__name__}: {str(error)[:2048]}"
+                                ),
+                                error,
                             )
 
                     with ThreadPoolExecutor(
@@ -354,7 +369,11 @@ class PairMutationCoordinator:
                     )
         except Exception as error:
             failures = {
-                node.role: _failure(node, f"mutation session failed: {type(error).__name__}")
+                node.role: _failure(
+                    node,
+                    f"突变会话失败: {type(error).__name__}: {str(error)[:2048]}",
+                    error,
+                )
                 for node in self._primaries
             }
             return MutationBatchResult(

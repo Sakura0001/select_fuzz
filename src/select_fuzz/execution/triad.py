@@ -21,6 +21,7 @@ from select_fuzz.config import (
     NodeRole,
 )
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
+from select_fuzz.execution.evidence import capture_exception_evidence
 from select_fuzz.execution.protocols import (
     BarrierLike,
     ConnectionFactory,
@@ -207,6 +208,7 @@ class PreparedRound:
         attempted_setup_sql: tuple[str, ...] = (),
         setup_statement_records: tuple[SetupStatementRecord, ...] = (),
         setup_failing_sql: str | None = None,
+        setup_completed: bool = False,
     ) -> None:
         self.status = status
         self.database = database
@@ -219,6 +221,7 @@ class PreparedRound:
         self.attempted_setup_sql = attempted_setup_sql
         self.setup_statement_records = setup_statement_records
         self.setup_failing_sql = setup_failing_sql
+        self.setup_completed = setup_completed
         self._closed = False
         self._replacement: PreparedRound | None = None
 
@@ -292,7 +295,34 @@ def _query_infra_failure(node: NodeConfig, error: Exception) -> NodeExecution:
         started_ns=now,
         ended_ns=now,
         connection_id=None,
-        error=ErrorInfo(65011, "HY000", f"comparison query failed: {type(error).__name__}"),
+        error=ErrorInfo(
+            65011,
+            "HY000",
+            f"对比查询基础设施失败: {type(error).__name__}: {str(error)[:2048]}",
+        ),
+        connection_reusable=False,
+        failure_evidence=capture_exception_evidence(error, "comparison_query"),
+    )
+
+
+def _paused_query_failure(prepared: PreparedRound, node: NodeConfig) -> NodeExecution:
+    setup_result = next(
+        (result for result in prepared.nodes if result.role is node.role),
+        None,
+    )
+    detail = (
+        setup_result.error.message
+        if setup_result is not None and setup_result.error is not None
+        else "查询连接尚未恢复"
+    )
+    now = time.monotonic_ns()
+    return NodeExecution.failure(
+        role=node.role,
+        status=ExecutionStatus.INFRA_ERROR,
+        started_ns=now,
+        ended_ns=now,
+        connection_id=None,
+        error=ErrorInfo(65011, "HY000", f"查询连接恢复暂停: {detail}"),
         connection_reusable=False,
     )
 
@@ -533,6 +563,7 @@ class ComparisonCoordinator:
             setup_statement_records=(
                 () if lockstep_result is None else lockstep_result.statement_records
             ),
+            setup_completed=True,
         )
 
     def prepare_until_recovered(
@@ -574,6 +605,19 @@ class ComparisonCoordinator:
         current = prepared
         while current._replacement is not None:
             current = current._replacement
+        if current.status is PrepareStatus.INFRASTRUCTURE_PAUSE:
+            current.close()
+            rebuilt = (
+                self._reconnect_existing_round(current)
+                if current.setup_completed and not current.bundle.requires_same_session
+                else self.prepare(
+                    current.bundle,
+                    database=current.database,
+                    generation=current.generation + 1,
+                )
+            )
+            current._replacement = rebuilt
+            return rebuilt
         if current.status is not PrepareStatus.READY:
             return current
         if current.sessions is None:
@@ -591,13 +635,138 @@ class ComparisonCoordinator:
         if healthy:
             return current
         current.close()
-        rebuilt = self.prepare(
-            current.bundle,
-            database=current.database,
-            generation=current.generation + 1,
+        rebuilt = (
+            self.prepare(
+                current.bundle,
+                database=current.database,
+                generation=current.generation + 1,
+            )
+            if current.bundle.requires_same_session
+            else self._reconnect_existing_round(current)
         )
         current._replacement = rebuilt
         return rebuilt
+
+    def _reconnect_existing_round(self, current: PreparedRound) -> PreparedRound:
+        """Reconnect an ordinary-table round without replaying non-idempotent setup."""
+
+        stack = ExitStack()
+        sessions: dict[NodeRole, QuerySession] | None = None
+        failures: dict[NodeRole, Exception] = {}
+        open_owned = getattr(self._session_factory, "open_query_session", None)
+        if callable(open_owned):
+            acquisition = acquire_session_pair(
+                self._nodes,
+                "information_schema",
+                cast(OwnedConnectionFactory, self._session_factory),
+            )
+            if acquisition.ready:
+                stack.callback(acquisition.close)
+                sessions = {
+                    role: lease.session for role, lease in acquisition.leases.items()
+                }
+            else:
+                failures = {
+                    node.role: RuntimeError(
+                        _pair_open_failure_message(
+                            node.role,
+                            acquisition.attempts[node.role].failure_evidence,
+                        )
+                    )
+                    for node in self._nodes
+                }
+        else:
+            sessions, failures = _open_legacy_session_pair(
+                self._nodes,
+                self._session_factory,
+                stack,
+            )
+
+        if sessions is None:
+            stack.close()
+            results = tuple(
+                _setup_infra_failure(
+                    node,
+                    failures.get(
+                        node.role,
+                        RuntimeError("对端查询连接建立失败，本节点未开始恢复"),
+                    ),
+                )
+                for node in self._nodes
+            )
+            return PreparedRound(
+                status=PrepareStatus.INFRASTRUCTURE_PAUSE,
+                database=current.database,
+                bundle=current.bundle,
+                nodes=results,
+                generation=current.generation + 1,
+                attempted_setup_sql=current.attempted_setup_sql,
+                setup_statement_records=current.setup_statement_records,
+                setup_failing_sql=current.setup_failing_sql,
+                setup_completed=current.setup_completed,
+            )
+
+        def select_database(node: NodeConfig) -> Exception | None:
+            try:
+                cursor = sessions[node.role].execute(f"USE `{current.database}`")
+                cursor.close()
+            except Exception as error:
+                return error
+            return None
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sf-pair-reconnect") as pool:
+            futures = {
+                node.role: pool.submit(select_database, node) for node in self._nodes
+            }
+            use_failures = {
+                role: error
+                for role, future in futures.items()
+                if (error := future.result()) is not None
+            }
+        if use_failures:
+            stack.close()
+            results = tuple(
+                _setup_infra_failure(
+                    node,
+                    use_failures.get(
+                        node.role,
+                        RuntimeError("对端选择已有数据库失败，本节点连接已释放"),
+                    ),
+                )
+                for node in self._nodes
+            )
+            return PreparedRound(
+                status=PrepareStatus.INFRASTRUCTURE_PAUSE,
+                database=current.database,
+                bundle=current.bundle,
+                nodes=results,
+                generation=current.generation + 1,
+                attempted_setup_sql=current.attempted_setup_sql,
+                setup_statement_records=current.setup_statement_records,
+                setup_failing_sql=current.setup_failing_sql,
+                setup_completed=current.setup_completed,
+            )
+
+        return PreparedRound(
+            status=PrepareStatus.READY,
+            database=current.database,
+            bundle=current.bundle,
+            nodes=tuple(
+                SetupNodeResult(
+                    role=node.role,
+                    status=ExecutionStatus.SUCCESS,
+                    payload_sha256=current.bundle.payload_sha256,
+                )
+                for node in self._nodes
+            ),
+            generation=current.generation + 1,
+            sessions=sessions,
+            stack=stack,
+            attempted_setup_sql=current.attempted_setup_sql,
+            setup_statement_records=current.setup_statement_records,
+            setup_failing_sql=current.setup_failing_sql,
+            setup_completed=True,
+        )
 
     def explain_baseline(
         self,
@@ -608,6 +777,11 @@ class ComparisonCoordinator:
         """Run a plain EXPLAIN on custom_off without a comparison barrier."""
 
         current = self.ensure_live(prepared)
+        if current.status is PrepareStatus.INFRASTRUCTURE_PAUSE:
+            node = next(
+                node for node in self._query_nodes if node.role is NodeRole.CUSTOM_OFF
+            )
+            return BaselineExplainResult(current, _paused_query_failure(current, node))
         if current.status is not PrepareStatus.READY:
             raise RuntimeError(f"round is not ready: {current.status.value}")
         if not isinstance(sql, str) or not sql.strip():
@@ -657,6 +831,14 @@ class ComparisonCoordinator:
         limits: QueryLimits,
     ) -> ComparisonExecutionResult:
         current = self.ensure_live(prepared)
+        if current.status is PrepareStatus.INFRASTRUCTURE_PAUSE:
+            return ComparisonExecutionResult(
+                current,
+                tuple(
+                    _paused_query_failure(current, node)
+                    for node in self._query_nodes
+                ),
+            )
         if current.status is not PrepareStatus.READY:
             raise RuntimeError(f"round is not ready: {current.status.value}")
         if not isinstance(sql, str) or not sql.strip():

@@ -198,6 +198,10 @@ def _infra_errors() -> tuple[NodeExecution, ...]:
             connection_id=100 + list(COMPARISON_ROLES).index(role),
             error=ErrorInfo(2006, "HY000", "server has gone away"),
             connection_reusable=False,
+            failure_evidence={
+                "failure_stage": "execute",
+                "exception": {"message": "socket reset by peer"},
+            },
         )
         for role in COMPARISON_ROLES
     )
@@ -814,6 +818,10 @@ def test_round_engine_logs_every_infrastructure_retry_attempt(tmp_path: Path) ->
         "errno": 2006,
         "message": "server has gone away",
         "sqlstate": "HY000",
+    }
+    assert records[1]["nodes"]["custom_off"]["failure_evidence"] == {
+        "failure_stage": "execute",
+        "exception": {"message": "socket reset by peer"},
     }
 
 

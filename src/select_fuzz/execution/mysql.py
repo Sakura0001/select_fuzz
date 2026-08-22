@@ -316,6 +316,7 @@ class NodeQueryRunner:
         cleanup_error: Exception | None = None
         statement_ended_ns: int | None = None
         connection_reusable = True
+        failure_evidence: dict[str, object] | None = None
         try:
             cursor = session.execute(sql)
             columns = cursor.columns
@@ -345,6 +346,7 @@ class NodeQueryRunner:
                 warnings = ()
                 connection_reusable = False
         except _ResultLimitExceeded as limit_error:
+            failure_evidence = capture_exception_evidence(limit_error, "result_limit")
             handle.trigger(statement_token=statement_token)
             statement_done.set()
             statement_ended_ns = self._monotonic_ns()
@@ -362,6 +364,7 @@ class NodeQueryRunner:
             rows.clear()
             columns = ()
         except Exception as execution_error:
+            failure_evidence = capture_exception_evidence(execution_error, "execute")
             statement_done.set()
             statement_ended_ns = self._monotonic_ns()
             error_info = _database_error(execution_error)
@@ -378,7 +381,7 @@ class NodeQueryRunner:
                     )
                     if handle.timed_out
                     else _internal_error(
-                        f"query execution failed: {type(execution_error).__name__}"
+                        f"查询执行失败：{type(execution_error).__name__}：{str(execution_error)[:2048]}"
                     )
                 )
             elif error_info.errno == 3024 or (
@@ -387,7 +390,7 @@ class NodeQueryRunner:
             ):
                 status = ExecutionStatus.TIMEOUT
                 connection_reusable = error_info.errno == 3024
-            elif error_info.errno in _MYSQL_CLIENT_ERROR_RANGE:
+            elif error_info.sqlstate.startswith("08") or error_info.errno in _MYSQL_CLIENT_ERROR_RANGE:
                 status = ExecutionStatus.INFRA_ERROR
                 connection_reusable = False
             else:
@@ -405,8 +408,9 @@ class NodeQueryRunner:
 
         ended_ns = self._monotonic_ns() if statement_ended_ns is None else statement_ended_ns
         if cleanup_error is not None and status is ExecutionStatus.SUCCESS:
+            failure_evidence = capture_exception_evidence(cleanup_error, "cursor_close")
             status = ExecutionStatus.INFRA_ERROR
-            error_info = _internal_error(f"cursor cleanup failed: {type(cleanup_error).__name__}")
+            error_info = _internal_exception_error("游标关闭失败", cleanup_error)
             rows.clear()
             columns = ()
             connection_reusable = False
@@ -447,6 +451,7 @@ class NodeQueryRunner:
             watchdog_fired=handle.timed_out,
             watchdog_error_type=handle.kill_error_type,
             connection_reusable=connection_reusable,
+            failure_evidence=failure_evidence,
         )
 
 
@@ -580,6 +585,7 @@ class MySQLConnectorFactory:
         connect: Callable[..., Any] = mysql.connector.connect,
         connection_timeout_s: int = 30,
         read_timeout_s: int = 310,
+        statement_timeout_ceiling_s: int = 300,
         control_timeout_s: int = 5,
         diagnostic_timeout_s: int = 5,
         use_pure: bool = True,
@@ -592,6 +598,9 @@ class MySQLConnectorFactory:
     ) -> None:
         _positive_bound(connection_timeout_s, "connection_timeout_s")
         _positive_bound(read_timeout_s, "read_timeout_s")
+        _positive_bound(statement_timeout_ceiling_s, "statement_timeout_ceiling_s")
+        if statement_timeout_ceiling_s > MAX_STATEMENT_TIMEOUT_SECONDS:
+            raise ValueError("statement_timeout_ceiling_s must be at most 300 seconds")
         _positive_bound(control_timeout_s, "control_timeout_s")
         _positive_bound(diagnostic_timeout_s, "diagnostic_timeout_s")
         _positive_bound(control_connection_limit, "control_connection_limit")
@@ -600,9 +609,10 @@ class MySQLConnectorFactory:
             raise TypeError("use_pure must be a boolean")
         if control_use_pure is not None and not isinstance(control_use_pure, bool):
             raise TypeError("control_use_pure must be a boolean or None")
-        if read_timeout_s <= MAX_STATEMENT_TIMEOUT_SECONDS:
+        if read_timeout_s <= statement_timeout_ceiling_s:
             raise ValueError(
-                "read_timeout_s must be greater than 300 seconds to leave watchdog grace"
+                f"read_timeout_s must be greater than {statement_timeout_ceiling_s} "
+                "seconds to leave watchdog grace"
             )
         self._environ = environ
         self._connect = connect
@@ -674,7 +684,7 @@ class MySQLConnectorFactory:
         except Exception:
             session.close()
             raise
-        self._active_session_registry.register(session)
+        self._active_session_registry.register(session, node.role)
 
         def close_owned_session() -> None:
             self._active_session_registry.unregister(session)

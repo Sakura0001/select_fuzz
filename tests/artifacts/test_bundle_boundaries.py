@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from select_fuzz.artifacts.bundle import (
     node_execution_to_artifact,
 )
 from select_fuzz.config import COMPARISON_ROLES, NodeRole
+from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
 
 
 DIGEST = "a" * 64
@@ -95,6 +97,28 @@ def test_artifact_cell_codec_round_trips_supported_types(value: object) -> None:
         assert decoded == tuple(value)
     else:
         assert decoded == value
+
+
+def test_node_execution_artifact_deeply_serializes_failure_evidence() -> None:
+    execution = NodeExecution.failure(
+        role=NodeRole.CUSTOM_OFF,
+        status=ExecutionStatus.INFRA_ERROR,
+        started_ns=1,
+        ended_ns=2,
+        connection_id=None,
+        error=ErrorInfo(2006, "HY000", "server has gone away"),
+        failure_evidence={
+            "failure_stage": "execute",
+            "exception": {"message": "socket reset", "args": ("socket reset",)},
+        },
+    )
+
+    payload = json.loads(_canonical_json(node_execution_to_artifact(execution)))
+
+    assert payload["failure_evidence"] == {
+        "failure_stage": "execute",
+        "exception": {"message": "socket reset", "args": ["socket reset"]},
+    }
 
 
 @pytest.mark.parametrize(

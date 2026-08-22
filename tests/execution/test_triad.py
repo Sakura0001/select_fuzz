@@ -582,6 +582,91 @@ def test_lost_temporary_session_rebuilds_the_whole_round(
     rebuilt.close()
 
 
+def test_lost_ordinary_session_reconnects_without_replaying_setup(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    factory = _Factory()
+    coordinator = _coordinator(nodes, factory, _QueryRunner())
+    prepared = coordinator.prepare(
+        _Bundle(requires_same_session=False), database="sf_correctness_reconnect_1"
+    )
+    assert prepared.sessions is not None
+    old_sessions = dict(prepared.sessions)
+    old_sessions[NodeRole.CUSTOM_ON].disconnect()
+
+    reconnected = coordinator.ensure_live(prepared)
+
+    assert reconnected.status is PrepareStatus.READY
+    assert reconnected.generation == prepared.generation + 1
+    assert reconnected.sessions is not None
+    assert all(session.closed for session in old_sessions.values())
+    new_sessions = tuple(
+        session for session in factory.sessions if session not in old_sessions.values()
+    )
+    assert len(new_sessions) == 2
+    assert all(not session.saw_setup for session in new_sessions)
+    assert all(
+        session.executed == ["USE `sf_correctness_reconnect_1`"]
+        for session in new_sessions
+    )
+    reconnected.close()
+
+
+def test_ordinary_reconnect_pause_can_recover_without_replaying_setup(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    factory = _Factory()
+    coordinator = _coordinator(nodes, factory, _QueryRunner())
+    prepared = coordinator.prepare(
+        _Bundle(requires_same_session=False), database="sf_correctness_reconnect_2"
+    )
+    assert prepared.sessions is not None
+    prepared.sessions[NodeRole.CUSTOM_OFF].disconnect()
+    factory.pin_failures.add(NodeRole.CUSTOM_OFF)
+
+    paused = coordinator.ensure_live(prepared)
+
+    assert paused.status is PrepareStatus.INFRASTRUCTURE_PAUSE
+    factory.pin_failures.clear()
+    recovered = coordinator.ensure_live(paused)
+
+    assert recovered.status is PrepareStatus.READY
+    assert recovered.generation == paused.generation + 1
+    assert all(node.status is ExecutionStatus.SUCCESS for node in recovered.nodes)
+    assert recovered.sessions is not None
+    assert all(not session.saw_setup for session in recovered.sessions.values())
+    assert all(
+        session.executed == ["USE `sf_correctness_reconnect_2`"]
+        for session in recovered.sessions.values()
+    )
+    recovered.close()
+
+
+def test_reconnect_pause_returns_typed_infrastructure_results(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    factory = _Factory()
+    query_runner = _QueryRunner()
+    coordinator = _coordinator(nodes, factory, query_runner)
+    prepared = coordinator.prepare(
+        _Bundle(requires_same_session=False), database="sf_correctness_reconnect_3"
+    )
+    assert prepared.sessions is not None
+    prepared.sessions[NodeRole.CUSTOM_ON].disconnect()
+    factory.pin_failures.add(NodeRole.CUSTOM_ON)
+
+    explain = coordinator.explain_baseline(prepared, "SELECT 1", _limits())
+    comparison = coordinator.execute(explain.prepared, "SELECT 1", _limits())
+
+    assert explain.prepared.status is PrepareStatus.INFRASTRUCTURE_PAUSE
+    assert explain.execution.status is ExecutionStatus.INFRA_ERROR
+    assert "查询连接恢复暂停" in explain.execution.error.message
+    assert comparison.prepared.status is PrepareStatus.INFRASTRUCTURE_PAUSE
+    assert [result.role for result in comparison] == list(COMPARISON_ROLES)
+    assert all(result.status is ExecutionStatus.INFRA_ERROR for result in comparison)
+    assert query_runner.used_sessions == {}
+
+
 def test_unusable_temporary_query_result_invalidates_both_sessions(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
@@ -747,6 +832,16 @@ def test_query_worker_exception_aborts_shared_barrier_without_waiting_for_timeou
 
     assert monotonic() - started < 1
     assert all(item.status is ExecutionStatus.INFRA_ERROR for item in result)
+    by_role = {item.role: item for item in result}
+    off_error = by_role[NodeRole.CUSTOM_OFF].error
+    on_error = by_role[NodeRole.CUSTOM_ON].error
+    assert off_error is not None and "worker crashed before barrier" in off_error.message
+    assert on_error is not None and "BrokenBarrierError" in on_error.message
+    assert all(
+        item.failure_evidence is not None
+        and item.failure_evidence["failure_stage"] == "comparison_query"
+        for item in result
+    )
 
 
 def test_infrastructure_pause_retries_with_bounded_exponential_backoff(

@@ -45,6 +45,35 @@ MAX_INLINE_CASE_SQL_BYTES = 1024 * 1024
 _GENERATOR_CONTRACT_VERDICTS = frozenset({"expected_error_mismatch", "unexpected_valid_error"})
 
 
+def _json_diagnostic_value(value: object) -> object:
+    """Deeply thaw an immutable diagnostic payload into strict JSON values."""
+
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("non-finite floats cannot be stored in diagnostics")
+        return value
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise TypeError("diagnostic mappings require string keys")
+        return {
+            key: _json_diagnostic_value(value[key])
+            for key in sorted(value)
+        }
+    if isinstance(value, (tuple, list)):
+        return [_json_diagnostic_value(child) for child in value]
+    if isinstance(value, (set, frozenset)):
+        children = [_json_diagnostic_value(child) for child in value]
+        return sorted(
+            children,
+            key=lambda child: json.dumps(
+                child, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ),
+        )
+    raise TypeError(f"unsupported diagnostic value: {type(value).__qualname__}")
+
+
 def _encode_artifact_value(value: object) -> object:
     if value is None or isinstance(value, (bool, str)):
         return value
@@ -170,7 +199,9 @@ def node_execution_to_artifact(execution: NodeExecution) -> dict[str, object]:
         "ended_ns": execution.ended_ns,
         "error": error,
         "failure_evidence": (
-            None if execution.failure_evidence is None else dict(execution.failure_evidence)
+            None
+            if execution.failure_evidence is None
+            else _json_diagnostic_value(execution.failure_evidence)
         ),
         "performance_payload": (
             None

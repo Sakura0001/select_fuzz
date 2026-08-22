@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterator, Mapping
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import json
+import math
 from pathlib import Path
 from threading import Event
 import time
@@ -655,6 +656,11 @@ def _query_execution_to_log(execution: NodeExecution) -> dict[str, object]:
         "connection_reusable": execution.connection_reusable,
         "elapsed_ns": execution.elapsed_ns,
         "error": error,
+        "failure_evidence": (
+            None
+            if execution.failure_evidence is None
+            else _json_event_value(execution.failure_evidence)
+        ),
         "row_count": len(execution.rows),
         "status": execution.status.value,
         "warnings": execution.warnings,
@@ -765,6 +771,7 @@ class CorrectnessRoundEngine:
         registry = self._session_factory.active_session_registry
         return {
             "active_session_count": registry.active_count,
+            "connections": registry.connection_snapshot(),
             "connection_ids": registry.connection_ids(),
         }
 
@@ -1493,8 +1500,17 @@ class CorrectnessRoundEngine:
                             {
                                 "database": current_prepared.database,
                                 "failing_sql": mutation_result.failing_sql,
+                                "nodes": {
+                                    role.value: node_execution_to_artifact(
+                                        mutation_result.final_results[role]
+                                    )
+                                    for role in COMPARISON_ROLES
+                                },
                                 "retry_safety": mutation_result.retry_safety.value,
                                 "sequence": mutation_sequence,
+                                "transaction_steps": _mutation_step_artifacts(
+                                    mutation_result
+                                ),
                                 "worker_id": context.worker_id,
                             },
                         )
@@ -1639,6 +1655,10 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
     comparison_factory = MySQLConnectorFactory(
         connection_timeout_s=config.correctness.connection_timeout_seconds,
         connect_concurrency_limit=config.correctness.connect_concurrency_limit,
+        read_timeout_s=math.ceil(config.correctness.timeout_seconds) + 10,
+        statement_timeout_ceiling_s=math.ceil(
+            config.correctness.timeout_seconds
+        ),
     )
     coordinator = ComparisonCoordinator(
         config.comparison_nodes,

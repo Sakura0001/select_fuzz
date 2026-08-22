@@ -730,6 +730,7 @@ class CorrectnessRoundEngine:
         mutation_coordinator: MutationCoordinatorLike | None = None,
         replica_parameters_sha256: str | None = None,
         explain_timeout_seconds: float = 10.0,
+        session_factory: MySQLConnectorFactory | None = None,
     ) -> None:
         if set(configuration_fingerprints) != set(COMPARISON_ROLES):
             raise ValueError("configuration_fingerprints require custom_off and custom_on")
@@ -751,6 +752,21 @@ class CorrectnessRoundEngine:
         self._mutation_generator = mutation_generator
         self._mutation_coordinator = mutation_coordinator
         self._replica_parameters_sha256 = replica_parameters_sha256
+        self._session_factory = session_factory
+
+    def abort_active(self) -> int:
+        if self._session_factory is None:
+            return 0
+        return self._session_factory.abort_active_sessions()
+
+    def runtime_diagnostics(self) -> Mapping[str, object]:
+        if self._session_factory is None:
+            return {"active_session_count": 0, "connection_ids": ()}
+        registry = self._session_factory.active_session_registry
+        return {
+            "active_session_count": registry.active_count,
+            "connection_ids": registry.connection_ids(),
+        }
 
     def run_round(
         self,
@@ -1591,7 +1607,7 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
         artifact_root,
         events=event_writer,
         full_thread_sql_log=config.full_thread_sql_log,
-        query_attempt_json_log=False,
+        query_attempt_json_log=config.correctness.query_attempt_json_log,
         record_pass_events=False,
     )
     ledger = CoverageLedger(artifact_root / "coverage.json")
@@ -1620,7 +1636,10 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
         grammar_query_generator=grammar_generator,
         replica_mode=False,
     )
-    comparison_factory = MySQLConnectorFactory()
+    comparison_factory = MySQLConnectorFactory(
+        connection_timeout_s=config.correctness.connection_timeout_seconds,
+        connect_concurrency_limit=config.correctness.connect_concurrency_limit,
+    )
     coordinator = ComparisonCoordinator(
         config.comparison_nodes,
         setup_runner=MySQLSetupRunner(comparison_factory),
@@ -1653,10 +1672,12 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
         mutation_coordinator=mutation_coordinator,
         replica_parameters_sha256=None,
         explain_timeout_seconds=config.correctness.explain_timeout_seconds,
+        session_factory=comparison_factory,
     )
     return CorrectnessRunService(
         engine,
         JsonlEventSink(event_writer, persist_query_events=False),
+        diagnostics_interval_seconds=config.correctness.diagnostics_interval_seconds,
     )
 
 

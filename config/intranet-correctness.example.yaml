@@ -46,3 +46,9 @@ correctness:
   query_grammar_path: null
   grammar_compatible_type_percent: 80
   explain_timeout_seconds: 10
+  # 建连超时和诊断日志默认值适合 64 worker 同时启动的场景。
+  connection_timeout_seconds: 30
+  # 只限制同时进行的握手数，不限制已建立并执行查询的连接数。
+  connect_concurrency_limit: 16
+  query_attempt_json_log: true
+  diagnostics_interval_seconds: 5

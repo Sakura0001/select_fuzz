@@ -5,10 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from threading import Event, Lock
+import math
+from threading import Event, Lock, Thread
+import time
 from typing import Protocol
 
 from select_fuzz.domain import RunEvent, RunRequest, SeedTree
+from select_fuzz.execution.evidence import capture_exception_evidence
 
 
 class EventSink(Protocol):
@@ -107,9 +110,23 @@ class RoundRunner(Protocol):
 
 
 class CorrectnessRunService:
-    def __init__(self, rounds: RoundRunner, events: EventSink) -> None:
+    def __init__(
+        self,
+        rounds: RoundRunner,
+        events: EventSink,
+        *,
+        diagnostics_interval_seconds: float = 5.0,
+    ) -> None:
+        if (
+            not isinstance(diagnostics_interval_seconds, (int, float))
+            or isinstance(diagnostics_interval_seconds, bool)
+            or not math.isfinite(diagnostics_interval_seconds)
+            or diagnostics_interval_seconds <= 0
+        ):
+            raise ValueError("diagnostics_interval_seconds must be finite and positive")
         self._rounds = rounds
         self._events = events
+        self._diagnostics_interval_seconds = float(diagnostics_interval_seconds)
 
     def run(self, request: RunRequest, stop_event: Event) -> RunSummary:
         if request.mode != "correctness":
@@ -134,6 +151,54 @@ class CorrectnessRunService:
         }
         next_round = 0
         finite_rounds = request.rounds
+        active_lock = Lock()
+        active_rounds: dict[int, tuple[int, int]] = {}
+        diagnostics_stop = Event()
+
+        def publish_diagnostics() -> None:
+            while not diagnostics_stop.wait(self._diagnostics_interval_seconds):
+                now_ns = time.monotonic_ns()
+                with active_lock:
+                    workers = {
+                        str(worker_id): {
+                            "round_number": round_number,
+                            "stage": "round_running",
+                            "stage_age_seconds": max(
+                                0.0,
+                                (now_ns - started_ns) / 1_000_000_000,
+                            ),
+                        }
+                        for worker_id, (round_number, started_ns) in active_rounds.items()
+                    }
+                runtime_snapshot: Mapping[str, object] = {}
+                snapshot = getattr(self._rounds, "runtime_diagnostics", None)
+                if callable(snapshot):
+                    try:
+                        raw_snapshot = snapshot()
+                        if isinstance(raw_snapshot, Mapping):
+                            runtime_snapshot = raw_snapshot
+                    except Exception as error:
+                        runtime_snapshot = {
+                            "snapshot_failure": capture_exception_evidence(
+                                error,
+                                "correctness_runtime_diagnostics",
+                            )
+                        }
+                publisher.publish(
+                    "runtime_diagnostics",
+                    {
+                        "active_worker_count": len(workers),
+                        "runtime": dict(runtime_snapshot),
+                        "workers": workers,
+                    },
+                )
+
+        diagnostics_thread = Thread(
+            target=publish_diagnostics,
+            name="sf-correctness-diagnostics",
+            daemon=True,
+        )
+        diagnostics_thread.start()
 
         def can_submit() -> bool:
             return not stop_event.is_set() and (
@@ -142,6 +207,8 @@ class CorrectnessRunService:
 
         def execute(worker_id: int, round_number: int) -> RoundSummary:
             round_seed = SeedTree(request.seed).derive("round", round_number)
+            with active_lock:
+                active_rounds[worker_id] = (round_number, time.monotonic_ns())
             publisher.publish(
                 "round_started",
                 {
@@ -150,11 +217,15 @@ class CorrectnessRunService:
                     "worker_id": worker_id,
                 },
             )
-            result = self._rounds.run_round(
-                RoundContext(request, worker_id, round_number, round_seed),
-                publisher,
-                stop_event,
-            )
+            try:
+                result = self._rounds.run_round(
+                    RoundContext(request, worker_id, round_number, round_seed),
+                    publisher,
+                    stop_event,
+                )
+            finally:
+                with active_lock:
+                    active_rounds.pop(worker_id, None)
             publisher.publish(
                 "round_finished",
                 {
@@ -183,9 +254,36 @@ class CorrectnessRunService:
                         result = future.result()
                     except Exception as error:
                         stop_event.set()
+                        diagnostics_stop.set()
+                        abort_active = getattr(self._rounds, "abort_active", None)
+                        aborted_sessions = 0
+                        abort_failure: Mapping[str, object] | None = None
+                        if callable(abort_active):
+                            try:
+                                raw_aborted = abort_active()
+                                if isinstance(raw_aborted, int) and not isinstance(
+                                    raw_aborted, bool
+                                ):
+                                    aborted_sessions = max(0, raw_aborted)
+                            except Exception as abort_error:
+                                abort_failure = capture_exception_evidence(
+                                    abort_error,
+                                    "correctness_abort_active",
+                                )
                         publisher.publish(
                             "run_failed",
-                            {"error_type": type(error).__name__, "worker_id": worker_id},
+                            {
+                                "aborted_sessions": aborted_sessions,
+                                "abort_failure": abort_failure,
+                                "error_type": type(error).__name__,
+                                "evidence": capture_exception_evidence(
+                                    error,
+                                    "correctness_worker",
+                                ),
+                                "exception_type": type(error).__name__,
+                                "message": str(error),
+                                "worker_id": worker_id,
+                            },
                         )
                         for pending in futures:
                             pending.cancel()
@@ -198,6 +296,8 @@ class CorrectnessRunService:
                     if can_submit():
                         futures[pool.submit(execute, worker_id, next_round)] = worker_id
                         next_round += 1
+        diagnostics_stop.set()
+        diagnostics_thread.join(timeout=1.0)
         summary = RunSummary(
             run_id=request.run_id,
             rounds_completed=totals["rounds_completed"],

@@ -578,13 +578,14 @@ class MySQLConnectorFactory:
         *,
         environ: Mapping[str, str] | None = None,
         connect: Callable[..., Any] = mysql.connector.connect,
-        connection_timeout_s: int = 10,
+        connection_timeout_s: int = 30,
         read_timeout_s: int = 310,
         control_timeout_s: int = 5,
         diagnostic_timeout_s: int = 5,
         use_pure: bool = True,
         control_use_pure: bool | None = None,
         control_connection_limit: int = 8,
+        connect_concurrency_limit: int = 16,
         session_variables_by_role: Mapping[NodeRole, Mapping[str, bool | int | float | str]]
         | None = None,
         active_session_registry: ActiveSessionRegistry | None = None,
@@ -594,6 +595,7 @@ class MySQLConnectorFactory:
         _positive_bound(control_timeout_s, "control_timeout_s")
         _positive_bound(diagnostic_timeout_s, "diagnostic_timeout_s")
         _positive_bound(control_connection_limit, "control_connection_limit")
+        _positive_bound(connect_concurrency_limit, "connect_concurrency_limit")
         if not isinstance(use_pure, bool):
             raise TypeError("use_pure must be a boolean")
         if control_use_pure is not None and not isinstance(control_use_pure, bool):
@@ -613,6 +615,7 @@ class MySQLConnectorFactory:
             use_pure if control_use_pure is None else control_use_pure
         )
         self._control_slots = BoundedSemaphore(control_connection_limit)
+        self._query_connect_slots = BoundedSemaphore(connect_concurrency_limit)
         # Connector/Python's C extension can crash when several threads enter
         # connect() together on macOS. Serialize only connection construction;
         # established sessions still execute concurrently.
@@ -714,13 +717,20 @@ class MySQLConnectorFactory:
     def open_query_session(self, node: NodeConfig, database: str) -> SessionLease:
         """Open an explicitly owned query session for round-level reuse."""
 
-        return self._open_session_lease(
-            node,
-            database,
-            connection_timeout_s=self._connection_timeout_s,
-            read_timeout_s=self._read_timeout_s,
-            use_pure=self._use_pure,
-        )
+        if not self._query_connect_slots.acquire(
+            timeout=float(self._connection_timeout_s)
+        ):
+            raise TimeoutError("查询连接握手并发槽位等待超时")
+        try:
+            return self._open_session_lease(
+                node,
+                database,
+                connection_timeout_s=self._connection_timeout_s,
+                read_timeout_s=self._read_timeout_s,
+                use_pure=self._use_pure,
+            )
+        finally:
+            self._query_connect_slots.release()
 
     @property
     def active_session_registry(self) -> ActiveSessionRegistry:
@@ -729,14 +739,17 @@ class MySQLConnectorFactory:
     def abort_active_sessions(self) -> int:
         return self._active_session_registry.abort_all()
 
-    def query_session(self, node: NodeConfig, database: str):  # type: ignore[no-untyped-def]
-        return self._session(
-            node,
-            database,
-            connection_timeout_s=self._connection_timeout_s,
-            read_timeout_s=self._read_timeout_s,
-            use_pure=self._use_pure,
-        )
+    @contextmanager
+    def query_session(
+        self,
+        node: NodeConfig,
+        database: str,
+    ) -> Iterator[QuerySession]:
+        lease = self.open_query_session(node, database)
+        try:
+            yield lease.session
+        finally:
+            lease.close()
 
     @contextmanager
     def _bounded_control_session(

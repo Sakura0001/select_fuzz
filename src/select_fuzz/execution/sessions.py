@@ -48,6 +48,23 @@ class ActiveSessionRegistry:
         with self._lock:
             return len(self._sessions)
 
+    def connection_ids(self) -> tuple[int, ...]:
+        with self._lock:
+            sessions = tuple(self._sessions.values())
+        identifiers: list[int] = []
+        for session in sessions:
+            try:
+                connection_id = session.connection_id()
+            except Exception:
+                continue
+            if (
+                isinstance(connection_id, int)
+                and not isinstance(connection_id, bool)
+                and connection_id > 0
+            ):
+                identifiers.append(connection_id)
+        return tuple(sorted(identifiers))
+
 
 @dataclass(slots=True)
 class SessionLease:

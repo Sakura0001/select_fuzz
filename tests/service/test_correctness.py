@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import Barrier, Event, Lock
 
+import pytest
+
 from select_fuzz.domain import RunEvent, RunRequest
 from select_fuzz.service import (
     CorrectnessRunService,
@@ -96,3 +98,55 @@ def test_stop_event_prevents_new_rounds_without_marking_failure() -> None:
     assert summary.rounds_completed == 0
     assert summary.stopped is True
     assert [event.kind for event in sink.items] == ["run_started", "run_finished"]
+
+
+def test_fatal_worker_error_aborts_sessions_and_logs_original_exception() -> None:
+    class FailingRounds:
+        def __init__(self) -> None:
+            self.abort_active_calls = 0
+
+        def run_round(self, context, events, stop_event):  # type: ignore[no-untyped-def]
+            raise ValueError("artifact payload exploded")
+
+        def abort_active(self) -> int:
+            self.abort_active_calls += 1
+            return 2
+
+    sink = _Events()
+    rounds = FailingRounds()
+
+    with pytest.raises(ValueError, match="artifact payload exploded"):
+        CorrectnessRunService(rounds, sink).run(_request(rounds=1, workers=1), Event())
+
+    assert rounds.abort_active_calls == 1
+    failed = next(event for event in sink.items if event.kind == "run_failed")
+    assert failed.payload["exception_type"] == "ValueError"
+    assert failed.payload["message"] == "artifact payload exploded"
+    assert failed.payload["aborted_sessions"] == 2
+    assert failed.payload["evidence"]["failure_stage"] == "correctness_worker"
+
+
+def test_runtime_diagnostics_publish_active_workers_and_connections() -> None:
+    class SlowRounds(_Rounds):
+        def run_round(self, context, events, stop_event):  # type: ignore[no-untyped-def]
+            Event().wait(0.06)
+            return RoundSummary(context.round_number, 0, 0, 0, 0)
+
+        def runtime_diagnostics(self):  # type: ignore[no-untyped-def]
+            return {"active_session_count": 2, "connection_ids": (101, 102)}
+
+    sink = _Events()
+
+    CorrectnessRunService(
+        SlowRounds(),
+        sink,
+        diagnostics_interval_seconds=0.01,
+    ).run(_request(rounds=1, workers=1), Event())
+
+    diagnostics = [event for event in sink.items if event.kind == "runtime_diagnostics"]
+    assert diagnostics
+    assert diagnostics[0].payload["active_worker_count"] == 1
+    assert diagnostics[0].payload["runtime"] == {
+        "active_session_count": 2,
+        "connection_ids": (101, 102),
+    }

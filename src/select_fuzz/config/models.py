@@ -208,6 +208,10 @@ class CorrectnessConfig(StrictModel):
         gt=0,
         le=MAX_STATEMENT_TIMEOUT_SECONDS,
     )
+    connection_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    connect_concurrency_limit: int = Field(default=16, ge=1, le=128)
+    query_attempt_json_log: bool = True
+    diagnostics_interval_seconds: float = Field(default=5.0, ge=1.0, le=300.0)
 
     @model_validator(mode="after")
     def validate_correctness_bounds(self) -> Self:

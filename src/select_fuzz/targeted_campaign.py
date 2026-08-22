@@ -50,12 +50,17 @@ def classify_connection_event(
     watchdog_fired: bool,
     stage: str = "execute",
 ) -> str:
-    """Classify a connection error without mistaking a killed query for a crash."""
+    """Classify connection loss without treating it as proof of a server crash.
+
+    A dropped MySQL connection can come from a server crash, a restart, a
+    proxy/network interruption, or connector cleanup.  The campaign does not
+    have an independent process monitor, so only an explicit crash classification
+    supplied by the caller is allowed to become a crash finding.  A watchdog
+    timeout remains a separate timeout/connection outcome.
+    """
 
     if errno in LOST_CONNECTION_ERRNOS:
-        if stage != "execute":
-            return "connection_lost_infra"
-        return "timeout_connection" if watchdog_fired else "crash_candidate"
+        return "timeout_connection" if watchdog_fired else "connection_lost_infra"
     if status == "timeout" or watchdog_fired:
         return "timeout"
     return "database_error"

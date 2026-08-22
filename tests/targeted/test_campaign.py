@@ -8,12 +8,39 @@ from select_fuzz.targeted_campaign import (
 )
 
 
-def test_non_timeout_lost_connection_is_a_crash_candidate() -> None:
+def test_non_timeout_lost_connection_is_infrastructure_not_a_finding() -> None:
     assert classify_connection_event(
         status="infra_error",
         errno=2013,
         watchdog_fired=False,
-    ) == "crash_candidate"
+    ) == "connection_lost_infra"
+
+
+def test_explicit_crash_candidate_is_preserved_even_with_other_side_infrastructure() -> None:
+    crashing = {
+        "status": "success",
+        "queries": [
+            {
+                "status": "error",
+                "error": {"classification": "crash_candidate"},
+            }
+        ],
+    }
+    disconnected = {
+        "status": "success",
+        "queries": [
+            {
+                "status": "error",
+                "error": {
+                    "classification": "connection_lost_infra",
+                    "errno": 2013,
+                },
+            }
+        ],
+    }
+    result = _comparison("flashback", disconnected, crashing)
+    assert result["category"] == "crash_candidate"
+    assert result["crash_roles"] == ["custom_on"]
 
 
 def test_watchdog_lost_connection_is_not_a_crash_candidate() -> None:

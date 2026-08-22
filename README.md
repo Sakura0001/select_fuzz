@@ -264,8 +264,10 @@ uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml \
   设置为 `0` 可关闭周期换代。
 - 查询使用独立 pure-Python 控制连接执行 wall-clock watchdog；超时或停止时先
   `KILL QUERY`，随后关闭本地 socket，并用 `KILL CONNECTION` 清理服务端会话，避免
-  PQ 执行路径在客户端断开后继续残留。控制连接并发不超过
-  `control_connection_reserve`。事件日志周期记录等待生成、执行、结果拉取和重连阶段。
+  PQ 执行路径在客户端断开后继续残留。控制连接瞬时超时会在有界次数内重试，最终失败也会
+  将每次动作的次数、异常类型和原文写入 watchdog 证据，便于区分“已清理”和“服务端仍在执行”。
+  控制连接并发不超过 `control_connection_reserve`。事件日志周期记录等待生成、执行、结果拉取
+  和重连阶段。
 - 每条 fuzz worker 会话设置只用于观测的 `@select_fuzz_worker` 标签：
   `primary_writer`、`primary_reader` 或 `replica_reader`。共享代理 endpoint 下也能通过
   `performance_schema.user_variables_by_thread` 核对逻辑主备连接分布。

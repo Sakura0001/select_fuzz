@@ -101,9 +101,25 @@ class _FallbackControlFactory(_ControlFactory):
         del node
         self.control_databases.append(database)
         self.opens += 1
-        if self.opens == 1:
+        if self.opens <= timeout_module._CONTROL_KILL_ATTEMPTS:
             yield _FailingKillQuerySession(self.killed, self.kill_seen)
             return
+        yield _ControlSession(self.killed, self.kill_seen)
+
+
+class _RetryingControlFactory(_ControlFactory):
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+
+    @contextmanager
+    def control_session(self, node: NodeConfig, database: str):  # type: ignore[no-untyped-def]
+        del node
+        self.control_databases.append(database)
+        if self.failures > 0:
+            self.failures -= 1
+            self.kill_seen.set()
+            raise TimeoutError("control connection temporarily unavailable")
         yield _ControlSession(self.killed, self.kill_seen)
 
 
@@ -140,6 +156,7 @@ def test_watchdog_uses_an_independent_control_session_and_integer_kill(
         "action_error_type": None,
         "action_error": None,
         "kill_query_started": True,
+        "kill_query_attempts": 1,
         "kill_query_finished": True,
         "kill_query_succeeded": True,
         "kill_query_error_type": None,
@@ -149,6 +166,7 @@ def test_watchdog_uses_an_independent_control_session_and_integer_kill(
         "abort_error_type": None,
         "abort_error": None,
         "kill_connection_attempted": False,
+        "kill_connection_attempts": 0,
         "kill_connection_succeeded": None,
         "kill_connection_error_type": None,
         "kill_connection_error": None,
@@ -357,7 +375,7 @@ def test_watchdog_kills_server_connection_after_local_abort_when_query_kill_fail
     assert factory.kill_seen.wait(1)
     handle.cancel()
 
-    assert factory.opens == 2
+    assert factory.opens == timeout_module._CONTROL_KILL_ATTEMPTS + 1
     assert factory.killed == ["KILL CONNECTION 41"]
     snapshot = handle.diagnostic_snapshot()
     assert snapshot["abort_succeeded"] is True
@@ -382,6 +400,30 @@ def test_watchdog_kills_server_connection_after_local_abort_even_if_query_kill_s
     handle.cancel()
 
     assert factory.killed == ["KILL QUERY 41", "KILL CONNECTION 41"]
+
+
+def test_watchdog_retries_transient_control_connection_failure(
+    node: NodeConfig,
+) -> None:
+    factory = _RetryingControlFactory(failures=2)
+
+    handle = KillQueryWatchdog(factory, kill_grace_s=0.01).arm(
+        node,
+        "sf_case_1",
+        connection_id=41,
+        timeout_s=0.01,
+        fallback_abort=lambda: None,
+    )
+
+    assert factory.kill_seen.wait(1)
+    handle.cancel()
+
+    assert factory.killed == ["KILL QUERY 41", "KILL CONNECTION 41"]
+    snapshot = handle.diagnostic_snapshot()
+    assert snapshot["kill_query_succeeded"] is True
+    assert snapshot["kill_query_attempts"] == 3
+    assert snapshot["kill_connection_succeeded"] is True
+    assert snapshot["kill_connection_attempts"] == 1
 
 
 def test_scheduler_compacts_cancelled_handles_behind_a_live_deadline(

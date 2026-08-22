@@ -14,6 +14,8 @@ from select_fuzz.execution.protocols import ControlConnectionFactory
 
 
 _DEADLINE_COMPACT_INTERVAL = 256
+_CONTROL_KILL_ATTEMPTS = 3
+_CONTROL_KILL_RETRY_DELAY_S = 0.1
 
 
 def _diagnostic_error_text(error: BaseException) -> str:
@@ -118,6 +120,7 @@ class KillHandle:
         self._action_error_type: str | None = None
         self._action_error: str | None = None
         self._kill_query_started = False
+        self._kill_query_attempts = 0
         self._kill_query_finished = False
         self._kill_query_succeeded: bool | None = None
         self._kill_query_error_type: str | None = None
@@ -127,6 +130,7 @@ class KillHandle:
         self._abort_error_type: str | None = None
         self._abort_error: str | None = None
         self._kill_connection_attempted = False
+        self._kill_connection_attempts = 0
         self._kill_connection_succeeded: bool | None = None
         self._kill_connection_error_type: str | None = None
         self._kill_connection_error: str | None = None
@@ -248,21 +252,32 @@ class KillHandle:
     def _kill_query(self) -> None:
         with self._lock:
             self._kill_query_started = True
+        last_error: Exception | None = None
         try:
-            with self._factory.control_session(self._node, self._database) as session:
-                cursor = session.execute(f"KILL QUERY {self._connection_id}")
+            for attempt in range(1, _CONTROL_KILL_ATTEMPTS + 1):
+                with self._lock:
+                    self._kill_query_attempts = attempt
                 try:
-                    cursor.fetchmany(1)
-                finally:
-                    cursor.close()
-            with self._lock:
-                self._kill_query_succeeded = True
-        except Exception as error:  # connector failures are diagnostics, not thread crashes
-            with self._lock:
-                self._kill_error_type = type(error).__name__
-                self._kill_query_succeeded = False
-                self._kill_query_error_type = type(error).__name__
-                self._kill_query_error = _diagnostic_error_text(error)
+                    with self._factory.control_session(self._node, self._database) as session:
+                        cursor = session.execute(f"KILL QUERY {self._connection_id}")
+                        try:
+                            cursor.fetchmany(1)
+                        finally:
+                            cursor.close()
+                    with self._lock:
+                        self._kill_query_succeeded = True
+                    break
+                except Exception as error:  # connector failures are diagnostics, not thread crashes
+                    last_error = error
+                    if attempt < _CONTROL_KILL_ATTEMPTS:
+                        time.sleep(_CONTROL_KILL_RETRY_DELAY_S)
+            else:
+                assert last_error is not None
+                with self._lock:
+                    self._kill_error_type = type(last_error).__name__
+                    self._kill_query_succeeded = False
+                    self._kill_query_error_type = type(last_error).__name__
+                    self._kill_query_error = _diagnostic_error_text(last_error)
         finally:
             with self._lock:
                 self._kill_query_finished = True
@@ -289,16 +304,34 @@ class KillHandle:
     def _kill_connection(self) -> None:
         with self._lock:
             self._kill_connection_attempted = True
+        last_error: Exception | None = None
         try:
-            with self._factory.control_session(self._node, self._database) as session:
-                cursor = session.execute(f"KILL CONNECTION {self._connection_id}")
+            for attempt in range(1, _CONTROL_KILL_ATTEMPTS + 1):
+                with self._lock:
+                    self._kill_connection_attempts = attempt
                 try:
-                    cursor.fetchmany(1)
-                finally:
-                    cursor.close()
-            with self._lock:
-                self._kill_connection_succeeded = True
-        except Exception as error:
+                    with self._factory.control_session(self._node, self._database) as session:
+                        cursor = session.execute(f"KILL CONNECTION {self._connection_id}")
+                        try:
+                            cursor.fetchmany(1)
+                        finally:
+                            cursor.close()
+                    with self._lock:
+                        self._kill_connection_succeeded = True
+                    break
+                except Exception as error:
+                    last_error = error
+                    if attempt < _CONTROL_KILL_ATTEMPTS:
+                        time.sleep(_CONTROL_KILL_RETRY_DELAY_S)
+            else:
+                assert last_error is not None
+                with self._lock:
+                    self._kill_connection_succeeded = False
+                    self._kill_connection_error_type = type(last_error).__name__
+                    self._kill_connection_error = _diagnostic_error_text(last_error)
+                    if self._kill_error_type is None:
+                        self._kill_error_type = type(last_error).__name__
+        except BaseException as error:
             with self._lock:
                 self._kill_connection_succeeded = False
                 self._kill_connection_error_type = type(error).__name__
@@ -365,6 +398,7 @@ class KillHandle:
                 "action_error_type": self._action_error_type,
                 "action_error": self._action_error,
                 "kill_query_started": self._kill_query_started,
+                "kill_query_attempts": self._kill_query_attempts,
                 "kill_query_finished": self._kill_query_finished,
                 "kill_query_succeeded": self._kill_query_succeeded,
                 "kill_query_error_type": self._kill_query_error_type,
@@ -374,6 +408,7 @@ class KillHandle:
                 "abort_error_type": self._abort_error_type,
                 "abort_error": self._abort_error,
                 "kill_connection_attempted": self._kill_connection_attempted,
+                "kill_connection_attempts": self._kill_connection_attempts,
                 "kill_connection_succeeded": self._kill_connection_succeeded,
                 "kill_connection_error_type": self._kill_connection_error_type,
                 "kill_connection_error": self._kill_connection_error,

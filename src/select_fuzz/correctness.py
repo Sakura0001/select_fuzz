@@ -221,6 +221,7 @@ class CoordinatorLike(Protocol):
         *,
         database: str,
         should_stop: Callable[[], bool],
+        on_infrastructure_pause: Callable[[PreparedRound, int], None] | None = None,
     ) -> PreparedLike: ...
 
     def execute(
@@ -254,11 +255,13 @@ class ProductionCoordinatorAdapter:
         *,
         database: str,
         should_stop: Callable[[], bool],
+        on_infrastructure_pause: Callable[[PreparedRound, int], None] | None = None,
     ) -> PreparedRound:
         return self._comparison.prepare_until_recovered(
             bundle,
             database=database,
             should_stop=should_stop,
+            on_infrastructure_pause=on_infrastructure_pause,
         )
 
     def execute(self, prepared: PreparedLike, sql: str, limits: QueryLimits) -> ExecutionBatchLike:
@@ -782,10 +785,34 @@ class CorrectnessRoundEngine:
         stop_event: Event,
     ) -> RoundSummary:
         materialized = self._source.materialize(context)
+
+        def publish_setup_pause(prepared: PreparedRound, attempt_number: int) -> None:
+            """Persist every setup-retry cause before the next backoff sleep."""
+
+            events.publish(
+                "infrastructure_pause",
+                {
+                    "attempt_number": attempt_number,
+                    "database": prepared.database,
+                    "stage": "setup_recovery",
+                    "node_results": {
+                        result.role.value: _setup_result_to_artifact(result)
+                        for result in prepared.nodes
+                    },
+                    "schema_seed": materialized.schema_seed,
+                    "data_seed": materialized.data_seed,
+                    "setup_payload_sha256": materialized.bundle.payload_sha256,
+                    "setup_statement_count": len(materialized.bundle.statements),
+                    "round_number": context.round_number,
+                    "worker_id": context.worker_id,
+                },
+            )
+
         prepared = self._coordinator.prepare_until_recovered(
             materialized.bundle,
             database=materialized.database,
             should_stop=stop_event.is_set,
+            on_infrastructure_pause=publish_setup_pause,
         )
         attempted_setup_sql = (
             tuple(getattr(prepared, "attempted_setup_sql"))

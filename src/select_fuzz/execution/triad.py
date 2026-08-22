@@ -601,6 +601,7 @@ class ComparisonCoordinator:
         database: str,
         retry: InfrastructureRetryPolicy = InfrastructureRetryPolicy(),
         should_stop: Callable[[], bool] = lambda: False,
+        on_infrastructure_pause: Callable[[PreparedRound, int], None] | None = None,
     ) -> PreparedRound:
         """Retry only infrastructure pauses; semantic setup outcomes return directly."""
 
@@ -624,6 +625,8 @@ class ComparisonCoordinator:
             attempts = generation + 1
             if retry.max_attempts is not None and attempts >= retry.max_attempts:
                 return prepared
+            if on_infrastructure_pause is not None:
+                on_infrastructure_pause(prepared, attempts)
             prepared.close()
             self._sleeper(delay)
             delay = min(retry.max_delay_seconds, delay * retry.multiplier)

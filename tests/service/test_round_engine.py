@@ -253,6 +253,7 @@ class _Coordinator:
         database: str,
         should_stop,
         retry=None,  # type: ignore[no-untyped-def]
+        on_infrastructure_pause=None,  # type: ignore[no-untyped-def]
     ) -> _Prepared:
         self.prepared = _Prepared(database, bundle)
         return self.prepared
@@ -1644,7 +1645,7 @@ def test_setup_mismatch_persists_complete_finding_bundle(tmp_path: Path) -> None
     )
     coordinator.prepared = prepared
     coordinator.prepare_until_recovered = (  # type: ignore[method-assign]
-        lambda bundle, *, database, should_stop: prepared
+        lambda bundle, *, database, should_stop, on_infrastructure_pause=None: prepared
     )
     engine = CorrectnessRoundEngine(
         _Source(materialized),

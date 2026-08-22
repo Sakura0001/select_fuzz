@@ -863,6 +863,7 @@ def test_infrastructure_pause_retries_with_bounded_exponential_backoff(
 ) -> None:
     factory = _Factory()
     delays: list[float] = []
+    pauses: list[tuple[int, str, tuple[tuple[str, int | None], ...]]] = []
     setup_runner = _FlakySetupRunner()
     coordinator = ComparisonCoordinator(
         nodes,
@@ -881,6 +882,19 @@ def test_infrastructure_pause_retries_with_bounded_exponential_backoff(
             multiplier=2,
             max_attempts=3,
         ),
+        on_infrastructure_pause=lambda prepared, attempt: pauses.append(
+            (
+                attempt,
+                prepared.database,
+                tuple(
+                    (
+                        result.role.value,
+                        None if result.error is None else result.error.errno,
+                    )
+                    for result in prepared.nodes
+                ),
+            )
+        ),
     )
 
     assert prepared.status is PrepareStatus.READY
@@ -892,6 +906,13 @@ def test_infrastructure_pause_retries_with_bounded_exponential_backoff(
     assert len(second_attempt_databases) == 1
     assert second_attempt_databases != first_attempt_databases
     assert prepared.database in second_attempt_databases
+    assert pauses == [
+        (
+            1,
+            "sf_correctness_w0_r12_s18",
+            (("custom_off", 2003), ("custom_on", 2003)),
+        )
+    ]
 
 
 @pytest.mark.parametrize(

@@ -193,7 +193,13 @@ class _Comparison:
         self.received: list[tuple[ReplayCase, str, object]] = []
 
     def prepare_until_recovered(
-        self, bundle: ReplayCase, *, database: str, retry: object
+        self,
+        bundle: ReplayCase,
+        *,
+        database: str,
+        retry: object = None,
+        should_stop=None,
+        on_infrastructure_pause=None,
     ) -> _Prepared:
         self.received.append((bundle, database, retry))
         self.prepared.database = database

@@ -754,8 +754,15 @@ class CaseBundleWriter:
         setup_sql: tuple[str, ...],
         queries: tuple[str, ...],
         metadata: Mapping[str, object],
+        append_thread_setup: bool = True,
     ) -> Path:
-        """Publish the canonical round script and optionally append worker setup SQL."""
+        """Publish the canonical round script and optionally append worker setup SQL.
+
+        ``append_thread_setup`` is false when a round is being refreshed after
+        its initial setup was already published.  This lets recovery retries
+        replace the canonical source file without duplicating the same setup
+        block in the append-only worker audit log.
+        """
 
         writer = SourceableSqlWriter(
             self.root / "rounds" / f"{database}.sql",
@@ -769,7 +776,7 @@ class CaseBundleWriter:
             writer.append_single_line_statement(query)
         with self._lock:
             self._round_writers[(worker_id, database)] = writer
-        if self._thread_sql_log is not None:
+        if self._thread_sql_log is not None and append_thread_setup:
             log = self._thread_sql_log
             header = {**metadata, "database": database, "phase": "round_setup"}
             log.append(worker_id, "SET NAMES utf8mb4", metadata=header)

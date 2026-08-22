@@ -307,6 +307,7 @@ class ArtifactWriterLike(Protocol):
         setup_sql: tuple[str, ...],
         queries: tuple[str, ...],
         metadata: Mapping[str, object],
+        append_thread_setup: bool = True,
     ) -> Path: ...
 
     def append_round_sql(self, worker_id: int, database: str, sql: str) -> None: ...
@@ -822,6 +823,26 @@ class CorrectnessRoundEngine:
                 },
             )
 
+        round_metadata = {
+            "data_seed": materialized.data_seed,
+            "round_number": context.round_number,
+            "round_seed": context.round_seed,
+            "run_id": context.request.run_id,
+            "schema_seed": materialized.schema_seed,
+            "worker_id": context.worker_id,
+            "replica_parameters_sha256": self._replica_parameters_sha256,
+        }
+        # Publish the complete initial setup before opening either node.  A
+        # sustained lost connection can keep setup recovery inside its retry
+        # loop; the callback below must still leave a sourceable SQL script
+        # even when prepare_until_recovered has not returned yet.
+        self._artifacts.begin_round_sql(
+            context.worker_id,
+            database=materialized.database,
+            setup_sql=materialized.bundle.statements,
+            queries=(),
+            metadata=round_metadata,
+        )
         prepared = self._coordinator.prepare_until_recovered(
             materialized.bundle,
             database=materialized.database,
@@ -838,15 +859,8 @@ class CorrectnessRoundEngine:
             database=prepared.database,
             setup_sql=attempted_setup_sql,
             queries=(),
-            metadata={
-                "data_seed": materialized.data_seed,
-                "round_number": context.round_number,
-                "round_seed": context.round_seed,
-                "run_id": context.request.run_id,
-                "schema_seed": materialized.schema_seed,
-                "worker_id": context.worker_id,
-                "replica_parameters_sha256": self._replica_parameters_sha256,
-            },
+            metadata=round_metadata,
+            append_thread_setup=prepared.database != materialized.database,
         )
         if prepared.status is not PrepareStatus.READY:
             kind = prepared.status.value

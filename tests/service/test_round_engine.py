@@ -1744,3 +1744,48 @@ def test_setup_mismatch_persists_complete_finding_bundle(tmp_path: Path) -> None
     assert stored.manifest["original_verdict"] == "setup_mismatch"
     assert stored.setup_sql == materialized.bundle.statements
     assert set(stored.results) == set(COMPARISON_ROLES)
+
+
+def test_setup_sql_is_persisted_before_setup_recovery_callback(tmp_path: Path) -> None:
+    materialized = RoundMaterialization(
+        "sf_c_20260713t120000_w0_r0_sabc_n123_q0", _Bundle(), _queries(1), 1, 2
+    )
+    coordinator = _Coordinator({})
+    prepared = _Prepared(materialized.database, materialized.bundle)
+    prepared.status = PrepareStatus.INFRASTRUCTURE_PAUSE
+    prepared.setup_failing_sql = materialized.bundle.statements[1]
+    observed_payloads: list[str] = []
+
+    def prepare_until_recovered(
+        bundle: _Bundle,
+        *,
+        database: str,
+        should_stop,
+        on_infrastructure_pause=None,
+    ) -> _Prepared:
+        del bundle, database, should_stop
+        assert on_infrastructure_pause is not None
+        on_infrastructure_pause(prepared, 1)
+        round_path = tmp_path / "rounds" / f"{prepared.database}.sql"
+        observed_payloads.append(
+            round_path.read_text(encoding="utf-8") if round_path.exists() else ""
+        )
+        return prepared
+
+    coordinator.prepare_until_recovered = prepare_until_recovered  # type: ignore[method-assign]
+    engine = CorrectnessRoundEngine(
+        _Source(materialized),
+        coordinator,
+        CaseBundleWriter(tmp_path),
+        _Coverage(),
+        QueryLimits(15, 10_000, 32 << 20),
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
+    )
+
+    engine.run_round(_context(1), EventPublisher("run_engine_1", _Sink()), Event())
+
+    assert observed_payloads
+    assert materialized.bundle.statements[0] in observed_payloads[0]
+    assert materialized.bundle.statements[1] in observed_payloads[0]

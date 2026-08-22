@@ -15,6 +15,11 @@ Correctness compares typed results or normalized errors between the pair.
 Performance starts the same `EXPLAIN ANALYZE FORMAT=TREE` query concurrently on
 both endpoints and emits only `VS_CUSTOM_OFF` regressions. Fuzz keeps its
 separate selected-role primary/replica topology and long-lived load workers.
+Correctness, performance, and finding replay sessions normalize the MySQL
+8.0.22 standard `sql_mode` on both endpoints. This removes mode-dependent
+warning/error differences from the oracle while leaving server-side PQ and
+other `optimizer_switch` differences intact; fuzz sessions keep the target's
+configured session semantics.
 JSON, FULLTEXT, SPATIAL, and multi-valued JSON-array indexes are excluded from
 the default fuzz scope.
 

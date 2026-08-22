@@ -40,6 +40,7 @@ INTERNAL_WATCHDOG_TIMEOUT_ERRNO = 65003
 _INTERNAL_SQLSTATE = "HY000"
 _TIMEOUT_SQLSTATE = "HYT00"
 _MYSQL_CLIENT_ERROR_RANGE = range(2000, 3000)
+_MAX_WARNING_ROWS = 128
 _QUERY_SESSION_INITIALIZATION_SQL = "SET SESSION time_zone = '+00:00'"
 # Comparison and performance lanes target MySQL 8.0.22 semantics.  TaurusDB
 # may default this session variable to an empty string, while stock MySQL
@@ -562,9 +563,14 @@ class _ConnectorCursor:
             write_timeout=self._diagnostic_timeout_s,
         )
         try:
-            warning_cursor.execute("SHOW WARNINGS")
-            warning_rows = warning_cursor.fetchall()
-            return tuple(f"{level} {code}: {message}" for level, code, message in warning_rows)
+            warning_cursor.execute(f"SHOW WARNINGS LIMIT {_MAX_WARNING_ROWS}")
+            warning_rows = warning_cursor.fetchmany(_MAX_WARNING_ROWS)
+            rendered = [f"{level} {code}: {message}" for level, code, message in warning_rows]
+            if warning_count > len(rendered):
+                rendered.append(
+                    f"warning details truncated: {warning_count} total, {_MAX_WARNING_ROWS} retained"
+                )
+            return tuple(rendered)
         finally:
             warning_cursor.close()
 

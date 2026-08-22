@@ -16,6 +16,7 @@ from select_fuzz.execution.mysql import (
     MYSQL_8_0_22_COMPARISON_SQL_MODE,
     MySQLConnectorFactory,
     NodeQueryRunner,
+    _ConnectorCursor,
     comparison_session_variables,
 )
 from select_fuzz.execution.timeout import KillQueryWatchdog
@@ -877,10 +878,26 @@ def test_connector_adapter_preserves_flags_and_fetches_warnings_after_result(
     assert connect_kwargs["get_warnings"] is False
     assert connect_kwargs["read_timeout"] == 310
     assert connect_kwargs["use_pure"] is True
-    assert connection.warning_cursor.executed == ["SHOW WARNINGS"]
+    assert connection.warning_cursor.executed == ["SHOW WARNINGS LIMIT 128"]
     assert connection.cursor_calls[-1]["read_timeout"] == 5
     assert connection.cursor_calls[-1]["write_timeout"] == 5
     assert connection.closed is True
+
+
+def test_connector_adapter_caps_warning_diagnostics() -> None:
+    connection = _RawConnection()
+    connection.query_cursor.warning_count = 130
+    connection.warning_cursor._rows = [
+        ("Warning", 1265, f"warning-{index}") for index in range(200)
+    ]
+    cursor = _ConnectorCursor(connection.query_cursor, connection, diagnostic_timeout_s=5)
+
+    warnings = cursor.warnings()
+
+    assert len(warnings) == 129
+    assert warnings[0] == "Warning 1265: warning-0"
+    assert warnings[-1] == "warning details truncated: 130 total, 128 retained"
+    assert connection.warning_cursor.executed == ["SHOW WARNINGS LIMIT 128"]
 
 
 def test_pure_connector_decodes_rollup_bit_values_returned_as_decimal_text(

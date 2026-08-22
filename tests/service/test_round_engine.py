@@ -172,6 +172,23 @@ def _errors(errno: int, sqlstate: str, message: str) -> tuple[NodeExecution, ...
     )
 
 
+def _one_sided_server_error_success(
+    errno: int,
+    sqlstate: str,
+    message: str,
+) -> tuple[NodeExecution, ...]:
+    executions = list(_match())
+    executions[0] = NodeExecution.failure(
+        role=NodeRole.CUSTOM_OFF,
+        status=ExecutionStatus.ERROR,
+        started_ns=10,
+        ended_ns=20,
+        connection_id=100,
+        error=ErrorInfo(errno, sqlstate, message),
+    )
+    return tuple(executions)
+
+
 def _errors_with_messages(
     errno: int, sqlstate: str, messages: tuple[str, ...]
 ) -> tuple[NodeExecution, ...]:
@@ -765,6 +782,48 @@ def test_round_engine_persists_finding_and_stops_current_database(
     finding_root = next(path for path in (tmp_path / "findings").iterdir() if path.is_dir())
     assert (finding_root / "case.sql").exists()
     assert (finding_root / "case.diff").exists()
+
+
+def test_one_sided_server_resource_error_does_not_create_finding(
+    tmp_path: Path,
+) -> None:
+    query = _queries(1)[0]
+    materialized = RoundMaterialization(
+        database="sf_c_20260713t120000_w0_r0_sabc_n123_q0",
+        bundle=_Bundle(),
+        queries=(query,),
+        schema_seed=21,
+        data_seed=22,
+    )
+    coordinator = _Coordinator(
+        {
+            query.sql: _one_sided_server_error_success(
+                1038,
+                "HY001",
+                "Out of sort memory, consider increasing server sort buffer size",
+            )
+        }
+    )
+    engine = CorrectnessRoundEngine(
+        _Source(materialized),
+        coordinator,
+        CaseBundleWriter(tmp_path),
+        _Coverage(),
+        QueryLimits(15, 10_000, 32 << 20),
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
+    )
+
+    summary = engine.run_round(_context(1), EventPublisher("run_engine_1", _Sink()), Event())
+
+    assert summary.queries_completed == 1
+    assert summary.findings == 0
+    assert summary.over_budget == 1
+    assert not tuple((tmp_path / "findings").glob("*/manifest.json"))
+    record = read_jsonl(tmp_path / "sql" / "worker-000.jsonl")[-1]
+    assert record["verdict"] == "resource_limit"
+    assert record["oracle_verdict"] == "result_mismatch"
 
 
 def test_full_thread_sql_log_is_opt_in_append_only_and_sourceable(tmp_path: Path) -> None:

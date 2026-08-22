@@ -1223,13 +1223,19 @@ class CorrectnessRoundEngine:
                     pass_record: PassRecord | None = None
                     finding_record: FindingRecord | None = None
                     effective_verdict = oracle.verdict.value
-                    if oracle.verdict is OracleVerdict.RESULT_MISMATCH:
+                    if error_analysis.disposition is QueryErrorDisposition.RESOURCE_LIMIT:
+                        # A server-side resource outcome on either node (for
+                        # example errno=1038 on one node and success on the
+                        # other) is not a correctness finding.  Handle this
+                        # before the differential oracle, whose status pair
+                        # would otherwise look like a result mismatch.
+                        effective_verdict = QueryErrorDisposition.RESOURCE_LIMIT.value
+                        over_budget += 1
+                    elif oracle.verdict is OracleVerdict.RESULT_MISMATCH:
                         first = next(pair for pair in oracle.pairwise if not pair.matched)
                         finding_verdict = oracle.verdict.value
                         first_difference = asdict(first)
-                    elif oracle.verdict is OracleVerdict.OVER_BUDGET or (
-                        error_analysis.disposition is QueryErrorDisposition.RESOURCE_LIMIT
-                    ):
+                    elif oracle.verdict is OracleVerdict.OVER_BUDGET:
                         effective_verdict = QueryErrorDisposition.RESOURCE_LIMIT.value
                         over_budget += 1
                     elif error_analysis.disposition in {

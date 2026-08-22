@@ -40,6 +40,19 @@ def success_pair() -> tuple[NodeExecution, ...]:
     )
 
 
+def mixed_error_success_pair(errno: int, sqlstate: str, message: str) -> tuple[NodeExecution, ...]:
+    executions = list(success_pair())
+    executions[0] = NodeExecution.failure(
+        role=COMPARISON_ROLES[0],
+        status=ExecutionStatus.ERROR,
+        started_ns=1,
+        ended_ns=2,
+        connection_id=100,
+        error=ErrorInfo(errno, sqlstate, message),
+    )
+    return tuple(executions)
+
+
 def test_exact_expected_negative_error_is_accepted() -> None:
     expected = ExpectedError(ExpectedErrorKind.UNKNOWN_COLUMN, 1054, "42S22")
 
@@ -126,6 +139,20 @@ def test_mixed_timeout_and_result_limits_are_one_resource_outcome() -> None:
     )
 
     analysis = analyze_query_errors(None, executions)
+
+    assert analysis.disposition is QueryErrorDisposition.RESOURCE_LIMIT
+    assert analysis.coverage_eligible is False
+
+
+def test_one_sided_server_sort_memory_error_is_a_resource_outcome() -> None:
+    analysis = analyze_query_errors(
+        None,
+        mixed_error_success_pair(
+            1038,
+            "HY001",
+            "Out of sort memory, consider increasing server sort buffer size",
+        ),
+    )
 
     assert analysis.disposition is QueryErrorDisposition.RESOURCE_LIMIT
     assert analysis.coverage_eligible is False

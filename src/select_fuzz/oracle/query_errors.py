@@ -15,6 +15,7 @@ from select_fuzz.oracle.errors import OracleInputError
 
 
 ErrorIdentity: TypeAlias = tuple[int, str]
+_SERVER_RESOURCE_ERRNOS = frozenset({1038})
 
 
 class QueryErrorDisposition(StrEnum):
@@ -69,10 +70,25 @@ def analyze_query_errors(
     identities = tuple(_identity(execution) for execution in ordered)
     statuses = tuple(execution.status for execution in ordered)
 
-    if all(
-        status is ExecutionStatus.TIMEOUT
-        or (identity is not None and identity[0] == INTERNAL_RESULT_LIMIT_ERRNO)
+    def is_resource_outcome(
+        status: ExecutionStatus,
+        identity: ErrorIdentity | None,
+    ) -> bool:
+        return status is ExecutionStatus.TIMEOUT or (
+            identity is not None
+            and (
+                identity[0] in _SERVER_RESOURCE_ERRNOS
+                or identity[0] == INTERNAL_RESULT_LIMIT_ERRNO
+            )
+        )
+
+    resource_outcomes = tuple(
+        is_resource_outcome(status, identity)
         for status, identity in zip(statuses, identities, strict=True)
+    )
+    if any(resource_outcomes) and all(
+        status is ExecutionStatus.SUCCESS or resource
+        for status, resource in zip(statuses, resource_outcomes, strict=True)
     ):
         return QueryErrorAnalysis(
             disposition=QueryErrorDisposition.RESOURCE_LIMIT,

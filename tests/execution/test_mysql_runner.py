@@ -267,7 +267,7 @@ def test_runner_preserves_dml_affected_rows(node: NodeConfig) -> None:
     assert result.affected_rows == 23
 
 
-def test_runner_initializes_query_session_to_utc_before_user_sql(
+def test_runner_does_not_reinitialize_caller_owned_session_per_query(
     node: NodeConfig,
 ) -> None:
     session = _Session(_Cursor())
@@ -284,48 +284,55 @@ def test_runner_initializes_query_session_to_utc_before_user_sql(
     )
 
     assert result.status is ExecutionStatus.SUCCESS
-    assert session.executed == [
-        "SET SESSION time_zone = '+00:00'",
-        "SELECT 1",
-    ]
-    assert len(session.initialization_cursors) == 1
-    assert session.initialization_cursors[0].closed is True
+    assert session.executed == ["SELECT 1"]
+    assert session.initialization_cursors == []
 
 
-def test_session_initialization_failure_is_infrastructure_and_skips_user_sql(
+def test_prestart_identity_failure_aborts_peer_barrier_immediately(
     node: NodeConfig,
 ) -> None:
-    session = _Session(
-        _Cursor(),
-        initialization_error=_DatabaseError(
-            1298,
-            "HY000",
-            "Unknown or incorrect time zone",
-        ),
+    peer = NodeConfig(
+        role=NodeRole.CUSTOM_ON,
+        host="127.0.0.1",
+        port=node.port + 1,
     )
-    factory = _Factory(session)
+    invalid = _Session(_Cursor(), connection_id=0)
+    waiting = _Session(_Cursor(), connection_id=42)
+    barrier = Barrier(2)
+    runner = _runner(_Factory(waiting))
+    started = time.monotonic()
 
-    result = _runner(factory).run_session(
-        session,
-        node,
-        "sf_temp_1",
-        "SELECT must_not_run",
-        timeout_s=15,
-        row_limit=10,
-        byte_limit=1024,
-    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        invalid_future = pool.submit(
+            runner.run_session,
+            invalid,
+            node,
+            "sf_temp_1",
+            "SELECT 1",
+            timeout_s=10,
+            row_limit=10,
+            byte_limit=1024,
+            barrier=barrier,
+        )
+        waiting_future = pool.submit(
+            runner.run_session,
+            waiting,
+            peer,
+            "sf_temp_1",
+            "SELECT 1",
+            timeout_s=10,
+            row_limit=10,
+            byte_limit=1024,
+            barrier=barrier,
+        )
+        results = (invalid_future.result(), waiting_future.result())
 
-    assert result.status is ExecutionStatus.INFRA_ERROR
-    assert result.connection_id == 41
-    assert result.connection_reusable is False
-    assert result.error is not None
-    assert result.error.message == (
-        "查询会话初始化失败：_DatabaseError: Unknown or incorrect time zone"
-    )
-    assert result.failure_evidence is not None
-    assert result.failure_evidence["failure_stage"] == "query_session_initialization"
-    assert session.executed == ["SET SESSION time_zone = '+00:00'"]
-    assert factory.control_context_entries == 0
+    assert time.monotonic() - started < 1
+    assert all(result.status is ExecutionStatus.INFRA_ERROR for result in results)
+    assert {result.failure_evidence["failure_stage"] for result in results} == {
+        "connection_identity",
+        "start_barrier",
+    }
 
 
 def test_statement_end_time_excludes_post_execution_warning_diagnostics(
@@ -1138,6 +1145,7 @@ def test_connector_applies_typed_session_variables_when_opening_replica_session(
         pass
 
     assert connection.query_cursor.executed == [
+        "SET SESSION time_zone = '+00:00'",
         "SET SESSION optimizer_switch = 'index_merge=off'",
         "SET SESSION sql_safe_updates = 0",
     ]
@@ -1160,6 +1168,7 @@ def test_connector_open_query_session_returns_owned_registered_lease(
     assert lease.role is node.role
     assert lease.connection_id == 41
     assert lease.closed is False
+    assert connection.query_cursor.executed == ["SET SESSION time_zone = '+00:00'"]
     assert factory.active_session_registry.active_count == 1
     factory.abort_active_sessions()
     assert connection.shutdown_called is True
@@ -1183,7 +1192,6 @@ def test_connector_closes_connection_when_owned_session_initialization_fails(
             "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
         },
         connect=lambda **kwargs: connection,
-        session_variables_by_role={NodeRole.BASELINE: {"sql_safe_updates": 0}},
     )
 
     with pytest.raises(RuntimeError, match="session variable rejected"):

@@ -161,7 +161,8 @@ class _QueryRunner:
 
     def _result(self, node: NodeConfig, barrier: Any) -> NodeExecution:
         self.barriers.append(barrier)
-        barrier.wait(timeout=2)
+        if barrier is not None:
+            barrier.wait(timeout=2)
         now = monotonic_ns()
         return NodeExecution.success(
             role=node.role,
@@ -311,9 +312,11 @@ def test_setup_and_queries_use_the_same_two_endpoints(
             return SetupNodeResult(node.role, ExecutionStatus.SUCCESS, bundle.payload_sha256)
 
     class Query(_QueryRunner):
-        def run(self, node, database, sql, **kwargs):  # type: ignore[no-untyped-def]
+        def run_session(
+            self, session, node, database, sql, **kwargs
+        ):  # type: ignore[no-untyped-def]
             query_ports.append(node.port)
-            return super().run(node, database, sql, **kwargs)
+            return super().run_session(session, node, database, sql, **kwargs)
 
     coordinator = ComparisonCoordinator(
         nodes,
@@ -335,8 +338,9 @@ def test_baseline_explain_uses_one_query_node_without_a_barrier(
     calls: list[tuple[NodeConfig, str, float, Any]] = []
 
     class ExplainRunner(_QueryRunner):
-        def run(
+        def run_session(
             self,
+            session,
             node,
             database,
             sql,
@@ -391,6 +395,8 @@ def test_same_setup_bundle_reaches_all_roles_concurrently(
     assert {result.role for result in prepared.nodes} == set(COMPARISON_ROLES)
     assert {result.payload_sha256 for result in prepared.nodes} == {bundle.payload_sha256}
     assert all(session.saw_setup for session in factory.sessions)
+    assert all(not session.closed for session in factory.sessions)
+    prepared.close()
     assert all(session.closed for session in factory.sessions)
 
 
@@ -495,7 +501,7 @@ def test_all_same_access_denied_is_infrastructure_pause_not_rejected_generation(
     assert prepared.status is PrepareStatus.INFRASTRUCTURE_PAUSE
 
 
-def test_partial_infrastructure_setup_failure_is_a_preserved_mismatch(
+def test_partial_infrastructure_setup_failure_is_retryable_pause(
     nodes: tuple[NodeConfig, ...],
 ) -> None:
     factory = _Factory()
@@ -506,7 +512,29 @@ def test_partial_infrastructure_setup_failure_is_a_preserved_mismatch(
         _Bundle(requires_same_session=False), database="sf_correctness_w0_r4_s10"
     )
 
-    assert prepared.status is PrepareStatus.SETUP_MISMATCH
+    assert prepared.status is PrepareStatus.INFRASTRUCTURE_PAUSE
+
+
+def test_prepared_round_reuses_one_pair_for_setup_explain_and_queries(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    factory = _Factory()
+    query_runner = _QueryRunner()
+    coordinator = _coordinator(nodes, factory, query_runner)
+
+    prepared = coordinator.prepare(
+        _Bundle(requires_same_session=False), database="sf_correctness_reuse_1"
+    )
+    coordinator.explain_baseline(prepared, "SELECT 1", _limits())
+    coordinator.execute(prepared, "SELECT 1", _limits())
+    coordinator.execute(prepared, "SELECT 2", _limits())
+
+    assert prepared.sessions is not None
+    assert len(factory.sessions) == 2
+    assert query_runner.used_sessions == dict(prepared.sessions)
+    assert all(not session.closed for session in factory.sessions)
+    prepared.close()
+    assert all(session.closed for session in factory.sessions)
 
 
 def test_temporary_setup_and_query_share_each_pinned_session(

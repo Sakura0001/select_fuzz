@@ -12,7 +12,7 @@ from hashlib import sha256
 import math
 from threading import Barrier, Lock
 import time
-from typing import Callable, Protocol, overload
+from typing import Callable, Protocol, cast, overload
 
 from select_fuzz.config import (
     COMPARISON_ROLES,
@@ -21,7 +21,13 @@ from select_fuzz.config import (
     NodeRole,
 )
 from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
-from select_fuzz.execution.protocols import BarrierLike, ConnectionFactory, QuerySession
+from select_fuzz.execution.protocols import (
+    BarrierLike,
+    ConnectionFactory,
+    OwnedConnectionFactory,
+    QuerySession,
+)
+from select_fuzz.execution.sessions import acquire_session_pair
 from select_fuzz.execution.setup import (
     LockstepSetupResult,
     LockstepSetupVerdict,
@@ -295,8 +301,59 @@ def _setup_infra_failure(node: NodeConfig, error: Exception) -> SetupNodeResult:
     return SetupNodeResult(
         role=node.role,
         status=ExecutionStatus.INFRA_ERROR,
-        error=ErrorInfo(65010, "HY000", f"comparison setup failed: {type(error).__name__}"),
+        error=ErrorInfo(
+            65010,
+            "HY000",
+            f"对比建库失败: {type(error).__name__}: {str(error)[:2048]}",
+        ),
     )
+
+
+def _pair_open_failure_message(
+    role: NodeRole,
+    evidence: Mapping[str, object] | None,
+) -> str:
+    if evidence is None:
+        return f"{role.value} 连接成功，但对端连接失败；本节点未开始建库"
+    raw_exception = evidence.get("exception")
+    if isinstance(raw_exception, Mapping):
+        error_type = raw_exception.get("type", "Exception")
+        message = raw_exception.get("message", "")
+        return f"{role.value} 查询连接建立失败: {error_type}: {message}"
+    return f"{role.value} 查询连接建立失败，异常证据不完整"
+
+
+def _open_legacy_session_pair(
+    nodes: Sequence[NodeConfig],
+    factory: ConnectionFactory,
+    stack: ExitStack,
+) -> tuple[dict[NodeRole, QuerySession] | None, dict[NodeRole, Exception]]:
+    """Compatibility path for test/third-party factories without owned leases."""
+
+    managers = {
+        node.role: factory.query_session(node, "information_schema") for node in nodes
+    }
+
+    def enter(role: NodeRole) -> QuerySession:
+        return managers[role].__enter__()
+
+    sessions: dict[NodeRole, QuerySession] = {}
+    failures: dict[NodeRole, Exception] = {}
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="sf-pair-connect") as pool:
+        futures = {role: pool.submit(enter, role) for role in COMPARISON_ROLES}
+        for role in COMPARISON_ROLES:
+            try:
+                sessions[role] = futures[role].result()
+            except Exception as error:
+                failures[role] = error
+    if failures:
+        for role in sessions:
+            managers[role].__exit__(None, None, None)
+        return None, failures
+    for role in COMPARISON_ROLES:
+        manager = managers[role]
+        stack.callback(manager.__exit__, None, None, None)
+    return sessions, failures
 
 
 class ComparisonCoordinator:
@@ -335,13 +392,61 @@ class ComparisonCoordinator:
         sessions: dict[NodeRole, QuerySession] | None = None
         lockstep_result: LockstepSetupResult | None = None
         try:
-            if bundle.requires_same_session:
-                sessions = {
-                    node.role: stack.enter_context(
-                        self._session_factory.query_session(node, "information_schema")
+            open_owned = getattr(self._session_factory, "open_query_session", None)
+            if callable(open_owned):
+                acquisition = acquire_session_pair(
+                    self._nodes,
+                    "information_schema",
+                    cast(OwnedConnectionFactory, self._session_factory),
+                )
+                if not acquisition.ready:
+                    results = tuple(
+                        _setup_infra_failure(
+                            node,
+                            RuntimeError(
+                                _pair_open_failure_message(
+                                    node.role,
+                                    acquisition.attempts[node.role].failure_evidence,
+                                )
+                            ),
+                        )
+                        for node in self._nodes
                     )
-                    for node in self._nodes
+                    return PreparedRound(
+                        status=PrepareStatus.INFRASTRUCTURE_PAUSE,
+                        database=database,
+                        bundle=bundle,
+                        nodes=results,
+                        generation=generation,
+                    )
+                stack.callback(acquisition.close)
+                sessions = {
+                    role: lease.session for role, lease in acquisition.leases.items()
                 }
+            else:
+                sessions, failures = _open_legacy_session_pair(
+                    self._nodes,
+                    self._session_factory,
+                    stack,
+                )
+                if sessions is None:
+                    results = tuple(
+                        _setup_infra_failure(
+                            node,
+                            failures.get(
+                                node.role,
+                                RuntimeError("对端查询连接建立失败，本节点未开始建库"),
+                            ),
+                        )
+                        for node in self._nodes
+                    )
+                    return PreparedRound(
+                        status=PrepareStatus.INFRASTRUCTURE_PAUSE,
+                        database=database,
+                        bundle=bundle,
+                        nodes=results,
+                        generation=generation,
+                    )
 
             lockstep_apply = getattr(self._setup_runner, "apply_lockstep", None)
             if callable(lockstep_apply):
@@ -419,7 +524,7 @@ class ComparisonCoordinator:
             nodes=results,
             generation=generation,
             sessions=sessions,
-            stack=stack if sessions is not None else None,
+            stack=stack,
             attempted_setup_sql=(
                 bundle.statements
                 if lockstep_result is None

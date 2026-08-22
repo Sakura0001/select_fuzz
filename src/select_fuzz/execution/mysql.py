@@ -159,9 +159,13 @@ def _database_error(error: Exception) -> ErrorInfo | None:
     return None
 
 
-def _initialize_query_session(session: QuerySession) -> None:
-    cursor = session.execute(_QUERY_SESSION_INITIALIZATION_SQL)
-    cursor.close()
+def _abort_barrier(barrier: BarrierLike | None) -> None:
+    if barrier is None:
+        return
+    try:
+        barrier.abort()
+    except Exception:
+        return
 
 
 class NodeQueryRunner:
@@ -204,6 +208,7 @@ class NodeQueryRunner:
                     barrier=barrier,
                 )
         except Exception as error:
+            _abort_barrier(barrier)
             ended_ns = self._monotonic_ns()
             return NodeExecution.failure(
                 role=node.role,
@@ -243,6 +248,7 @@ class NodeQueryRunner:
             ):
                 raise ValueError("connector returned an invalid connection ID")
         except Exception as error:
+            _abort_barrier(barrier)
             ended_ns = self._monotonic_ns()
             return NodeExecution.failure(
                 role=node.role,
@@ -254,23 +260,6 @@ class NodeQueryRunner:
                 connection_reusable=False,
                 failure_evidence=capture_exception_evidence(
                     error, "connection_identity"
-                ),
-            )
-
-        try:
-            _initialize_query_session(session)
-        except Exception as error:
-            ended_ns = self._monotonic_ns()
-            return NodeExecution.failure(
-                role=node.role,
-                status=ExecutionStatus.INFRA_ERROR,
-                started_ns=initial_ns,
-                ended_ns=max(initial_ns, ended_ns),
-                connection_id=connection_id,
-                error=_internal_exception_error("查询会话初始化失败", error),
-                connection_reusable=False,
-                failure_evidence=capture_exception_evidence(
-                    error, "query_session_initialization"
                 ),
             )
 
@@ -670,7 +659,11 @@ class MySQLConnectorFactory:
         connected_ns = time_module.perf_counter_ns()
         session = _ConnectorSession(connection, self._diagnostic_timeout_s)
         try:
-            for sql in self._session_sql_by_role.get(node.role, ()):
+            initialization_sql = (
+                _QUERY_SESSION_INITIALIZATION_SQL,
+                *self._session_sql_by_role.get(node.role, ()),
+            )
+            for sql in initialization_sql:
                 cursor = session.execute(sql)
                 cursor.close()
             initialized_ns = time_module.perf_counter_ns()

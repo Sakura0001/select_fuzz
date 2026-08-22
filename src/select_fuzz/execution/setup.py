@@ -190,6 +190,10 @@ def _statement_verdict(
 ) -> LockstepSetupVerdict:
     ordered = tuple(results[role] for role in COMPARISON_ROLES)
     statuses = {result.status for result in ordered}
+    # Infrastructure uncertainty has priority over semantic comparison. A
+    # one-sided transport failure cannot prove that setup semantics differ.
+    if ExecutionStatus.INFRA_ERROR in statuses:
+        return LockstepSetupVerdict.INFRASTRUCTURE_PAUSE
     if statuses == {ExecutionStatus.SUCCESS}:
         if not compare_affected_rows:
             return LockstepSetupVerdict.READY
@@ -205,13 +209,6 @@ def _statement_verdict(
         ):
             return LockstepSetupVerdict.REJECTED_GENERATION
         return LockstepSetupVerdict.MISMATCH
-    if statuses == {ExecutionStatus.INFRA_ERROR}:
-        errors = tuple(result.error for result in ordered)
-        if (
-            all(error is not None for error in errors)
-            and len({normalize_error(error) for error in errors if error is not None}) == 1
-        ):
-            return LockstepSetupVerdict.INFRASTRUCTURE_PAUSE
     return LockstepSetupVerdict.MISMATCH
 
 

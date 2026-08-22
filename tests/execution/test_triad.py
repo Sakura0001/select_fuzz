@@ -458,6 +458,23 @@ def test_capacity_setup_errors_are_infrastructure_pauses_not_findings(
     assert prepared.setup_failing_sql == "CREATE TABLE `t0` (`id` BIGINT PRIMARY KEY);"
 
 
+def test_setup_infrastructure_error_preserves_exception_text(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    factory = _Factory()
+    factory.infrastructure_failures.add(NodeRole.CUSTOM_ON)
+
+    prepared = _coordinator(nodes, factory, _QueryRunner()).prepare(
+        _Bundle(requires_same_session=False),
+        database="sf_correctness_setup_error_text_1",
+    )
+
+    assert prepared.status is PrepareStatus.INFRASTRUCTURE_PAUSE
+    error = prepared.setup_statement_records[-1].results[NodeRole.CUSTOM_ON].error
+    assert error is not None
+    assert "transport unavailable" in error.message
+
+
 def test_initial_dml_requires_connector_affected_rows(
     nodes: tuple[NodeConfig, ...],
 ) -> None:

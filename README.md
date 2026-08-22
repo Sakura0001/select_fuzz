@@ -287,6 +287,8 @@ uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml \
   模块/类型/原文/参数/异常链、最多 32 层 traceback frame、连接 ID、各执行阶段耗时、
   watchdog 动作和最近一次 PROCESSLIST 可见性。相同指纹的 `fuzz_operation_error` 最多每
   30 秒写一条，并用 `suppressed_repeats` 记录被抑制的重复日志。
+- setup 阶段的基础设施异常也保留 connector/Python 异常原文（最多 4096 字符），不再只显示
+  `InterfaceError` 这类异常类型；setup SQL、失败节点和重试次数仍单独记录。
 - 每个诊断周期写 `fuzz_error_summary`，包含准确累计数、周期增量、错误率和 Top 8 根因；
   准确错误总数应读取 `counters.errors` 或该 summary，不能再用 `fuzz_operation_error` 行数
   统计。内存最多跟踪先出现的 64 个指纹，额外种类汇总到 `other_count`。连接 ID 明细只在

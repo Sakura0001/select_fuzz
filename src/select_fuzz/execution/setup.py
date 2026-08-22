@@ -102,10 +102,12 @@ def _database_error(error: Exception) -> ErrorInfo | None:
 
 
 def _infra_error(error: Exception) -> ErrorInfo:
+    rendered = str(error)
+    suffix = f": {rendered[:4096]}" if rendered else ""
     return ErrorInfo(
         INTERNAL_SETUP_ERRNO,
         "HY000",
-        f"setup session failed: {type(error).__name__}",
+        f"setup session failed: {type(error).__name__}{suffix}",
     )
 
 

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from select_fuzz.config import NodeConfig
 from select_fuzz.domain import ColumnMeta
+
+if TYPE_CHECKING:
+    from select_fuzz.execution.sessions import SessionLease
 
 
 class CursorLike(Protocol):
@@ -49,6 +52,12 @@ class ConnectionFactory(Protocol):
     ) -> AbstractContextManager[QuerySession]: ...
 
 
+class OwnedConnectionFactory(ConnectionFactory, Protocol):
+    def open_query_session(
+        self, node: NodeConfig, database: str
+    ) -> SessionLease: ...
+
+
 class ControlConnectionFactory(Protocol):
     def control_session(
         self, node: NodeConfig, database: str
@@ -71,5 +80,6 @@ __all__ = [
     "ControlConnectionFactory",
     "CursorLike",
     "QuerySession",
+    "OwnedConnectionFactory",
     "StopEventLike",
 ]

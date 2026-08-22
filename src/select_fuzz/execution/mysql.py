@@ -28,6 +28,7 @@ from select_fuzz.execution.protocols import (
     QuerySession,
 )
 from select_fuzz.execution.evidence import capture_exception_evidence
+from select_fuzz.execution.sessions import ActiveSessionRegistry, SessionLease
 from select_fuzz.execution.timeout import KillQueryWatchdog
 
 
@@ -597,6 +598,7 @@ class MySQLConnectorFactory:
         control_connection_limit: int = 8,
         session_variables_by_role: Mapping[NodeRole, Mapping[str, bool | int | float | str]]
         | None = None,
+        active_session_registry: ActiveSessionRegistry | None = None,
     ) -> None:
         _positive_bound(connection_timeout_s, "connection_timeout_s")
         _positive_bound(read_timeout_s, "read_timeout_s")
@@ -626,13 +628,15 @@ class MySQLConnectorFactory:
         # connect() together on macOS. Serialize only connection construction;
         # established sessions still execute concurrently.
         self._cext_connect_lock = Lock()
+        self._active_session_registry = (
+            active_session_registry or ActiveSessionRegistry()
+        )
         self._session_sql_by_role = {
             role: render_session_variable_sql(variables)
             for role, variables in (session_variables_by_role or {}).items()
         }
 
-    @contextmanager
-    def _session(
+    def _open_session_lease(
         self,
         node: NodeConfig,
         database: str,
@@ -640,7 +644,8 @@ class MySQLConnectorFactory:
         connection_timeout_s: int,
         read_timeout_s: int,
         use_pure: bool,
-    ) -> Iterator[QuerySession]:
+    ) -> SessionLease:
+        started_ns = time_module.perf_counter_ns()
         credentials = resolve_credentials(node, self._environ)
         connect_kwargs = {
             "host": node.host,
@@ -662,14 +667,74 @@ class MySQLConnectorFactory:
         else:
             with self._cext_connect_lock:
                 connection = self._connect(**connect_kwargs)
+        connected_ns = time_module.perf_counter_ns()
         session = _ConnectorSession(connection, self._diagnostic_timeout_s)
         try:
             for sql in self._session_sql_by_role.get(node.role, ()):
                 cursor = session.execute(sql)
                 cursor.close()
-            yield session
-        finally:
+            initialized_ns = time_module.perf_counter_ns()
+            connection_id = session.connection_id()
+        except Exception:
             session.close()
+            raise
+        self._active_session_registry.register(session)
+
+        def close_owned_session() -> None:
+            self._active_session_registry.unregister(session)
+            session.close()
+
+        return SessionLease(
+            role=node.role,
+            session=session,
+            connection_id=connection_id,
+            timings_ns={
+                "connect": connected_ns - started_ns,
+                "initialize": initialized_ns - connected_ns,
+                "total": initialized_ns - started_ns,
+            },
+            close_callback=close_owned_session,
+        )
+
+    @contextmanager
+    def _session(
+        self,
+        node: NodeConfig,
+        database: str,
+        *,
+        connection_timeout_s: int,
+        read_timeout_s: int,
+        use_pure: bool,
+    ) -> Iterator[QuerySession]:
+        lease = self._open_session_lease(
+            node,
+            database,
+            connection_timeout_s=connection_timeout_s,
+            read_timeout_s=read_timeout_s,
+            use_pure=use_pure,
+        )
+        try:
+            yield lease.session
+        finally:
+            lease.close()
+
+    def open_query_session(self, node: NodeConfig, database: str) -> SessionLease:
+        """Open an explicitly owned query session for round-level reuse."""
+
+        return self._open_session_lease(
+            node,
+            database,
+            connection_timeout_s=self._connection_timeout_s,
+            read_timeout_s=self._read_timeout_s,
+            use_pure=self._use_pure,
+        )
+
+    @property
+    def active_session_registry(self) -> ActiveSessionRegistry:
+        return self._active_session_registry
+
+    def abort_active_sessions(self) -> int:
+        return self._active_session_registry.abort_all()
 
     def query_session(self, node: NodeConfig, database: str):  # type: ignore[no-untyped-def]
         return self._session(

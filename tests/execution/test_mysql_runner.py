@@ -1141,3 +1141,53 @@ def test_connector_applies_typed_session_variables_when_opening_replica_session(
         "SET SESSION optimizer_switch = 'index_merge=off'",
         "SET SESSION sql_safe_updates = 0",
     ]
+
+
+def test_connector_open_query_session_returns_owned_registered_lease(
+    node: NodeConfig,
+) -> None:
+    connection = _RawConnection()
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=lambda **kwargs: connection,
+    )
+
+    lease = factory.open_query_session(node, "sf_case_1")
+
+    assert lease.role is node.role
+    assert lease.connection_id == 41
+    assert lease.closed is False
+    assert factory.active_session_registry.active_count == 1
+    factory.abort_active_sessions()
+    assert connection.shutdown_called is True
+    lease.close()
+    assert connection.closed is True
+    assert factory.active_session_registry.active_count == 0
+
+
+def test_connector_closes_connection_when_owned_session_initialization_fails(
+    node: NodeConfig,
+) -> None:
+    class _FailingCursor(_RawCursor):
+        def execute(self, sql: str) -> None:
+            raise RuntimeError("session variable rejected")
+
+    connection = _RawConnection()
+    connection.query_cursor = _FailingCursor()
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=lambda **kwargs: connection,
+        session_variables_by_role={NodeRole.BASELINE: {"sql_safe_updates": 0}},
+    )
+
+    with pytest.raises(RuntimeError, match="session variable rejected"):
+        factory.open_query_session(node, "sf_case_1")
+
+    assert connection.closed is True
+    assert factory.active_session_registry.active_count == 0

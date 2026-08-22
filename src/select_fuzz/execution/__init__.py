@@ -33,6 +33,13 @@ from select_fuzz.execution.replication import (
     replication_sequence_from_sql,
     with_replication_marker,
 )
+from select_fuzz.execution.sessions import (
+    ActiveSessionRegistry,
+    PairSessionAcquisition,
+    SessionLease,
+    SessionOpenAttempt,
+    acquire_session_pair,
+)
 from select_fuzz.execution.setup import (
     INTERNAL_SETUP_ERRNO,
     LockstepSetupResult,
@@ -60,6 +67,7 @@ from select_fuzz.execution.triad import (
 
 __all__ = [
     "BarrierLike",
+    "ActiveSessionRegistry",
     "BaselineExplainResult",
     "ComparisonCoordinator",
     "ComparisonExecutionResult",
@@ -82,10 +90,13 @@ __all__ = [
     "MutationVerdict",
     "NodeQueryRunner",
     "PairMutationCoordinator",
+    "PairSessionAcquisition",
     "PreparedRound",
     "PrepareStatus",
     "QueryLimits",
     "QuerySession",
+    "SessionLease",
+    "SessionOpenAttempt",
     "ReplicationBarrier",
     "ReplicationObservation",
     "ReplicationSetupBundle",
@@ -104,5 +115,6 @@ __all__ = [
     "marker_upsert_sql",
     "replication_sequence_from_sql",
     "with_replication_marker",
+    "acquire_session_pair",
     "validate_database_name",
 ]

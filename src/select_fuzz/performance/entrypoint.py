@@ -22,6 +22,7 @@ from select_fuzz.execution import (
     DatabaseNameFactory,
     MySQLConnectorFactory,
     NodeQueryRunner,
+    comparison_session_variables,
 )
 from select_fuzz.execution.protocols import BarrierLike, ConnectionFactory, QuerySession
 from select_fuzz.performance.artifacts import (
@@ -448,7 +449,9 @@ class PerformanceModeRunner:
             raise ValueError("performance request requires mode=performance and workers=1")
         policy = PerformancePolicy.from_config(self._config.performance)
         nodes = self._config.comparison_nodes
-        connector = MySQLConnectorFactory()
+        connector = MySQLConnectorFactory(
+            session_variables_by_role=comparison_session_variables(),
+        )
         thread_sql_log = (
             WorkerSqlLogWriter(self._artifact_root / "sql")
             if self._config.full_thread_sql_log

@@ -29,6 +29,7 @@ from select_fuzz.execution import (
     MySQLConnectorFactory,
     MySQLSetupRunner,
     NodeQueryRunner,
+    comparison_session_variables,
 )
 from select_fuzz.generation.query_contract import ExpectedError, ExpectedErrorKind
 from select_fuzz.oracle import (
@@ -361,7 +362,9 @@ def build_replay_service(config: AppConfig, artifact_root: Path) -> ReplayServic
 
     if config.mode.value != "correctness":
         raise ValueError("replay requires correctness config mode")
-    comparison_factory = MySQLConnectorFactory()
+    comparison_factory = MySQLConnectorFactory(
+        session_variables_by_role=comparison_session_variables(),
+    )
     comparison = ComparisonCoordinator(
         config.comparison_nodes,
         setup_runner=MySQLSetupRunner(comparison_factory),

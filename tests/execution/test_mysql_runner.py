@@ -13,8 +13,10 @@ from select_fuzz.config import NodeConfig, NodeRole
 from select_fuzz.domain import ColumnMeta, ExecutionStatus
 from select_fuzz.execution.mysql import (
     INTERNAL_RESULT_LIMIT_ERRNO,
+    MYSQL_8_0_22_COMPARISON_SQL_MODE,
     MySQLConnectorFactory,
     NodeQueryRunner,
+    comparison_session_variables,
 )
 from select_fuzz.execution.timeout import KillQueryWatchdog
 
@@ -1222,6 +1224,16 @@ def test_connector_applies_typed_session_variables_when_opening_replica_session(
         "SET SESSION optimizer_switch = 'index_merge=off'",
         "SET SESSION sql_safe_updates = 0",
     ]
+
+
+def test_comparison_session_variables_normalize_mysql_8022_sql_mode() -> None:
+    variables = comparison_session_variables()
+
+    assert set(variables) == {NodeRole.CUSTOM_OFF, NodeRole.CUSTOM_ON}
+    assert variables[NodeRole.CUSTOM_OFF] == {
+        "sql_mode": MYSQL_8_0_22_COMPARISON_SQL_MODE,
+    }
+    assert variables[NodeRole.CUSTOM_ON] == variables[NodeRole.CUSTOM_OFF]
 
 
 def test_connector_open_query_session_returns_owned_registered_lease(

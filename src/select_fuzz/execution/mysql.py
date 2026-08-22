@@ -16,6 +16,7 @@ from mysql.connector.constants import FieldFlag
 from mysql.connector.conversion import MySQLConverter
 
 from select_fuzz.config import (
+    COMPARISON_ROLES,
     MAX_STATEMENT_TIMEOUT_SECONDS,
     NodeConfig,
     NodeRole,
@@ -40,6 +41,23 @@ _INTERNAL_SQLSTATE = "HY000"
 _TIMEOUT_SQLSTATE = "HYT00"
 _MYSQL_CLIENT_ERROR_RANGE = range(2000, 3000)
 _QUERY_SESSION_INITIALIZATION_SQL = "SET SESSION time_zone = '+00:00'"
+# Comparison and performance lanes target MySQL 8.0.22 semantics.  TaurusDB
+# may default this session variable to an empty string, while stock MySQL
+# enables the standard strict modes.  Leaving the two sessions at their
+# server defaults turns mode-dependent warnings/errors into false findings.
+MYSQL_8_0_22_COMPARISON_SQL_MODE = (
+    "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,"
+    "ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION"
+)
+
+
+def comparison_session_variables() -> dict[NodeRole, dict[str, str]]:
+    """Return the deterministic session baseline for two-instance lanes."""
+
+    return {
+        role: {"sql_mode": MYSQL_8_0_22_COMPARISON_SQL_MODE}
+        for role in COMPARISON_ROLES
+    }
 
 
 class _SelectFuzzMySQLConverter(MySQLConverter):

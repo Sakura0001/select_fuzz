@@ -42,6 +42,7 @@ from select_fuzz.execution import (
     QuerySession,
     QueryLimits,
     PairMutationCoordinator,
+    comparison_session_variables,
     SetupNodeResult,
 )
 from select_fuzz.generation.catalog import FeatureCatalog, FeatureSpec
@@ -1698,6 +1699,7 @@ def build_correctness_runner(config: AppConfig, artifact_root: Path) -> Correctn
         statement_timeout_ceiling_s=math.ceil(
             config.correctness.timeout_seconds
         ),
+        session_variables_by_role=comparison_session_variables(),
     )
     coordinator = ComparisonCoordinator(
         config.comparison_nodes,

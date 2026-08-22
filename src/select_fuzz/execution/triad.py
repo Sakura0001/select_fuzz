@@ -272,6 +272,34 @@ class ComparisonExecutionResult(Sequence[NodeExecution]):
         return self.executions[index]
 
 
+class _StartBarrier:
+    """Use a scheduler grace period without extending the SQL deadline."""
+
+    def __init__(self, delegate: BarrierLike, timeout_seconds: float) -> None:
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not math.isfinite(timeout_seconds)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("start barrier timeout must be finite and positive")
+        self._delegate = delegate
+        self.timeout_seconds = float(timeout_seconds)
+
+    def wait(self, timeout: float | None = None) -> object:
+        del timeout
+        return self._delegate.wait(timeout=self.timeout_seconds)
+
+    def abort(self) -> None:
+        self._delegate.abort()
+
+
+def _start_barrier_timeout(query_timeout_seconds: float) -> float:
+    """Bound scheduling grace independently from the SQL execution timeout."""
+
+    return max(5.0, min(30.0, float(query_timeout_seconds) * 3.0))
+
+
 def _classify_setup(results: tuple[SetupNodeResult, ...]) -> PrepareStatus:
     if any(result.status is ExecutionStatus.INFRA_ERROR for result in results):
         return PrepareStatus.INFRASTRUCTURE_PAUSE
@@ -843,7 +871,10 @@ class ComparisonCoordinator:
             raise RuntimeError(f"round is not ready: {current.status.value}")
         if not isinstance(sql, str) or not sql.strip():
             raise ValueError("sql must not be empty")
-        barrier = Barrier(2)
+        barrier = _StartBarrier(
+            Barrier(2),
+            timeout_seconds=_start_barrier_timeout(limits.timeout_seconds),
+        )
 
         def run(node: NodeConfig) -> NodeExecution:
             try:

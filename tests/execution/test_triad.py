@@ -332,6 +332,20 @@ def test_setup_and_queries_use_the_same_two_endpoints(
     assert sorted(query_ports) == sorted(node.port for node in nodes)
 
 
+def test_comparison_query_start_barrier_has_scheduler_grace(
+    nodes: tuple[NodeConfig, ...],
+) -> None:
+    coordinator = _coordinator(nodes, _Factory(), _QueryRunner())
+    prepared = coordinator.prepare(_Bundle(False), database="sf_correctness_barrier_grace_1")
+
+    coordinator.execute(prepared, "SELECT 1", QueryLimits(10, 10_000, 32 << 20))
+
+    barriers = coordinator._query_runner.barriers  # type: ignore[attr-defined]
+    assert len(barriers) == 2
+    assert barriers[0] is barriers[1]
+    assert barriers[0].timeout_seconds == 30.0
+
+
 def test_baseline_explain_uses_one_query_node_without_a_barrier(
     nodes: tuple[NodeConfig, ...],
 ) -> None:

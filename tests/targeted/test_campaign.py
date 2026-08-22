@@ -113,3 +113,37 @@ def test_pq_probe_without_crash_is_a_capability_observation() -> None:
         "matched": True,
         "category": "capability_probe",
     }
+
+
+def test_feature_only_remote_database_error_is_not_hidden_as_capability() -> None:
+    off = {"setup_error": {"errno": 1064}, "queries": []}
+    on = {
+        "setup_error": None,
+        "queries": [
+            {
+                "status": "error",
+                "error": {"errno": 7625, "classification": "database_error"},
+                "columns": [],
+                "rows": [],
+            }
+        ],
+    }
+    assert _comparison("flashback", off, on) == {
+        "matched": False,
+        "category": "error",
+    }
+
+
+def test_feature_only_case_compares_results_when_both_nodes_support_it() -> None:
+    off = {
+        "setup_error": None,
+        "queries": [{"status": "success", "columns": [], "rows": [[1]]}],
+    }
+    on = {
+        "setup_error": None,
+        "queries": [{"status": "success", "columns": [], "rows": [[2]]}],
+    }
+    assert _comparison("second_level_partition", off, on) == {
+        "matched": False,
+        "category": "rows",
+    }

@@ -493,7 +493,29 @@ def _comparison(
             "infrastructure_roles": sorted(infrastructure_roles),
         }
     if feature in FEATURE_ONLY:
-        return {"matched": True, "category": "capability_probe"}
+        off_setup = error_mapping(off.get("setup_error"))
+        on_setup = error_mapping(on.get("setup_error"))
+        expected_capability_errors = {1064, 1193, 1227, 1231}
+        if on_setup is not None:
+            if (
+                off_setup is not None
+                and isinstance(on_setup.get("errno"), int)
+                and cast(int, on_setup["errno"]) in expected_capability_errors
+            ):
+                return {"matched": True, "category": "capability_probe"}
+            return {"matched": False, "category": "status"}
+        if off_setup is not None:
+            # A Taurus-only feature is a capability observation only when the
+            # Taurus side actually completed its queries.  A remote database
+            # error (for example a rejected flashback timestamp) is a finding.
+            if any(
+                isinstance(query, Mapping)
+                and query.get("status") != "success"
+                for query in query_list(on)
+            ):
+                return {"matched": False, "category": "error"}
+            return {"matched": True, "category": "capability_probe"}
+        # Both nodes accepted the feature; compare rows and metadata below.
     if feature == "optimizer_switch" and setup_errors:
         # Stock MySQL has no Taurus-only optimizer_switch names.  Preserve the
         # capability result but do not call errno=1193/1231 a correctness bug.

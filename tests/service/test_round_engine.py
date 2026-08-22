@@ -207,6 +207,22 @@ def _infra_errors() -> tuple[NodeExecution, ...]:
     )
 
 
+def _lost_connection(role: NodeRole) -> NodeExecution:
+    return NodeExecution.failure(
+        role=role,
+        status=ExecutionStatus.INFRA_ERROR,
+        started_ns=10,
+        ended_ns=20,
+        connection_id=100 + list(COMPARISON_ROLES).index(role),
+        error=ErrorInfo(2013, "HY000", "Lost connection to MySQL server during query"),
+        connection_reusable=False,
+        failure_evidence={
+            "failure_stage": "execute",
+            "exception": {"message": "socket reset by peer"},
+        },
+    )
+
+
 class _Coordinator:
     def __init__(self, outcomes: dict[str, tuple[NodeExecution, ...]]) -> None:
         self.outcomes = outcomes
@@ -823,6 +839,71 @@ def test_round_engine_logs_every_infrastructure_retry_attempt(tmp_path: Path) ->
         "failure_stage": "execute",
         "exception": {"message": "socket reset by peer"},
     }
+
+
+@pytest.mark.parametrize(
+    "peer",
+    [
+        _success(NodeRole.CUSTOM_ON, ((1,), (2,))),
+        NodeExecution.failure(
+            role=NodeRole.CUSTOM_ON,
+            status=ExecutionStatus.ERROR,
+            started_ns=10,
+            ended_ns=20,
+            connection_id=101,
+            error=ErrorInfo(1064, "42000", "syntax error"),
+        ),
+    ],
+    ids=("peer_success", "peer_database_error"),
+)
+def test_one_sided_lost_connection_is_retried_without_finding(
+    tmp_path: Path,
+    peer: NodeExecution,
+) -> None:
+    query = _queries(1)[0]
+    materialized = RoundMaterialization(
+        "sf_c_20260713t120000_w0_r0_sabc_n123_q0", _Bundle(), (query,), 1, 2
+    )
+    coordinator = _RetryCoordinator(
+        [(_lost_connection(NodeRole.CUSTOM_OFF), peer), _match()]
+    )
+    sink = _CollectSink()
+    engine = CorrectnessRoundEngine(
+        _Source(materialized),
+        coordinator,
+        CaseBundleWriter(tmp_path),
+        _Coverage(),
+        QueryLimits(15, 10_000, 32 << 20),
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
+        sleeper=lambda _: None,
+    )
+
+    summary = engine.run_round(
+        _context(1), EventPublisher("run_engine_1", sink), Event()
+    )
+
+    assert summary.queries_completed == 1
+    assert summary.findings == 0
+    assert not tuple((tmp_path / "findings").glob("*/manifest.json"))
+    assert coordinator.executed == [query.sql, query.sql]
+    records = read_jsonl(tmp_path / "sql" / "worker-000.jsonl")
+    assert records[0]["type"] == "query_attempt_started"
+    assert records[0]["query_sql"] == query.sql
+    failed = records[1]
+    assert failed["verdict"] == "infrastructure_retry"
+    assert failed["query_sql"] == query.sql
+    assert failed["nodes"]["custom_off"]["status"] == "infra_error"
+    assert failed["nodes"]["custom_off"]["error"]["errno"] == 2013
+    assert failed["nodes"]["custom_off"]["failure_evidence"] == {
+        "failure_stage": "execute",
+        "exception": {"message": "socket reset by peer"},
+    }
+    pause = next(event for event in sink.events if event.kind == "infrastructure_pause")
+    assert pause.payload["query_sql"] == query.sql
+    round_sql = tmp_path / "rounds" / f"{materialized.database}.sql"
+    assert query.sql in round_sql.read_text(encoding="utf-8")
 
 
 def test_stop_during_infrastructure_backoff_never_dispatches_an_extra_attempt(

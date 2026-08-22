@@ -100,7 +100,7 @@ def test_planner_omits_unsupported_and_over_budget_shapes() -> None:
     assert candidates == ()
 
 
-def test_planner_treats_zero_length_character_and_binary_columns_as_one_byte_minimum() -> None:
+def test_planner_omits_zero_length_character_and_binary_columns() -> None:
     candidates = build_composite_index_candidates(
         (
             CompositeColumn("id", "BIGINT UNSIGNED"),
@@ -111,9 +111,7 @@ def test_planner_treats_zero_length_character_and_binary_columns_as_one_byte_min
         index_byte_budget=16,
     )
 
-    assert candidates
-    assert all(part.estimated_bytes >= 1 for plan in candidates for part in plan.parts)
-    assert all(plan.estimated_bytes <= 16 for plan in candidates)
+    assert candidates == ()
 
 
 def test_planner_does_not_underestimate_boolean_alias_storage() -> None:

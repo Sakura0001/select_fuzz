@@ -163,9 +163,17 @@ def _full_index_bytes(column: CompositeColumn) -> int | None:
     if base in {"DECIMAL", "NUMERIC"} and length is not None:
         return (max(1, length) + 1) // 2 + 1
     if base in {"CHAR", "VARCHAR", "NCHAR", "NVARCHAR"} and length is not None:
-        return max(1, length) * column.charset_bytes
+        # MySQL accepts zero-length declarations but InnoDB cannot create an
+        # index part for them (ER_CANT_INDEX_COLUMN/1167).  Treat these as
+        # non-indexable instead of inflating them to one byte and emitting a
+        # setup statement that both comparison nodes will reject.
+        if length == 0:
+            return None
+        return length * column.charset_bytes
     if base in {"BINARY", "VARBINARY"} and length is not None:
-        return max(1, length)
+        if length == 0:
+            return None
+        return length
     return None
 
 

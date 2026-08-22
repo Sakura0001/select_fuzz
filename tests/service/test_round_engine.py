@@ -644,6 +644,12 @@ def test_baseline_explain_infrastructure_retry_budget_ends_round_without_finding
     assert pauses[-1].payload["stage"] == "baseline_explain"
     assert pauses[-1].payload["reason"] == "baseline_explain_retry_budget_exhausted"
     assert pauses[-1].payload["attempt_number"] == 8
+    assert pauses[-1].payload["query_sql"] == query.sql
+    assert pauses[-1].payload["execution"]["error"]["errno"] == 2013
+    assert pauses[-1].payload["execution"]["failure_evidence"] == {
+        "failure_stage": "execute",
+        "exception": {"message": "socket reset by peer"},
+    }
 
 
 def test_generated_round_source_defaults_to_grammar_only_generation(

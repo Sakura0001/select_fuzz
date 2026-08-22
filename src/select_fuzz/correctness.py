@@ -1037,6 +1037,8 @@ class CorrectnessRoundEngine:
                             "database": current_prepared.database,
                             "stage": "baseline_explain",
                             "worker_id": context.worker_id,
+                            "query_sql": query.sql,
+                            "execution": _query_execution_to_log(explain_execution),
                         }
                         if (
                             explain_attempt_number

@@ -16,6 +16,7 @@ from select_fuzz.execution.mysql import (
     MYSQL_8_0_22_COMPARISON_SQL_MODE,
     MySQLConnectorFactory,
     NodeQueryRunner,
+    _ConnectorSession,
     _ConnectorCursor,
     comparison_session_variables,
 )
@@ -1103,6 +1104,23 @@ def test_connector_liveness_probe_uses_short_diagnostic_timeout(
     assert connection.ping_timeout_snapshots == [(5, 5)]
     assert connection.read_timeout == 310
     assert connection.write_timeout == 310
+
+
+def test_connector_statement_timeout_temporarily_bounds_query_socket_timeout() -> None:
+    connection = _RawConnection()
+    connection.read_timeout = 310
+    connection.write_timeout = 310
+    session = _ConnectorSession(connection, diagnostic_timeout_s=5)
+
+    token = session.begin_statement_timeout(10)
+
+    assert (connection.read_timeout, connection.write_timeout) == (12, 12)
+    assert isinstance(connection.read_timeout, int)
+    assert isinstance(connection.write_timeout, int)
+
+    session.end_statement_timeout(token)
+
+    assert (connection.read_timeout, connection.write_timeout) == (310, 310)
 
 
 def test_control_connections_use_a_short_independent_timeout(node: NodeConfig) -> None:

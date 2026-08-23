@@ -42,6 +42,11 @@ _TIMEOUT_SQLSTATE = "HYT00"
 _MYSQL_CLIENT_ERROR_RANGE = range(2000, 3000)
 _MAX_WARNING_ROWS = 128
 _QUERY_SESSION_INITIALIZATION_SQL = "SET SESSION time_zone = '+00:00'"
+# Leave a small socket grace period after the independent watchdog deadline.
+# The query session keeps a much larger timeout for setup packets, but that
+# timeout must not allow a stuck result read to hold a worker for minutes after
+# KILL QUERY/connection abort has fired.
+_STATEMENT_IO_TIMEOUT_GRACE_SECONDS = 2.0
 # Comparison and performance lanes target MySQL 8.0.22 semantics.  TaurusDB
 # may default this session variable to an empty string, while stock MySQL
 # enables the standard strict modes.  Leaving the two sessions at their
@@ -350,7 +355,11 @@ class NodeQueryRunner:
         statement_ended_ns: int | None = None
         connection_reusable = True
         failure_evidence: dict[str, object] | None = None
+        statement_timeout_token: tuple[object, object] | None = None
         try:
+            begin_statement_timeout = getattr(session, "begin_statement_timeout", None)
+            if callable(begin_statement_timeout):
+                statement_timeout_token = begin_statement_timeout(timeout_s)
             cursor = session.execute(sql)
             columns = cursor.columns
             affected_rows = getattr(cursor, "affected_rows", None)
@@ -438,6 +447,13 @@ class NodeQueryRunner:
                     cursor.close()
                 except Exception as close_error:
                     cleanup_error = close_error
+            end_statement_timeout = getattr(session, "end_statement_timeout", None)
+            if statement_timeout_token is not None and callable(end_statement_timeout):
+                try:
+                    end_statement_timeout(statement_timeout_token)
+                except Exception as timeout_restore_error:
+                    if cleanup_error is None:
+                        cleanup_error = timeout_restore_error
 
         ended_ns = self._monotonic_ns() if statement_ended_ns is None else statement_ended_ns
         if cleanup_error is not None and status is ExecutionStatus.SUCCESS:
@@ -617,6 +633,31 @@ class _ConnectorSession:
             if previous_write_timeout is not missing:
                 self._connection.write_timeout = previous_write_timeout
         return True
+
+    def begin_statement_timeout(self, timeout_s: float) -> tuple[object, object]:
+        """Bound socket I/O for one query while preserving setup timeouts."""
+
+        previous_read_timeout = getattr(self._connection, "read_timeout", None)
+        previous_write_timeout = getattr(self._connection, "write_timeout", None)
+        bounded_timeout = max(
+            1,
+            math.ceil(float(timeout_s) + _STATEMENT_IO_TIMEOUT_GRACE_SECONDS),
+        )
+        try:
+            self._connection.read_timeout = bounded_timeout
+            self._connection.write_timeout = bounded_timeout
+        except Exception:
+            self._connection.read_timeout = previous_read_timeout
+            self._connection.write_timeout = previous_write_timeout
+            raise
+        return previous_read_timeout, previous_write_timeout
+
+    def end_statement_timeout(self, token: tuple[object, object]) -> None:
+        """Restore the generous connection timeout used by setup statements."""
+
+        previous_read_timeout, previous_write_timeout = token
+        self._connection.read_timeout = previous_read_timeout
+        self._connection.write_timeout = previous_write_timeout
 
     def execute(self, sql: str) -> _ConnectorCursor:
         cursor = self._connection.cursor(buffered=False, raw=False)

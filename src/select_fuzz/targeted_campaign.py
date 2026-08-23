@@ -42,6 +42,7 @@ OPTIMIZER_SWITCHES = (
 )
 FLASHBACK_STABILIZATION_SECONDS = 1.5
 _TEMP_TABLE_FULL_MARKERS = ("#sql", "/tmp/", "\\tmp\\")
+_PARTITION_METHODS = ("RANGE", "LIST", "HASH", "KEY")
 
 
 def classify_connection_event(
@@ -208,25 +209,74 @@ def _flashback_case() -> TargetCase:
 
 
 def _partition_case(parent: str, child: str) -> TargetCase:
-    # The first-level/second-level pair is intentionally varied.  TaurusDB
-    # accepts combinations that stock MySQL 8.0.22 rejects at CREATE TABLE.
-    if parent == "RANGE" and child == "LIST":
-        partition = "PARTITION BY RANGE (id) SUBPARTITION BY LIST (k) (PARTITION p0 VALUES LESS THAN (10) (SUBPARTITION p0s0 VALUES IN (0), SUBPARTITION p0s1 VALUES IN (1)), PARTITION p1 VALUES LESS THAN MAXVALUE (SUBPARTITION p1s0 VALUES IN (0), SUBPARTITION p1s1 VALUES IN (1)))"
-    elif parent == "RANGE" and child == "HASH":
-        partition = "PARTITION BY RANGE (id) SUBPARTITION BY HASH (k) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE)"
-    elif parent == "LIST" and child == "HASH":
-        partition = "PARTITION BY LIST (id) SUBPARTITION BY HASH (k) SUBPARTITIONS 2 (PARTITION p0 VALUES IN (1,2), PARTITION p1 VALUES IN (3,4))"
-    elif parent == "HASH" and child == "LIST":
-        partition = "PARTITION BY HASH (id) PARTITIONS 2 SUBPARTITION BY LIST (k) (SUBPARTITION s0 VALUES IN (0), SUBPARTITION s1 VALUES IN (1))"
-    elif parent == "KEY" and child == "RANGE":
-        partition = "PARTITION BY KEY (id) PARTITIONS 2 SUBPARTITION BY RANGE (k) (SUBPARTITION s0 VALUES LESS THAN (1), SUBPARTITION s1 VALUES LESS THAN MAXVALUE)"
+    if parent not in _PARTITION_METHODS or child not in _PARTITION_METHODS:
+        raise ValueError(f"unsupported partition pair: {parent}/{child}")
+
+    parent_clause = {
+        "RANGE": "PARTITION BY RANGE (id)",
+        "LIST": "PARTITION BY LIST (id)",
+        "HASH": "PARTITION BY HASH (id) PARTITIONS 2",
+        "KEY": "PARTITION BY KEY (id) PARTITIONS 2",
+    }[parent]
+    child_clause = {
+        "RANGE": "SUBPARTITION BY RANGE (k)",
+        "LIST": "SUBPARTITION BY LIST (k)",
+        "HASH": "SUBPARTITION BY HASH (k) SUBPARTITIONS 2",
+        "KEY": "SUBPARTITION BY KEY (k) SUBPARTITIONS 2",
+    }[child]
+    parent_definitions = {
+        "RANGE": (
+            "PARTITION p0 VALUES LESS THAN (10)",
+            "PARTITION p1 VALUES LESS THAN MAXVALUE",
+        ),
+        "LIST": (
+            "PARTITION p0 VALUES IN (1,2)",
+            "PARTITION p1 VALUES IN (3,4)",
+        ),
+        "HASH": ("PARTITION p0", "PARTITION p1"),
+        "KEY": ("PARTITION p0", "PARTITION p1"),
+    }[parent]
+    subpartition_definitions = {
+        "RANGE": (
+            "SUBPARTITION {name}s0 VALUES LESS THAN (1)",
+            "SUBPARTITION {name}s1 VALUES LESS THAN MAXVALUE",
+        ),
+        "LIST": (
+            "SUBPARTITION {name}s0 VALUES IN (0)",
+            "SUBPARTITION {name}s1 VALUES IN (1)",
+        ),
+    }
+    if parent in {"HASH", "KEY"}:
+        # HASH/KEY parents use the compact subpartition definition form.  A
+        # PARTITION p0/p1 list is not legal for this parent grammar and would
+        # turn a feature probe into a generator syntax error.
+        if child in {"HASH", "KEY"}:
+            partition = f"{parent_clause} {child_clause}"
+        else:
+            rendered_subpartitions = ", ".join(
+                item.format(name=f"s{ordinal}")
+                for ordinal, item in enumerate(subpartition_definitions[child])
+            )
+            partition = f"{parent_clause} {child_clause} ({rendered_subpartitions})"
+    elif child in {"HASH", "KEY"}:
+        rendered_partitions = ", ".join(parent_definitions)
+        partition = f"{parent_clause} {child_clause} ({rendered_partitions})"
     else:
-        partition = "PARTITION BY RANGE (id) SUBPARTITION BY KEY (k) SUBPARTITIONS 2 (PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN MAXVALUE)"
+        rendered_partitions = ", ".join(
+            f"{definition} ({', '.join(item.format(name=f'p{ordinal}') for item in subpartition_definitions[child])})"
+            for ordinal, definition in enumerate(parent_definitions)
+        )
+        partition = f"{parent_clause} {child_clause} ({rendered_partitions})"
+    insert_rows = (
+        "(1,0,10),(2,1,20),(11,0,30),(12,1,40)"
+        if parent != "LIST"
+        else "(1,0,10),(2,1,20),(3,0,30),(4,1,40)"
+    )
     return TargetCase(
         "second_level_partition",
         (
             f"CREATE TABLE t_part (id INT NOT NULL, k INT NOT NULL, v INT) {partition}",
-            "INSERT INTO t_part VALUES (1,0,10),(2,1,20),(11,0,30),(12,1,40)",
+            f"INSERT INTO t_part VALUES {insert_rows}",
         ),
         ("SELECT COUNT(*), SUM(v) FROM t_part",),
         feature_only=True,
@@ -252,15 +302,9 @@ def _optimizer_case(switch: str, value: str) -> TargetCase:
 
 def build_target_cases() -> tuple[TargetCase, ...]:
     cases: list[TargetCase] = [_left_join_case(), _pq_case(), _flashback_case()]
-    for parent, child in (
-        ("RANGE", "LIST"),
-        ("RANGE", "HASH"),
-        ("LIST", "HASH"),
-        ("HASH", "LIST"),
-        ("KEY", "RANGE"),
-        ("RANGE", "KEY"),
-    ):
-        cases.append(_partition_case(parent, child))
+    for parent in _PARTITION_METHODS:
+        for child in _PARTITION_METHODS:
+            cases.append(_partition_case(parent, child))
     for switch in OPTIMIZER_SWITCHES:
         for value in ("on", "off"):
             cases.append(_optimizer_case(switch, value))

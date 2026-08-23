@@ -4,10 +4,28 @@ from select_fuzz.targeted_campaign import (
     CampaignNode,
     _comparison,
     _kill_server_connection,
+    build_target_cases,
     classify_connection_event,
     compare_result_payloads,
     make_database_name,
 )
+
+
+def test_target_cases_cover_every_ordered_second_level_partition_pair() -> None:
+    partition_cases = [
+        case for case in build_target_cases() if case.feature == "second_level_partition"
+    ]
+
+    assert len(partition_cases) == 16
+    assert len({case.setup[0] for case in partition_cases}) == 16
+    for case in partition_cases:
+        assert "PARTITION BY" in case.setup[0]
+        assert "SUBPARTITION BY" in case.setup[0]
+        parent_clause = case.setup[0].split(" SUBPARTITION BY", 1)[0]
+        if "PARTITION BY HASH" in parent_clause or "PARTITION BY KEY" in parent_clause:
+            assert "PARTITION p0" not in case.setup[0]
+        if "PARTITION BY LIST" in parent_clause:
+            assert "11,0,30" not in case.setup[1]
 
 
 class _ControlConnection:

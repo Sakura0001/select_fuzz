@@ -229,7 +229,7 @@ class PreparedRound:
     def closed(self) -> bool:
         return self._closed
 
-    def close(self) -> None:
+    def close(self, *, abort: bool = False) -> None:
         """Close this round and every replacement retained from it.
 
         ``ensure_live`` keeps the original round as the owner of a
@@ -249,6 +249,16 @@ class PreparedRound:
             current._replacement = None
             if not current._closed:
                 current._closed = True
+                # A failed setup/reconnect can leave a connector in a state
+                # where close() does not tear down the server-side socket.
+                # Abort infrastructure-invalid sessions first so MySQL does
+                # not retain an orphaned Sleep thread until wait_timeout.
+                if abort or current.status is PrepareStatus.INFRASTRUCTURE_PAUSE:
+                    for session in (current.sessions or {}).values():
+                        try:
+                            session.abort()
+                        except Exception:
+                            pass
                 if current._stack is not None:
                     current._stack.close()
             current = replacement
@@ -556,6 +566,11 @@ class ComparisonCoordinator:
                     results = tuple(futures[role].result() for role in COMPARISON_ROLES)
                 status = _classify_setup(results)
         except Exception as error:
+            for session in (sessions or {}).values():
+                try:
+                    session.abort()
+                except Exception:
+                    pass
             stack.close()
             results = tuple(_setup_infra_failure(node, error) for node in self._nodes)
             return PreparedRound(
@@ -575,6 +590,12 @@ class ComparisonCoordinator:
                 ),
             )
         if status is not PrepareStatus.READY:
+            if status is PrepareStatus.INFRASTRUCTURE_PAUSE:
+                for session in (sessions or {}).values():
+                    try:
+                        session.abort()
+                    except Exception:
+                        pass
             stack.close()
             return PreparedRound(
                 status=status,
@@ -654,7 +675,7 @@ class ComparisonCoordinator:
         while current._replacement is not None:
             current = current._replacement
         if current.status is PrepareStatus.INFRASTRUCTURE_PAUSE:
-            current.close()
+            current.close(abort=True)
             rebuilt = (
                 self._reconnect_existing_round(current)
                 if current.setup_completed and not current.bundle.requires_same_session
@@ -682,7 +703,7 @@ class ComparisonCoordinator:
                     break
         if healthy:
             return current
-        current.close()
+        current.close(abort=True)
         rebuilt = (
             self.prepare(
                 current.bundle,
@@ -772,6 +793,11 @@ class ComparisonCoordinator:
                 if (error := future.result()) is not None
             }
         if use_failures:
+            for session in sessions.values():
+                try:
+                    session.abort()
+                except Exception:
+                    pass
             stack.close()
             results = tuple(
                 _setup_infra_failure(
@@ -869,7 +895,7 @@ class ComparisonCoordinator:
             execution.status is ExecutionStatus.INFRA_ERROR
             or not execution.connection_reusable
         ):
-            current.close()
+            current.close(abort=True)
         return BaselineExplainResult(current, execution)
 
     def execute(
@@ -933,7 +959,7 @@ class ComparisonCoordinator:
             execution.status is ExecutionStatus.INFRA_ERROR or not execution.connection_reusable
             for execution in executions
         ):
-            current.close()
+            current.close(abort=True)
         return ComparisonExecutionResult(current, executions)
 
 

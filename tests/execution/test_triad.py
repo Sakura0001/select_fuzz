@@ -74,6 +74,7 @@ class _Session:
         self._connection_id = connection_id
         self.alive = True
         self.closed = False
+        self.aborted = False
         self.saw_setup = False
         self.executed: list[str] = []
 
@@ -105,6 +106,7 @@ class _Session:
         self.alive = False
 
     def abort(self) -> None:
+        self.aborted = True
         self.alive = False
 
     def close(self) -> None:
@@ -456,6 +458,7 @@ def test_capacity_setup_errors_are_infrastructure_pauses_not_findings(
     # The failed setup statement remains available for crash/storage
     # investigation even though the differential verdict is not a finding.
     assert prepared.setup_failing_sql == "CREATE TABLE `t0` (`id` BIGINT PRIMARY KEY);"
+    assert all(session.aborted for session in factory.sessions)
 
 
 def test_setup_infrastructure_error_preserves_exception_text(
@@ -473,6 +476,7 @@ def test_setup_infrastructure_error_preserves_exception_text(
     error = prepared.setup_statement_records[-1].results[NodeRole.CUSTOM_ON].error
     assert error is not None
     assert "transport unavailable" in error.message
+    assert all(session.aborted for session in factory.sessions)
 
 
 def test_initial_dml_requires_connector_affected_rows(
@@ -632,6 +636,7 @@ def test_lost_temporary_session_rebuilds_the_whole_round(
     assert rebuilt.generation == old_generation + 1
     assert rebuilt.sessions is not None
     assert all(session.closed for session in old_sessions.values())
+    assert all(session.aborted for session in old_sessions.values())
     assert all(session.saw_setup for session in rebuilt.sessions.values())
     assert all(
         rebuilt.sessions[role] is not old_sessions[role] for role in COMPARISON_ROLES
@@ -745,6 +750,7 @@ def test_unusable_temporary_query_result_invalidates_both_sessions(
 
     assert first.prepared is prepared
     assert all(session.closed for session in old_sessions.values())
+    assert all(session.aborted for session in old_sessions.values())
     rebuilt = coordinator.ensure_live(prepared)
     assert rebuilt.generation == prepared.generation + 1
     rebuilt.close()

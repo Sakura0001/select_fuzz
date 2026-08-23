@@ -22,7 +22,7 @@ from select_fuzz.performance.tree import PlanParseError, ShapeBoundary, parse_tr
 
 
 _TIMEOUT_ERRNOS = frozenset({3024})
-_DISCONNECT_ERRNOS = frozenset({2006, 2013, 2055})
+_DISCONNECT_ERRNOS = frozenset({2002, 2003, 2006, 2013, 2055})
 
 
 class QueryRunner(Protocol):

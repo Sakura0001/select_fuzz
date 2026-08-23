@@ -2,6 +2,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Event, Thread
 
+import pytest
+
 from select_fuzz.config import NodeConfig, NodeRole
 from select_fuzz.modes.fuzz.compatibility_backoff import CompatibilityErrorBackoff
 from select_fuzz.modes.fuzz.execution import StreamingQueryExecutor, _error_identity
@@ -335,6 +337,12 @@ def test_error_identity_preserves_only_original_integer_connector_errno() -> Non
     )
     assert _error_identity(_BooleanErrnoError()) == ("_BooleanErrnoError", False, None)
     assert _error_identity(_StringErrnoError()) == ("_StringErrnoError", False, None)
+
+
+@pytest.mark.parametrize("errno", [2002, 2003])
+def test_error_identity_marks_connection_open_failures_as_lost(errno: int) -> None:
+    error_type = type("_ConnectionOpenError", (Exception,), {"errno": errno})
+    assert _error_identity(error_type("connection refused"))[1:] == (True, errno)
 
 
 class _FailingCancelHandle(_Handle):

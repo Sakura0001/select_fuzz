@@ -94,6 +94,8 @@ def test_both_nodes_start_once_behind_one_barrier_and_both_count_for_skew() -> N
         (ExecutionStatus.ERROR, 1317, True, Outcome.TIMEOUT),
         (ExecutionStatus.ERROR, 1317, False, Outcome.EXECUTION_ERROR),
         (ExecutionStatus.INFRA_ERROR, 2013, False, Outcome.INFRA_ERROR),
+        (ExecutionStatus.ERROR, 2002, False, Outcome.INFRA_ERROR),
+        (ExecutionStatus.ERROR, 2003, False, Outcome.INFRA_ERROR),
     ],
 )
 def test_timeout_disconnect_and_execution_error_classification(

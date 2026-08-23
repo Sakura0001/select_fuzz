@@ -18,7 +18,7 @@ from select_fuzz.modes.fuzz.forensics import (
 from select_fuzz.modes.fuzz.models import FuzzExecutionResult
 
 
-_LOST_CONNECTION_ERRNOS = {2006, 2013, 2055}
+_LOST_CONNECTION_ERRNOS = {2002, 2003, 2006, 2013, 2055}
 
 
 def _error_identity(error: Exception) -> tuple[str, bool, int | None]:

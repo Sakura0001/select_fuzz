@@ -8,7 +8,7 @@ from hashlib import sha256
 import json
 import math
 from pathlib import Path
-from threading import Event
+from threading import Event, Semaphore
 import time
 from typing import Any, Protocol, cast
 
@@ -775,6 +775,12 @@ class CorrectnessRoundEngine:
         self._mutation_coordinator = mutation_coordinator
         self._replica_parameters_sha256 = replica_parameters_sha256
         self._session_factory = session_factory
+        # Dynamic grammar generation is CPU-bound Python work.  Serialize the
+        # pre-generation phase across workers so one worker can open its
+        # comparison sessions and start exercising MySQL while the next
+        # worker prepares its candidate batch, instead of all workers holding
+        # the GIL before any session becomes active.
+        self._generation_gate = Semaphore(1)
 
     def abort_active(self) -> int:
         if self._session_factory is None:
@@ -867,35 +873,45 @@ class CorrectnessRoundEngine:
         # setup is ready; runtime/EXPLAIN rejection still falls back to the
         # existing lazy path below, preserving the round's retry semantics.
         if dynamic_queries:
-            while (
-                len(pre_generated_queries) < context.request.queries_per_round
-                and not stop_event.is_set()
-            ):
-                if dynamic_generate is None:  # pragma: no cover - invariant above
-                    raise RuntimeError("dynamic query generator is unavailable")
-                ordinal = candidate_ordinal
-                candidate_ordinal += 1
-                try:
-                    query = dynamic_generate(materialized, context, ordinal)
-                except CandidateRejected:
-                    pre_generation_rejected += 1
-                    continue
-                determinism = assess_query_determinism(query.sql)
-                if not determinism.admissible:
-                    pre_generation_rejected += 1
-                    pre_generation_rejections.append(
-                        {
-                            "case_ordinal": query.case_ordinal,
-                            "query_seed": query.seed,
-                            "query_sql": query.sql,
-                            "reason": determinism.reason,
-                            "row_limits": determinism.row_limits,
-                            "round_number": context.round_number,
-                            "worker_id": context.worker_id,
-                        }
-                    )
-                    continue
-                pre_generated_queries.append(query)
+            generation_acquired = False
+            while not stop_event.is_set():
+                if self._generation_gate.acquire(timeout=0.1):
+                    generation_acquired = True
+                    break
+            try:
+                while (
+                    generation_acquired
+                    and len(pre_generated_queries) < context.request.queries_per_round
+                    and not stop_event.is_set()
+                ):
+                    if dynamic_generate is None:  # pragma: no cover - invariant above
+                        raise RuntimeError("dynamic query generator is unavailable")
+                    ordinal = candidate_ordinal
+                    candidate_ordinal += 1
+                    try:
+                        query = dynamic_generate(materialized, context, ordinal)
+                    except CandidateRejected:
+                        pre_generation_rejected += 1
+                        continue
+                    determinism = assess_query_determinism(query.sql)
+                    if not determinism.admissible:
+                        pre_generation_rejected += 1
+                        pre_generation_rejections.append(
+                            {
+                                "case_ordinal": query.case_ordinal,
+                                "query_seed": query.seed,
+                                "query_sql": query.sql,
+                                "reason": determinism.reason,
+                                "row_limits": determinism.row_limits,
+                                "round_number": context.round_number,
+                                "worker_id": context.worker_id,
+                            }
+                        )
+                        continue
+                    pre_generated_queries.append(query)
+            finally:
+                if generation_acquired:
+                    self._generation_gate.release()
         prepared = self._coordinator.prepare_until_recovered(
             materialized.bundle,
             database=materialized.database,

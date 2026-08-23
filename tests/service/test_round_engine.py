@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
+import time
 from typing import cast
 
 import pytest
@@ -371,6 +373,37 @@ class _DynamicSource(_Source):
         return self.candidates[candidate_ordinal]
 
 
+class _ConcurrentDynamicSource(_DynamicSource):
+    def __init__(
+        self,
+        materialized: RoundMaterialization,
+        candidates: tuple[CorrectnessQuery, ...],
+    ) -> None:
+        super().__init__(materialized, candidates)
+        self._active_lock = Lock()
+        self._active_generators = 0
+        self.max_active_generators = 0
+
+    def generate_query(
+        self,
+        materialized: RoundMaterialization,
+        context: RoundContext,
+        candidate_ordinal: int,
+    ) -> CorrectnessQuery:
+        with self._active_lock:
+            self._active_generators += 1
+            self.max_active_generators = max(
+                self.max_active_generators,
+                self._active_generators,
+            )
+        try:
+            time.sleep(0.01)
+            return super().generate_query(materialized, context, candidate_ordinal)
+        finally:
+            with self._active_lock:
+                self._active_generators -= 1
+
+
 class _ExplainCoordinator(_Coordinator):
     def __init__(
         self,
@@ -665,6 +698,52 @@ def test_dynamic_queries_are_generated_before_comparison_sessions_open(
     assert summary.queries_completed == 2
     assert source.generated_ordinals == [0, 1]
     assert coordinator.generated_at_prepare == [0, 1]
+
+
+def test_shared_round_engine_serializes_dynamic_generation_across_workers(
+    tmp_path: Path,
+) -> None:
+    candidate = _queries(1)[0]
+    materialized = RoundMaterialization(
+        database="sf_c_20260713t120000_w0_r0_sgrammar_n123_q0",
+        bundle=_Bundle(),
+        queries=(),
+        schema_seed=21,
+        data_seed=22,
+        schema=cast(SchemaManifest, object()),
+        dynamic_queries=True,
+    )
+    source = _ConcurrentDynamicSource(materialized, (candidate,))
+    coordinator = _GenerationOrderCoordinator({candidate.sql: _match()}, source)
+    engine = CorrectnessRoundEngine(
+        source,
+        coordinator,
+        CaseBundleWriter(tmp_path),
+        _Coverage(),
+        QueryLimits(15, 10_000, 32 << 20),
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
+    )
+
+    contexts = [
+        _context(1),
+        replace(_context(1), worker_id=1, round_number=1),
+    ]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                engine.run_round,
+                context,
+                EventPublisher("run_engine_1", _Sink()),
+                Event(),
+            )
+            for context in contexts
+        ]
+        summaries = [future.result() for future in futures]
+
+    assert [summary.queries_completed for summary in summaries] == [1, 1]
+    assert source.max_active_generators == 1
 
 
 def test_baseline_explain_infrastructure_retry_budget_ends_round_without_finding(

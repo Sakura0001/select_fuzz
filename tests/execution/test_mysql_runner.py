@@ -823,6 +823,7 @@ class _RawConnection:
         self.closed = False
         self.shutdown_called = False
         self.ping_calls: list[dict[str, object]] = []
+        self.ping_timeout_snapshots: list[tuple[object, object]] = []
         self.cursor_calls: list[dict[str, object]] = []
 
     def cursor(self, *, buffered: bool, raw: bool = False, **kwargs: object):  # type: ignore[no-untyped-def]
@@ -837,6 +838,9 @@ class _RawConnection:
 
     def ping(self, **kwargs: object) -> None:
         self.ping_calls.append(dict(kwargs))
+        self.ping_timeout_snapshots.append(
+            (getattr(self, "read_timeout", None), getattr(self, "write_timeout", None))
+        )
 
 
 def test_connector_adapter_preserves_flags_and_fetches_warnings_after_result(
@@ -1077,6 +1081,28 @@ def test_connector_liveness_probe_never_reconnects_a_pinned_session(
         assert session.is_alive() is True
 
     assert connection.ping_calls == [{"reconnect": False, "attempts": 1, "delay": 0}]
+
+
+def test_connector_liveness_probe_uses_short_diagnostic_timeout(
+    node: NodeConfig,
+) -> None:
+    connection = _RawConnection()
+    connection.read_timeout = 310
+    connection.write_timeout = 310
+    factory = MySQLConnectorFactory(
+        environ={
+            "SELECT_FUZZ_MYSQL_USER": "root",
+            "SELECT_FUZZ_MYSQL_PASSWORD": "memory-only-secret",
+        },
+        connect=lambda **kwargs: connection,
+    )
+
+    with factory.query_session(node, "sf_case_1") as session:
+        assert session.is_alive() is True
+
+    assert connection.ping_timeout_snapshots == [(5, 5)]
+    assert connection.read_timeout == 310
+    assert connection.write_timeout == 310
 
 
 def test_control_connections_use_a_short_independent_timeout(node: NodeConfig) -> None:

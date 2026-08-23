@@ -597,7 +597,25 @@ class _ConnectorSession:
         return value
 
     def is_alive(self) -> bool:
-        self._connection.ping(reconnect=False, attempts=1, delay=0)
+        # Query sessions intentionally keep a generous socket timeout so a
+        # large setup packet can finish without being mistaken for a query
+        # timeout.  Reusing that timeout for a liveness probe is dangerous:
+        # after one node disappears, ``ping`` can leave the peer's session in
+        # MySQL ``Sleep`` for several minutes while the worker waits.  Bound
+        # only this health check by the short diagnostic timeout and restore
+        # the query timeout for the next real statement.
+        missing = object()
+        previous_read_timeout = getattr(self._connection, "read_timeout", missing)
+        previous_write_timeout = getattr(self._connection, "write_timeout", missing)
+        try:
+            self._connection.read_timeout = self._diagnostic_timeout_s
+            self._connection.write_timeout = self._diagnostic_timeout_s
+            self._connection.ping(reconnect=False, attempts=1, delay=0)
+        finally:
+            if previous_read_timeout is not missing:
+                self._connection.read_timeout = previous_read_timeout
+            if previous_write_timeout is not missing:
+                self._connection.write_timeout = previous_write_timeout
         return True
 
     def execute(self, sql: str) -> _ConnectorCursor:

@@ -867,6 +867,7 @@ def test_partial_pinned_session_acquisition_closes_earlier_leases(
     assert prepared.status is PrepareStatus.INFRASTRUCTURE_PAUSE
     assert prepared.sessions is None
     assert len(factory.sessions) == 1
+    assert factory.sessions[0].aborted
     assert factory.sessions[0].closed
 
 

@@ -433,6 +433,10 @@ def _open_legacy_session_pair(
                 failures[role] = error
     if failures:
         for role in sessions:
+            try:
+                sessions[role].abort()
+            except Exception:
+                pass
             managers[role].__exit__(None, None, None)
         return None, failures
     for role in COMPARISON_ROLES:

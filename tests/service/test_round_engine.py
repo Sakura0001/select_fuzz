@@ -700,6 +700,43 @@ def test_dynamic_queries_are_generated_before_comparison_sessions_open(
     assert coordinator.generated_at_prepare == [0, 1]
 
 
+def test_dynamic_generation_uses_bounded_warmup_before_sessions_open(
+    tmp_path: Path,
+) -> None:
+    candidates = _queries(100)
+    materialized = RoundMaterialization(
+        database="sf_c_20260713t120000_w0_r0_sgrammar_n123_q0",
+        bundle=_Bundle(),
+        queries=(),
+        schema_seed=21,
+        data_seed=22,
+        schema=cast(SchemaManifest, object()),
+        dynamic_queries=True,
+    )
+    source = _DynamicSource(materialized, candidates)
+    coordinator = _GenerationOrderCoordinator(
+        {candidate.sql: _match() for candidate in candidates}, source
+    )
+    engine = CorrectnessRoundEngine(
+        source,
+        coordinator,
+        CaseBundleWriter(tmp_path),
+        _Coverage(),
+        QueryLimits(15, 10_000, 32 << 20),
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
+    )
+
+    summary = engine.run_round(
+        _context(100), EventPublisher("run_engine_1", _Sink()), Event()
+    )
+
+    assert summary.queries_completed == 100
+    assert source.generated_ordinals == list(range(100))
+    assert coordinator.generated_at_prepare == list(range(64))
+
+
 def test_shared_round_engine_serializes_dynamic_generation_across_workers(
     tmp_path: Path,
 ) -> None:

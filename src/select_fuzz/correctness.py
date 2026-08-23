@@ -85,6 +85,14 @@ from select_fuzz.service import (
 )
 
 
+# Keep the initial no-Sleep window bounded.  Generating an entire 2,000-query
+# round before opening sessions prevents idle connections, but with dozens of
+# workers it serializes startup for many minutes.  The remainder is generated
+# lazily after setup, preserving query order/seed semantics while bounding the
+# pre-connect CPU window to a small warm-up batch.
+COMPARISON_PRE_GENERATION_BATCH_SIZE = 64
+
+
 # A broken node must not pin a correctness worker in EXPLAIN retry forever.
 # Eight attempts retain short-lived reconnect tolerance while bounding the
 # amount of time a round can spend without executing a comparison query.
@@ -879,9 +887,13 @@ class CorrectnessRoundEngine:
                     generation_acquired = True
                     break
             try:
+                pre_generation_target = min(
+                    context.request.queries_per_round,
+                    COMPARISON_PRE_GENERATION_BATCH_SIZE,
+                )
                 while (
                     generation_acquired
-                    and len(pre_generated_queries) < context.request.queries_per_round
+                    and len(pre_generated_queries) < pre_generation_target
                     and not stop_event.is_set()
                 ):
                     if dynamic_generate is None:  # pragma: no cover - invariant above

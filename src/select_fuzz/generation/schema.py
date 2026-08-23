@@ -1147,10 +1147,18 @@ class SchemaGenerator:
                 )
             )
         random_column_count = max(1, column_count - len(columns))
-        logical_column_share = max(
-            8,
-            (limits.row_byte_budget - 2048) // random_column_count,
+        # The boundary lane may deliberately consume almost the entire logical
+        # row budget (for example VARBINARY(63487)).  The old fixed 2048-byte
+        # reserve only accounted for the required columns, so the random
+        # columns could independently push the completed table over 65,535
+        # bytes.  Allocate the remaining budget after every already-selected
+        # column and the row header instead.
+        row_header_bytes = 5 + (column_count + 7) // 8
+        used_row_bytes = row_header_bytes + sum(
+            _column_storage_bytes_for_budget(column, limits) for column in columns
         )
+        remaining_row_bytes = max(0, limits.row_byte_budget - used_row_bytes)
+        logical_column_share = max(8, remaining_row_bytes // random_column_count)
         while len(columns) < column_count:
             column_index = len(columns)
             columns.append(
@@ -1301,7 +1309,12 @@ class SchemaGenerator:
         elif family == 3:
             declaration = rng.choice(("FLOAT", "DOUBLE"))
         elif family == 4:
-            declaration = f"CHAR({rng.randint(1, min(255, max(1, inline_share // 4)))})"
+            char_cap = min(
+                255,
+                max(1, inline_share // 4),
+                max(1, logical_byte_share // 4),
+            )
+            declaration = f"CHAR({rng.randint(1, char_cap)})"
             return ColumnDef(name, declaration, nullable, "utf8mb4", "utf8mb4_0900_ai_ci")
         elif family == 5:
             varchar_cap = min(
@@ -1314,7 +1327,8 @@ class SchemaGenerator:
             declaration = f"VARCHAR({length})"
             return ColumnDef(name, declaration, nullable, "utf8mb4", "utf8mb4_0900_ai_ci")
         elif family == 6:
-            declaration = f"BINARY({rng.randint(1, min(255, inline_share))})"
+            binary_cap = min(255, inline_share, max(1, logical_byte_share))
+            declaration = f"BINARY({rng.randint(1, binary_cap)})"
         elif family == 7:
             varbinary_cap = min(limits.max_varbinary_bytes, logical_byte_share)
             if limits.row_format in {"COMPACT", "REDUNDANT"}:
@@ -1633,6 +1647,58 @@ def _inline_column_share(limits: SchemaLimits) -> int:
     # Reserve enough for headers and one mandatory off-page-capable scene column
     # (for example LONGTEXT in the FULLTEXT profile).
     return max(8, (_inline_row_limit(limits) - 1024) // limits.max_columns)
+
+
+def _column_storage_bytes_for_budget(column: ColumnDef, limits: SchemaLimits) -> int:
+    """Estimate the logical row bytes consumed by an already-selected column.
+
+    This mirrors the schema-rule accounting closely enough for generation-time
+    allocation without importing ``schema_rules`` (which imports this module).
+    It intentionally uses the declared length for inline string/binary types and
+    the InnoDB pointer size for off-page-capable LOB/JSON/spatial types.
+    """
+
+    base = column.base_type
+    length_match = re.search(r"\(([0-9]+)", column.mysql_type)
+    length = int(length_match.group(1)) if length_match is not None else None
+    if base == "TINYINT":
+        return 1
+    if base == "SMALLINT":
+        return 2
+    if base == "MEDIUMINT":
+        return 3
+    if base in {"INT", "FLOAT"}:
+        return 4
+    if base in {"BIGINT", "DOUBLE"}:
+        return 8
+    if base == "BIT":
+        return ((length or 1) + 7) // 8
+    if base == "DECIMAL":
+        return ((length or 1) + 1) // 2 + 1
+    if base in _LOB_TYPES or base in {"JSON", *_GEOMETRY_TYPES}:
+        return 20
+    if base in {"CHAR", "VARCHAR", "ENUM", "SET"}:
+        charset_width = {
+            "ascii": 1,
+            "latin1": 1,
+            "utf8mb3": 3,
+            "utf8mb4": 4,
+        }.get(column.charset or "utf8mb4", 4)
+        if base in {"ENUM", "SET"}:
+            return 16
+        return (length or 1) * charset_width + 2
+    if base in {"BINARY", "VARBINARY"}:
+        return (length or 1) + 2
+    if base == "DATE":
+        return 3
+    if base in {"TIME", "TIMESTAMP"}:
+        return 7
+    if base == "DATETIME":
+        return 8
+    if base == "YEAR":
+        return 1
+    # Keep the fallback conservative for any future scalar declaration.
+    return max(1, limits.row_byte_budget)
 
 
 __all__ = [

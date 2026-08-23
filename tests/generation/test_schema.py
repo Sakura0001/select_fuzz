@@ -110,6 +110,27 @@ def test_generation_is_byte_stable_and_uses_target_profile_intersection() -> Non
     assert first.profile.value in target.compatible_profiles
 
 
+def test_typed_boundary_reserves_space_for_random_columns() -> None:
+    """A maximum-width boundary must not make an otherwise valid table overflow."""
+
+    limits = SchemaLimits(
+        min_tables=4,
+        max_tables=8,
+        min_columns=8,
+        max_columns=64,
+        max_indexes_per_table=32,
+    )
+
+    manifest = SchemaGenerator().generate(
+        _target(SchemaProfile.REGULAR_INNODB),
+        seed=47467244836823673254497410167912210910,
+        limits=limits,
+        typed_boundary_id=BoundaryDeclarationId.VARBINARY_LENGTH_MAX,
+    )
+
+    SchemaRules.mysql_8041().validate(manifest, limits=limits)
+
+
 def test_default_limits_cover_one_to_eight_tables_and_two_to_sixteen_columns() -> None:
     limits = SchemaLimits()
 

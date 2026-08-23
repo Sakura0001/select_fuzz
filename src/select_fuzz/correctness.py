@@ -798,6 +798,22 @@ class CorrectnessRoundEngine:
         stop_event: Event,
     ) -> RoundSummary:
         materialized = self._source.materialize(context)
+        dynamic_queries = materialized.dynamic_queries
+        dynamic_generate: (
+            Callable[[RoundMaterialization, RoundContext, int], CorrectnessQuery] | None
+        ) = None
+        if dynamic_queries:
+            raw_generate = getattr(self._source, "generate_query", None)
+            if not callable(raw_generate):
+                raise RuntimeError("dynamic round source has no generate_query method")
+            dynamic_generate = cast(
+                Callable[[RoundMaterialization, RoundContext, int], CorrectnessQuery],
+                raw_generate,
+            )
+        pre_generated_queries: list[CorrectnessQuery] = []
+        pre_generation_rejections: list[dict[str, object]] = []
+        pre_generation_rejected = 0
+        candidate_ordinal = 0
 
         def publish_setup_pause(prepared: PreparedRound, attempt_number: int) -> None:
             """Persist every setup-retry cause before the next backoff sleep."""
@@ -843,6 +859,43 @@ class CorrectnessRoundEngine:
             queries=(),
             metadata=round_metadata,
         )
+        # Grammar generation is CPU-heavy and runs under the Python GIL.  Do
+        # the initial candidate batch before opening either comparison
+        # session, so a worker cannot leave both MySQL connections in Sleep
+        # while it serializes the next large query.  Candidates rejected by
+        # the static determinism gate are retained for publication after the
+        # setup is ready; runtime/EXPLAIN rejection still falls back to the
+        # existing lazy path below, preserving the round's retry semantics.
+        if dynamic_queries:
+            while (
+                len(pre_generated_queries) < context.request.queries_per_round
+                and not stop_event.is_set()
+            ):
+                if dynamic_generate is None:  # pragma: no cover - invariant above
+                    raise RuntimeError("dynamic query generator is unavailable")
+                ordinal = candidate_ordinal
+                candidate_ordinal += 1
+                try:
+                    query = dynamic_generate(materialized, context, ordinal)
+                except CandidateRejected:
+                    pre_generation_rejected += 1
+                    continue
+                determinism = assess_query_determinism(query.sql)
+                if not determinism.admissible:
+                    pre_generation_rejected += 1
+                    pre_generation_rejections.append(
+                        {
+                            "case_ordinal": query.case_ordinal,
+                            "query_seed": query.seed,
+                            "query_sql": query.sql,
+                            "reason": determinism.reason,
+                            "row_limits": determinism.row_limits,
+                            "round_number": context.round_number,
+                            "worker_id": context.worker_id,
+                        }
+                    )
+                    continue
+                pre_generated_queries.append(query)
         prepared = self._coordinator.prepare_until_recovered(
             materialized.bundle,
             database=materialized.database,
@@ -971,38 +1024,45 @@ class CorrectnessRoundEngine:
                 1 if prepared.status is PrepareStatus.REJECTED_GENERATION else 0,
                 0,
             )
-        queries_completed = findings = rejected = over_budget = 0
+        queries_completed = findings = over_budget = 0
+        rejected = pre_generation_rejected
         mutation_sequence = 0
         committed_mutation_sql: list[str] = []
         current_prepared = prepared
-        dynamic_queries = materialized.dynamic_queries
-        dynamic_generate: (
-            Callable[[RoundMaterialization, RoundContext, int], CorrectnessQuery] | None
-        ) = None
-        if dynamic_queries:
-            raw_generate = getattr(self._source, "generate_query", None)
-            if not callable(raw_generate):
-                raise RuntimeError("dynamic round source has no generate_query method")
-            dynamic_generate = cast(
-                Callable[[RoundMaterialization, RoundContext, int], CorrectnessQuery],
-                raw_generate,
+        for rejection_payload in pre_generation_rejections:
+            published_payload = {
+                **rejection_payload,
+                "database": current_prepared.database,
+            }
+            self._artifacts.write_query_record(
+                context.worker_id,
+                {
+                    **published_payload,
+                    "type": "query_candidate_rejected",
+                },
             )
+            events.publish("query_rejected", published_payload)
         legacy_queries = iter(materialized.queries)
-        candidate_ordinal = 0
+        pre_generated_iter = iter(pre_generated_queries)
         try:
             while True:
+                query_prevalidated = False
                 if dynamic_queries:
                     if queries_completed >= context.request.queries_per_round:
                         break
-                    if dynamic_generate is None:  # pragma: no cover - invariant above
-                        raise RuntimeError("dynamic query generator is unavailable")
-                    ordinal = candidate_ordinal
-                    candidate_ordinal += 1
                     try:
-                        query = dynamic_generate(materialized, context, ordinal)
-                    except CandidateRejected:
-                        rejected += 1
-                        continue
+                        query = next(pre_generated_iter)
+                        query_prevalidated = True
+                    except StopIteration:
+                        if dynamic_generate is None:  # pragma: no cover - invariant above
+                            raise RuntimeError("dynamic query generator is unavailable")
+                        ordinal = candidate_ordinal
+                        candidate_ordinal += 1
+                        try:
+                            query = dynamic_generate(materialized, context, ordinal)
+                        except CandidateRejected:
+                            rejected += 1
+                            continue
                 else:
                     try:
                         query = next(legacy_queries)
@@ -1010,28 +1070,29 @@ class CorrectnessRoundEngine:
                         break
                 if stop_event.is_set():
                     break
-                determinism = assess_query_determinism(query.sql)
-                if not determinism.admissible:
-                    rejected += 1
-                    rejection_payload = {
-                        "case_ordinal": query.case_ordinal,
-                        "database": current_prepared.database,
-                        "query_seed": query.seed,
-                        "query_sql": query.sql,
-                        "reason": determinism.reason,
-                        "row_limits": determinism.row_limits,
-                        "round_number": context.round_number,
-                        "worker_id": context.worker_id,
-                    }
-                    self._artifacts.write_query_record(
-                        context.worker_id,
-                        {
-                            **rejection_payload,
-                            "type": "query_candidate_rejected",
-                        },
-                    )
-                    events.publish("query_rejected", rejection_payload)
-                    continue
+                if not query_prevalidated:
+                    determinism = assess_query_determinism(query.sql)
+                    if not determinism.admissible:
+                        rejected += 1
+                        rejection_payload = {
+                            "case_ordinal": query.case_ordinal,
+                            "database": current_prepared.database,
+                            "query_seed": query.seed,
+                            "query_sql": query.sql,
+                            "reason": determinism.reason,
+                            "row_limits": determinism.row_limits,
+                            "round_number": context.round_number,
+                            "worker_id": context.worker_id,
+                        }
+                        self._artifacts.write_query_record(
+                            context.worker_id,
+                            {
+                                **rejection_payload,
+                                "type": "query_candidate_rejected",
+                            },
+                        )
+                        events.publish("query_rejected", rejection_payload)
+                        continue
                 if dynamic_queries:
                     explain_delay = 0.25
                     explain_attempt_number = 0

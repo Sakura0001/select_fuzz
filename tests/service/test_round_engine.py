@@ -265,6 +265,39 @@ class _Coordinator:
         return ComparisonExecutionResult(prepared, self.outcomes[sql])  # type: ignore[arg-type]
 
 
+class _GenerationOrderCoordinator(_Coordinator):
+    def __init__(self, outcomes: dict[str, tuple[NodeExecution, ...]], source: "_DynamicSource") -> None:
+        super().__init__(outcomes)
+        self.source = source
+        self.generated_at_prepare: list[int] = []
+
+    def prepare_until_recovered(
+        self,
+        bundle: _Bundle,
+        *,
+        database: str,
+        should_stop,
+        retry=None,  # type: ignore[no-untyped-def]
+        on_infrastructure_pause=None,  # type: ignore[no-untyped-def]
+    ) -> _Prepared:
+        self.generated_at_prepare = list(self.source.generated_ordinals)
+        return super().prepare_until_recovered(
+            bundle,
+            database=database,
+            should_stop=should_stop,
+            retry=retry,
+            on_infrastructure_pause=on_infrastructure_pause,
+        )
+
+    def explain_baseline(
+        self,
+        prepared: _Prepared,
+        sql: str,
+        limits: QueryLimits,
+    ) -> "_ExplainResult":
+        return _ExplainResult(prepared, _success(NodeRole.CUSTOM_OFF, ((1,),)))
+
+
 class _RetryCoordinator(_Coordinator):
     def __init__(self, outcomes: list[tuple[NodeExecution, ...]]) -> None:
         super().__init__({})
@@ -595,6 +628,43 @@ def test_dynamic_grammar_round_explains_first_and_counts_only_successful_pairs(
     assert uniform_record["observed_error_identities"] == [
         {"errno": 1366, "sqlstate": "HY000"},
     ] * 2
+
+
+def test_dynamic_queries_are_generated_before_comparison_sessions_open(
+    tmp_path: Path,
+) -> None:
+    candidates = _queries(2)
+    materialized = RoundMaterialization(
+        database="sf_c_20260713t120000_w0_r0_sgrammar_n123_q0",
+        bundle=_Bundle(),
+        queries=(),
+        schema_seed=21,
+        data_seed=22,
+        schema=cast(SchemaManifest, object()),
+        dynamic_queries=True,
+    )
+    source = _DynamicSource(materialized, candidates)
+    coordinator = _GenerationOrderCoordinator(
+        {candidate.sql: _match() for candidate in candidates}, source
+    )
+    engine = CorrectnessRoundEngine(
+        source,
+        coordinator,
+        CaseBundleWriter(tmp_path),
+        _Coverage(),
+        QueryLimits(15, 10_000, 32 << 20),
+        configuration_fingerprints={
+            role: f"fp-{role.value}" for role in COMPARISON_ROLES
+        },
+    )
+
+    summary = engine.run_round(
+        _context(2), EventPublisher("run_engine_1", _Sink()), Event()
+    )
+
+    assert summary.queries_completed == 2
+    assert source.generated_ordinals == [0, 1]
+    assert coordinator.generated_at_prepare == [0, 1]
 
 
 def test_baseline_explain_infrastructure_retry_budget_ends_round_without_finding(

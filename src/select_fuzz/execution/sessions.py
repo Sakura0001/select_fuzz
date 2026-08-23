@@ -214,6 +214,19 @@ def acquire_session_pair(
 
     acquisition = PairSessionAcquisition(attempts=attempts)
     if not acquisition.ready:
+        # If only one side of the pair opened, the successful side may already
+        # be unusable (for example the peer failed during the same network
+        # event).  A normal connector close can be a no-op in that state and
+        # leave the server-side thread in Sleep until wait_timeout.  Abort the
+        # partial pair first so the socket is forcefully torn down, then run
+        # the normal idempotent release path.
+        for attempt in acquisition.attempts.values():
+            if attempt.lease is None:
+                continue
+            try:
+                attempt.lease.session.abort()
+            except Exception:
+                pass
         acquisition.close()
     return acquisition
 

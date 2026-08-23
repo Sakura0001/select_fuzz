@@ -84,6 +84,7 @@ def test_pair_acquisition_attempts_both_roles_and_preserves_independent_failure(
     assert off.failure_evidence["exception"]["message"] == "custom_off 握手失败"
     assert on.failure_evidence is None
     # 成对建连不完整时，已成功的一侧必须立即释放，不能留下 Sleep 连接。
+    assert factory.sessions[NodeRole.CUSTOM_ON].aborted is True
     assert factory.sessions[NodeRole.CUSTOM_ON].closed is True
 
 

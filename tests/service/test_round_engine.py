@@ -1032,6 +1032,11 @@ def test_one_sided_lost_connection_is_retried_without_finding(
     }
     pause = next(event for event in sink.events if event.kind == "infrastructure_pause")
     assert pause.payload["query_sql"] == query.sql
+    assert pause.payload["nodes"]["custom_off"]["error"]["errno"] == 2013
+    assert pause.payload["nodes"]["custom_off"]["failure_evidence"] == {
+        "failure_stage": "execute",
+        "exception": {"message": "socket reset by peer"},
+    }
     round_sql = tmp_path / "rounds" / f"{materialized.database}.sql"
     assert query.sql in round_sql.read_text(encoding="utf-8")
 

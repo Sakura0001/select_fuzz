@@ -1212,6 +1212,11 @@ class CorrectnessRoundEngine:
                             "case_ordinal": query.case_ordinal,
                             "database": current_prepared.database,
                             "query_sql": query.sql,
+                            # Keep the event stream self-contained: the
+                            # query-attempt JSONL contains this evidence too,
+                            # but operators often inspect events.jsonl first
+                            # while diagnosing a retry or a Sleep spike.
+                            "nodes": nodes,
                             "worker_id": context.worker_id,
                         },
                     )

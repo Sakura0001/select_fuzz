@@ -29,7 +29,11 @@ from typing import Any, cast
 import mysql.connector
 
 
-LOST_CONNECTION_ERRNOS = frozenset({2006, 2013, 2055})
+# Include connection-open failures as well as losses after a session was
+# established.  A stopped/restarting server commonly surfaces as 2002/2003
+# before the connector can return 2006/2013; those outcomes are infrastructure
+# evidence, not semantic query findings.
+LOST_CONNECTION_ERRNOS = frozenset({2002, 2003, 2006, 2013, 2055})
 FEATURE_ONLY = frozenset({"flashback", "pq_parallel", "second_level_partition"})
 OPTIMIZER_SWITCHES = (
     "derived_merge_no_subquery_check",

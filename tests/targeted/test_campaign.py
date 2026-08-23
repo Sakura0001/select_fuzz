@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from select_fuzz.targeted_campaign import (
     CampaignNode,
     _comparison,
@@ -120,6 +122,16 @@ def test_connection_open_lost_connection_is_infrastructure() -> None:
     assert classify_connection_event(
         status="error",
         errno=2013,
+        watchdog_fired=False,
+        stage="connection_open",
+    ) == "connection_lost_infra"
+
+
+@pytest.mark.parametrize("errno", [2002, 2003])
+def test_connection_refused_is_infrastructure_not_a_finding(errno: int) -> None:
+    assert classify_connection_event(
+        status="error",
+        errno=errno,
         watchdog_fired=False,
         stage="connection_open",
     ) == "connection_lost_infra"

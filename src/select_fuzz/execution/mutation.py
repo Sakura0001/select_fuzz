@@ -111,6 +111,12 @@ def _is_infrastructure(result: NodeExecution) -> bool:
     return result.status in {ExecutionStatus.INFRA_ERROR, ExecutionStatus.TIMEOUT}
 
 
+def _has_infrastructure_result(results: Mapping[NodeRole, NodeExecution]) -> bool:
+    """Return whether a transaction step lost a usable connection."""
+
+    return any(_is_infrastructure(result) for result in results.values())
+
+
 class PairMutationCoordinator:
     """Execute one batch as one transaction on both instances in lockstep."""
 
@@ -238,7 +244,9 @@ class PairMutationCoordinator:
                     result.status is not ExecutionStatus.SUCCESS for result in started.values()
                 ):
                     rolled_back = rollback()
-                    infrastructure = any(_is_infrastructure(result) for result in started.values())
+                    infrastructure = _has_infrastructure_result(started) or _has_infrastructure_result(
+                        rolled_back
+                    )
                     return MutationBatchResult(
                         (
                             MutationVerdict.INFRASTRUCTURE_ERROR
@@ -280,6 +288,17 @@ class PairMutationCoordinator:
                             continue
                         if statuses == {ExecutionStatus.ERROR}:
                             rolled_back = rollback()
+                            if _has_infrastructure_result(rolled_back):
+                                return MutationBatchResult(
+                                    MutationVerdict.INFRASTRUCTURE_ERROR,
+                                    batch,
+                                    tuple(executed_sql),
+                                    tuple(statement_results),
+                                    results,
+                                    statement.sql,
+                                    actual_affected_rows=actual_affected_rows,
+                                    retry_safety=MutationRetrySafety.SAFE_AFTER_RECONNECT,
+                                )
                             verdict = (
                                 MutationVerdict.CONSISTENT_ERROR_ROLLED_BACK
                                 if _same(rolled_back, compare_affected_rows=False)
@@ -299,10 +318,12 @@ class PairMutationCoordinator:
                                 actual_affected_rows=actual_affected_rows,
                             )
                     rollback()
+                    rolled_back = statement_results[-1]
                     return MutationBatchResult(
                         verdict := (
                             MutationVerdict.INFRASTRUCTURE_ERROR
-                            if any(_is_infrastructure(result) for result in results.values())
+                            if _has_infrastructure_result(results)
+                            or _has_infrastructure_result(rolled_back)
                             else MutationVerdict.MISMATCH
                         ),
                         batch,
@@ -320,6 +341,17 @@ class PairMutationCoordinator:
 
                 if not 12 <= actual_affected_rows <= 50:
                     rolled_back = rollback()
+                    if _has_infrastructure_result(rolled_back):
+                        return MutationBatchResult(
+                            MutationVerdict.INFRASTRUCTURE_ERROR,
+                            batch,
+                            tuple(executed_sql),
+                            tuple(statement_results),
+                            rolled_back,
+                            batch.statements[-1].sql,
+                            actual_affected_rows=actual_affected_rows,
+                            retry_safety=MutationRetrySafety.SAFE_AFTER_RECONNECT,
+                        )
                     verdict = (
                         MutationVerdict.ACTUAL_ROWS_OUT_OF_RANGE_ROLLED_BACK
                         if _same(rolled_back, compare_affected_rows=False)

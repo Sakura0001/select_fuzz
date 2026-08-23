@@ -215,6 +215,36 @@ def test_same_semantic_error_rolls_back_without_waiting_or_finding() -> None:
     assert result.executed_sql[-1] == "ROLLBACK"
 
 
+def test_same_semantic_error_with_rollback_connection_loss_is_infrastructure() -> None:
+    sql = "INSERT INTO `t0` VALUES (1)"
+    runner = _Runner()
+    now = monotonic_ns()
+    for role in COMPARISON_ROLES:
+        runner.by_sql_role[(sql, role)] = NodeExecution.failure(
+            role=role,
+            status=ExecutionStatus.ERROR,
+            started_ns=now,
+            ended_ns=now,
+            connection_id=100 + list(COMPARISON_ROLES).index(role),
+            error=ErrorInfo(1062, "23000", "Duplicate entry '1' for key 'PRIMARY'"),
+        )
+    runner.by_sql_role[("ROLLBACK", NodeRole.CUSTOM_OFF)] = NodeExecution.failure(
+        role=NodeRole.CUSTOM_OFF,
+        status=ExecutionStatus.INFRA_ERROR,
+        started_ns=now,
+        ended_ns=now,
+        connection_id=100,
+        error=ErrorInfo(65002, "HY000", "MySQL Connection not available"),
+        connection_reusable=False,
+    )
+
+    result = _coordinator(runner).execute_batch("sf_mutation_rollback_loss", _batch(sql))
+
+    assert result.verdict is MutationVerdict.INFRASTRUCTURE_ERROR
+    assert result.retry_safety is MutationRetrySafety.SAFE_AFTER_RECONNECT
+    assert result.executed_sql[-1] == "ROLLBACK"
+
+
 def test_affected_row_mismatch_rolls_back_and_terminates_round() -> None:
     batch = _batch()
     sql = batch.statements[0].sql

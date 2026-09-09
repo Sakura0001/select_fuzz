@@ -486,6 +486,43 @@ def test_dynamic_grammar_round_explains_first_and_counts_only_successful_triads(
     ] * 3
 
 
+@pytest.mark.parametrize("reason, errno, status", [
+    ("not_pq", 65004, ExecutionStatus.ERROR),
+    ("admission_timeout", 3024, ExecutionStatus.TIMEOUT),
+])
+def test_pq_rejection_is_excluded_and_continuous_rejection_has_a_budget(tmp_path, reason, errno, status):
+    query = _queries(1)[0]
+    materialized = RoundMaterialization(
+        database="sf_c_pq_budget", bundle=_Bundle(), queries=(), schema_seed=21,
+        data_seed=22, schema=cast(SchemaManifest, object()), dynamic_queries=True,
+    )
+    pq_rejected = NodeExecution.failure(
+        role=NodeRole.CUSTOM_ON, status=status, started_ns=1, ended_ns=2,
+        connection_id=7, error=ErrorInfo(errno, "HY000", f"PQ admission rejected: {reason}"),
+        performance_payload={"pq_rejection": reason},
+    )
+    coordinator = _ExplainCoordinator(
+        {query.sql: (_match()[0], _match()[1], pq_rejected)},
+        {query.sql: _success(NodeRole.BASELINE, ((1,),))},
+    )
+    source = _DynamicSource(materialized, (query,) * 100)
+    engine = CorrectnessRoundEngine(
+        source, coordinator, CaseBundleWriter(tmp_path), _Coverage(),
+        QueryLimits(15, 10000, 32 << 20),
+        configuration_fingerprints={role: f"fp-{role.value}" for role in NodeRole},
+    )
+    sink = _CollectSink()
+    result = engine.run_round(_context(1), EventPublisher("run_engine_1", sink), Event())
+    assert result.findings == result.queries_completed == 0
+    assert result.rejected == 100
+    assert len(coordinator.executed) == 100
+    assert any(e.kind == "generation_budget_exhausted" for e in sink.events)
+    records = read_jsonl(tmp_path / "sql" / "worker-000.jsonl")
+    exclusions = [r for r in records if r.get("verdict") == "pq_rejected"]
+    assert len(exclusions) == 100
+    assert exclusions[0]["nodes"]["custom_on"]["pq_evidence"]["pq_rejection"] == reason
+
+
 def test_generated_round_source_defaults_to_grammar_only_generation(
     tmp_path: Path,
 ) -> None:
@@ -1288,7 +1325,6 @@ def test_production_schema_targets_remove_unsupported_engine_profiles() -> None:
     assert primary_targets[0].compatible_profiles == frozenset(
         {
             SchemaProfile.REGULAR_INNODB.value,
-            SchemaProfile.TEMPORARY_INNODB.value,
         }
     )
     assert replica_targets[0].compatible_profiles == frozenset(

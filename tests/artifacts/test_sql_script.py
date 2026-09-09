@@ -35,8 +35,7 @@ def test_sourceable_writer_emits_prologue_and_keeps_execution_order(
     payload = path.read_text(encoding="utf-8")
     assert payload.startswith("-- select-fuzz reproducible SQL\n")
     assert "-- note: first round\n" in payload
-    assert "SET NAMES utf8mb4;\n" in payload
-    assert "SET SESSION time_zone = '+00:00';\n" in payload
+    assert not any(line.startswith("SET ") for line in payload.splitlines())
     assert "CREATE DATABASE IF NOT EXISTS `sf_seed_41`;\n" in payload
     assert "USE `sf_seed_41`;\n" in payload
     expected = [

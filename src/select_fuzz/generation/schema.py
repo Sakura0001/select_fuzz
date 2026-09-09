@@ -889,7 +889,7 @@ class SchemaGenerator:
     def executable_boundary_declarations(
         cls, limits: SchemaLimits
     ) -> tuple[BoundaryDeclaration, ...]:
-        """Return typed non-special boundaries that fit beside required columns."""
+        """Return PQ-supported boundaries that fit beside required columns."""
 
         available = min(limits.row_byte_budget, 65_535) - 2048
         if available <= 0:
@@ -901,6 +901,8 @@ class SchemaGenerator:
         executable: list[BoundaryDeclaration] = []
         for boundary in cls.boundary_declarations(limits):
             declaration = boundary.declaration
+            if declaration in _LOB_TYPES:
+                continue
             if declaration == grammar_varchar_max and declaration not in {
                 "VARCHAR(0)",
                 "VARCHAR(1)",
@@ -918,10 +920,9 @@ class SchemaGenerator:
     def executable_boundary_pool(cls, limits: SchemaLimits) -> tuple[str, ...]:
         """Return boundaries that fit beside the mandatory columns in a real table."""
 
-        non_special = tuple(
+        return tuple(
             boundary.declaration for boundary in cls.executable_boundary_declarations(limits)
         )
-        return non_special + cls.declaration_pool(limits)[len(cls.boundary_declarations(limits)) :]
 
     @classmethod
     def boundary_column(
@@ -972,10 +973,15 @@ class SchemaGenerator:
         if not isinstance(boundary_id, BoundaryDeclarationId):
             raise TypeError("boundary_id must be a BoundaryDeclarationId")
         boundary = next(
-            item
-            for item in cls.executable_boundary_declarations(limits)
-            if item.boundary_id is boundary_id
+            (
+                item
+                for item in cls.executable_boundary_declarations(limits)
+                if item.boundary_id is boundary_id
+            ),
+            None,
         )
+        if boundary is None:
+            raise ValueError(f"boundary {boundary_id.value} is unsupported by PQ")
         declaration = boundary.declaration
         base_type = declaration.split("(", 1)[0].split(" ", 1)[0]
         if base_type in {
@@ -1147,9 +1153,12 @@ class SchemaGenerator:
                 )
             )
         random_column_count = max(1, column_count - len(columns))
+        required_row_bytes = self.rules._row_bytes(
+            TableDef(name=name, temporary=False, columns=tuple(columns), indexes=())
+        )
         logical_column_share = max(
             8,
-            (limits.row_byte_budget - 2048) // random_column_count,
+            (limits.row_byte_budget - required_row_bytes - 128) // random_column_count,
         )
         while len(columns) < column_count:
             column_index = len(columns)
@@ -1283,13 +1292,9 @@ class SchemaGenerator:
         limits: SchemaLimits,
         logical_byte_share: int,
     ) -> ColumnDef:
-        families = list(range(16))
-        if limits.row_format in {"COMPACT", "REDUNDANT"}:
-            families.remove(12)
-            families.remove(13)
-        family = rng.choice(families)
+        family = rng.randrange(14)
         nullable = bool(rng.randrange(2))
-        inline_share = _inline_column_share(limits)
+        inline_share = min(_inline_column_share(limits), logical_byte_share)
         if family == 0:
             base = rng.choice(("TINYINT", "SMALLINT", "MEDIUMINT", "INT", "BIGINT"))
             declaration = base + (" UNSIGNED" if rng.randrange(2) else "")
@@ -1329,13 +1334,6 @@ class SchemaGenerator:
         elif family == 11:
             declaration = f"TIMESTAMP({rng.randint(0, 6)})"
         elif family == 12:
-            declaration = rng.choice(("TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT"))
-            return ColumnDef(name, declaration, nullable, "utf8mb4", "utf8mb4_0900_ai_ci")
-        elif family == 13:
-            # JSON has a dedicated opt-in profile. Keep default fuzz focused on
-            # ordinary scalar/LOB types until JSON expansion is explicitly enabled.
-            declaration = rng.choice(("TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"))
-        elif family == 14:
             return ColumnDef(
                 name,
                 "ENUM('a','z')",
@@ -1446,8 +1444,8 @@ class SchemaGenerator:
                 )
             )
         else:
-            # The suite spans single, composite, descending, unique, prefix, and
-            # functional forms. A deterministic random subset keeps each table small.
+            # Functional indexes use hidden generated columns, which PQ rejects.
+            # A deterministic subset of physical-column indexes keeps tables small.
             physical_budget = _effective_index_budget(limits)
             payload_column = next(column for column in columns if column.name == "payload")
             payload_match = re.search(r"\(([0-9]+)\)", payload_column.mysql_type)
@@ -1477,17 +1475,6 @@ class SchemaGenerator:
                 IndexDef(
                     "ix_payload_prefix",
                     (IndexPart(column_name="payload", prefix_length=min(16, payload_prefix)),),
-                ),
-                IndexDef(
-                    "ix_payload_lower",
-                    (
-                        IndexPart(
-                            expression=IndexExpression.lower_char(
-                                "payload", min(191, payload_prefix)
-                            )
-                        ),
-                    ),
-                    kind=IndexKind.FUNCTIONAL,
                 ),
             ]
             if physical_budget >= 12:

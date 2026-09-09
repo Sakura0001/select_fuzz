@@ -52,7 +52,7 @@ def _measurement_record(run: FormalRun, role: NodeRole) -> dict[str, object]:
         "watchdog_fired": item.watchdog_fired,
         "error_code": item.error_code,
         "error_type": item.error_type,
-        "metrics": {} if item.metrics is None else dict(item.metrics),
+        "metrics": {} if item.metrics is None else _artifact_value(item.metrics),
     }
 
 
@@ -250,6 +250,15 @@ class PerformanceRecorder:
             ).encode("utf-8")
             self._diagnostics.write(frozen.case_id, record, files)
         return record
+
+    def record_pq_rejection(self, frozen: FrozenCase, run: FormalRun) -> None:
+        self._write_case_sql(frozen)
+        self._records.append({
+            "type": "performance_pq_rejected", "run_id": self._run_id,
+            "occurred_at": self._now(), "case_id": frozen.case_id,
+            "database": frozen.database, "seed": frozen.seed, "sql": frozen.sql,
+            "measurements": {role.value: _measurement_record(run, role) for role in NodeRole},
+        })
 
     def record_calibration_failure(
         self,

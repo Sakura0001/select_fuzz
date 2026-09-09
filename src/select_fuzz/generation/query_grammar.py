@@ -25,6 +25,13 @@ from select_fuzz.generation.function_registry import (
     FunctionResult,
 )
 from select_fuzz.generation.query_safety import ReadOnlyValidator, UnsafeQuery
+from select_fuzz.generation.pq_eligibility import (
+    PQ_AGGREGATES,
+    PQ_SCALAR_FUNCTIONS,
+    PqEligibilityValidator,
+    PqIneligible,
+    is_pq_supported_type,
+)
 from select_fuzz.generation.schema import SchemaManifest
 
 
@@ -104,7 +111,11 @@ def _strip_comment(line: str) -> str:
 
 def _parse_symbol(raw: str, *, line: int) -> GrammarSymbol:
     multiplicity = Multiplicity.ONE
-    if len(raw) > 1 and raw[-1] in "?*+":
+    if (
+        len(raw) > 1
+        and raw[-1] in "?*+"
+        and (_PRODUCTION_NAME.fullmatch(raw[:-1]) is not None or raw.startswith("_"))
+    ):
         suffix = raw[-1]
         raw = raw[:-1]
         multiplicity = {
@@ -275,16 +286,32 @@ _NUMERIC_TYPES = frozenset(
         "SMALLINT",
         "MEDIUMINT",
         "INT",
+        "INTEGER",
         "BIGINT",
+        "BOOL",
+        "BOOLEAN",
         "BIT",
         "DECIMAL",
+        "NUMERIC",
         "FLOAT",
         "DOUBLE",
+        "REAL",
         "YEAR",
     }
 )
 _TEXT_TYPES = frozenset(
-    {"CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET"}
+    {
+        "CHAR",
+        "VARCHAR",
+        "NCHAR",
+        "NVARCHAR",
+        "TINYTEXT",
+        "TEXT",
+        "MEDIUMTEXT",
+        "LONGTEXT",
+        "ENUM",
+        "SET",
+    }
 )
 _TEMPORAL_TYPES = frozenset({"DATE", "TIME", "DATETIME", "TIMESTAMP"})
 _BINARY_TYPES = frozenset({"BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB"})
@@ -323,10 +350,15 @@ def _family(mysql_type: str) -> TypeFamily:
 class GrammarColumn:
     name: str
     mysql_type: str
+    generated: bool = False
 
     @property
     def family(self) -> TypeFamily:
         return _family(self.mysql_type)
+
+    @property
+    def pq_supported(self) -> bool:
+        return is_pq_supported_type(self.mysql_type, generated=self.generated)
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +367,8 @@ class GrammarTable:
     columns: tuple[GrammarColumn, ...]
     indexes: tuple[str, ...] = ()
     partitions: tuple[str, ...] = ()
+    engine: str = "InnoDB"
+    temporary: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "columns", tuple(self.columns))
@@ -369,12 +403,19 @@ class GrammarSchema:
                         for index in table.indexes
                         if index.visible
                         and index.kind.value not in {"fulltext", "spatial", "multivalue"}
+                        and all(
+                            part.column_name is not None
+                            and is_pq_supported_type(table.column(part.column_name).mysql_type)
+                            for part in index.parts
+                        )
                     ),
                     (
                         ()
                         if table.partition is None
                         else tuple(f"p{index}" for index in range(table.partition.partitions))
                     ),
+                    engine=table.engine,
+                    temporary=table.temporary,
                 )
                 for table in manifest.tables
             )
@@ -454,12 +495,9 @@ class _QueryScope:
     projection_columns: list[GrammarColumn] = field(default_factory=list)
     output_columns: list[GrammarColumn] = field(default_factory=list)
     prepared_relation: str | None = None
-    named_window_enabled: bool = False
-    projection_has_star: bool = False
     group_column: _ColumnBinding | None = None
     group_columns: list[_ColumnBinding] = field(default_factory=list)
     last_value_family: TypeFamily = TypeFamily.ANY
-    window_value_family: TypeFamily = TypeFamily.ANY
     selected_outer_bindings: set[tuple[str, str]] = field(default_factory=set)
     blocked_outer_bindings: set[tuple[str, str]] = field(default_factory=set)
 
@@ -490,23 +528,11 @@ class _CteFrame:
 @dataclass(frozen=True, slots=True)
 class _QueryResult:
     columns: tuple[GrammarColumn, ...]
-    has_star: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class _SetSignature:
     columns: tuple[GrammarColumn, ...]
-    source_table: GrammarTable | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _RowSignature:
-    lhs: tuple[_ColumnBinding, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class _MembershipSignature:
-    lhs: _ColumnBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -519,8 +545,6 @@ class _GenerationSnapshot:
     pending_cte: _PendingCte | None
     last_query_result: _QueryResult | None
     set_signatures: list[_SetSignature]
-    row_signatures: list[_RowSignature]
-    membership_signatures: list[_MembershipSignature]
     cte_frames: list[_CteFrame]
 
 
@@ -536,12 +560,9 @@ def _clone_query_scope(scope: _QueryScope | None) -> _QueryScope | None:
         projection_columns=list(scope.projection_columns),
         output_columns=list(scope.output_columns),
         prepared_relation=scope.prepared_relation,
-        named_window_enabled=scope.named_window_enabled,
-        projection_has_star=scope.projection_has_star,
         group_column=scope.group_column,
         group_columns=list(scope.group_columns),
         last_value_family=scope.last_value_family,
-        window_value_family=scope.window_value_family,
         selected_outer_bindings=set(scope.selected_outer_bindings),
         blocked_outer_bindings=set(scope.blocked_outer_bindings),
     )
@@ -572,8 +593,6 @@ class _GenerationContext:
     pending_cte: _PendingCte | None = None
     last_query_result: _QueryResult | None = None
     set_signatures: list[_SetSignature] = field(default_factory=list)
-    row_signatures: list[_RowSignature] = field(default_factory=list)
-    membership_signatures: list[_MembershipSignature] = field(default_factory=list)
     cte_frames: list[_CteFrame] = field(default_factory=list)
 
     @property
@@ -585,9 +604,7 @@ class _GenerationContext:
     def snapshot(self) -> _GenerationSnapshot:
         return _GenerationSnapshot(
             scopes=[
-                cloned
-                for scope in self.scopes
-                if (cloned := _clone_query_scope(scope)) is not None
+                cloned for scope in self.scopes if (cloned := _clone_query_scope(scope)) is not None
             ],
             trace=list(self.trace),
             relation_alias_counter=self.relation_alias_counter,
@@ -596,16 +613,12 @@ class _GenerationContext:
             pending_cte=_clone_pending_cte(self.pending_cte),
             last_query_result=self.last_query_result,
             set_signatures=list(self.set_signatures),
-            row_signatures=list(self.row_signatures),
-            membership_signatures=list(self.membership_signatures),
             cte_frames=_clone_cte_frames(self.cte_frames),
         )
 
     def restore(self, snapshot: _GenerationSnapshot) -> None:
         self.scopes = [
-            cloned
-            for scope in snapshot.scopes
-            if (cloned := _clone_query_scope(scope)) is not None
+            cloned for scope in snapshot.scopes if (cloned := _clone_query_scope(scope)) is not None
         ]
         self.trace = list(snapshot.trace)
         self.relation_alias_counter = snapshot.relation_alias_counter
@@ -614,8 +627,6 @@ class _GenerationContext:
         self.pending_cte = _clone_pending_cte(snapshot.pending_cte)
         self.last_query_result = snapshot.last_query_result
         self.set_signatures = list(snapshot.set_signatures)
-        self.row_signatures = list(snapshot.row_signatures)
-        self.membership_signatures = list(snapshot.membership_signatures)
         self.cte_frames = _clone_cte_frames(snapshot.cte_frames)
 
 
@@ -623,85 +634,11 @@ def _quote_identifier(value: str) -> str:
     return "`" + value.replace("`", "``") + "`"
 
 
-_FUNCTION_CALL_TOKENS = frozenset(
-    {
-        "ABS",
-        "ASCII",
-        "AVG",
-        "BIT_AND",
-        "BIT_COUNT",
-        "BIT_OR",
-        "BIT_XOR",
-        "CAST",
-        "CEIL",
-        "CHAR_LENGTH",
-        "COALESCE",
-        "CONCAT",
-        "CONVERT",
-        "COUNT",
-        "CUME_DIST",
-        "DATEDIFF",
-        "DATE_ADD",
-        "DATE_SUB",
-        "DENSE_RANK",
-        "FIRST_VALUE",
-        "FLOOR",
-        "GREATEST",
-        "GROUPING",
-        "GROUP_CONCAT",
-        "HEX",
-        "IF",
-        "IFNULL",
-        "INET_ATON",
-        "JSON_EXTRACT",
-        "JSON_ARRAY",
-        "JSON_ARRAYAGG",
-        "JSON_OBJECT",
-        "JSON_OBJECTAGG",
-        "JSON_OVERLAPS",
-        "JSON_SCHEMA_VALID",
-        "JSON_TABLE",
-        "JSON_TYPE",
-        "JSON_UNQUOTE",
-        "JSON_VALUE",
-        "LAG",
-        "LAST_VALUE",
-        "LEAD",
-        "LEAST",
-        "LOWER",
-        "MATCH",
-        "MAX",
-        "MD5",
-        "MIN",
-        "MONTH",
-        "NTH_VALUE",
-        "NTILE",
-        "NULLIF",
-        "OCTET_LENGTH",
-        "PERCENT_RANK",
-        "RANK",
-        "REGEXP_LIKE",
-        "REVERSE",
-        "ROW",
-        "ROW_NUMBER",
-        "SHA2",
-        "SIGN",
-        "SQRT",
-        "ST_ASBINARY",
-        "ST_ASTEXT",
-        "ST_GEOMFROMTEXT",
-        "ST_ISVALID",
-        "STDDEV_POP",
-        "STDDEV_SAMP",
-        "SUM",
-        "TIMESTAMPADD",
-        "TIMESTAMPDIFF",
-        "VAR_POP",
-        "VAR_SAMP",
-        "YEAR",
-    }
-) | frozenset(signature.sql_name for signature in DETERMINISTIC_FUNCTION_SIGNATURES)
-
+_FUNCTION_CALL_TOKENS = (
+    PQ_SCALAR_FUNCTIONS
+    | PQ_AGGREGATES
+    | frozenset({"CHAR", "VARCHAR", "DECIMAL", "FLOAT", "DOUBLE", "TIME", "DATETIME"})
+)
 
 _FUNCTION_ARGUMENT_SQL: Mapping[FunctionArgument, str] = MappingProxyType(
     {
@@ -768,9 +705,9 @@ _FUNCTION_ARGUMENT_SQL_BY_PROFILE: Mapping[
         FunctionValueProfile.SPECIAL: MappingProxyType(
             {
                 **_FUNCTION_ARGUMENT_SQL,
-                FunctionArgument.TEXT: "CONVERT(X'6100275C00' USING utf8mb4)",
-                FunctionArgument.TEXT_ALT: "CONVERT(X'CEB1CEB2' USING utf8mb4)",
-                FunctionArgument.SQL_TEXT: "CONVERT(X'53454C4543542030' USING utf8mb4)",
+                FunctionArgument.TEXT: "CAST(X'6100275C00' AS CHAR CHARACTER SET utf8mb4)",
+                FunctionArgument.TEXT_ALT: "CAST(X'CEB1CEB2' AS CHAR CHARACTER SET utf8mb4)",
+                FunctionArgument.SQL_TEXT: "CAST(X'53454C4543542030' AS CHAR CHARACTER SET utf8mb4)",
                 FunctionArgument.SEPARATOR: "'|'",
                 FunctionArgument.DATE: "'9999-12-31'",
                 FunctionArgument.DATETIME: "'9999-12-31 23:59:59.999999'",
@@ -850,6 +787,7 @@ class GrammarQueryGenerator:
         self.grammar = grammar or SelectGrammar.default()
         self.config = config or GrammarQueryConfig()
         self.validator = validator or ReadOnlyValidator()
+        self.pq_validator = PqEligibilityValidator()
 
     def generate(
         self,
@@ -866,6 +804,28 @@ class GrammarQueryGenerator:
         )
         if not isinstance(normalized, GrammarSchema):
             raise TypeError("schema must be GrammarSchema or SchemaManifest")
+        source_schema = normalized
+        tables = tuple(
+            GrammarTable(
+                table.name,
+                tuple(column for column in table.columns if column.pq_supported),
+                table.indexes if all(column.pq_supported for column in table.columns) else (),
+                table.partitions,
+                engine=table.engine,
+                temporary=table.temporary,
+            )
+            for table in normalized.tables
+            if table.engine.casefold() == "innodb"
+            and not table.temporary
+            and any(column.pq_supported for column in table.columns)
+            and not any(column.mysql_type.upper().startswith("VECTOR") for column in table.columns)
+            and "." not in table.name
+        )
+        if not tables:
+            raise CandidateRejected(
+                "PQ generation requires an eligible InnoDB base table and column"
+            )
+        normalized = GrammarSchema(tables)
         if not isinstance(excluded_families, frozenset) or any(
             family not in {"json", "fulltext", "spatial"} for family in excluded_families
         ):
@@ -888,7 +848,138 @@ class GrammarQueryGenerator:
                 "candidate failed the read-only safety gate",
                 candidate=candidate,
             ) from error
+        try:
+            self.pq_validator.validate_text(sql)
+            self._validate_explicit_schema_references(sql, source_schema)
+        except PqIneligible as error:
+            raise CandidateRejected(str(error), candidate=candidate) from error
         return candidate
+
+    @staticmethod
+    def _validate_explicit_schema_references(sql: str, schema: GrammarSchema) -> None:
+        from select_fuzz.generation.query_safety import _masked_sql
+
+        masked = _masked_sql(sql)
+        identifiers = {
+            match.group().casefold()
+            for match in re.finditer(r"\b[A-Za-z_][A-Za-z0-9_]*\b", masked)
+            if sql[match.end() : match.end() + 1] != "'"
+        }
+        identifiers.update(
+            match.group()[1:-1].replace("``", "`").casefold()
+            for match in re.finditer(r"`(?:``|[^`])+`", sql)
+            if masked[match.start()] == "0"
+        )
+        unsupported = {
+            column.name.casefold()
+            for table in schema.tables
+            for column in table.columns
+            if not column.pq_supported
+        }
+        if identifiers & unsupported:
+            raise PqIneligible("PQ query references an unsupported or generated column")
+        if unsupported and re.search(
+            r"(?:\bSELECT\s+(?:(?:ALL|DISTINCT)\s+)?|\.|,)\s*\*", masked, re.I
+        ):
+            raise PqIneligible("PQ wildcard projection could expose unsupported columns")
+        for table in schema.tables:
+            if table.name.casefold() not in identifiers:
+                continue
+            if (
+                table.temporary
+                or table.engine.casefold() != "innodb"
+                or any(column.mysql_type.upper().startswith("VECTOR") for column in table.columns)
+            ):
+                raise PqIneligible("PQ query references an ineligible table")
+        GrammarQueryGenerator._validate_table_references(sql, masked, schema)
+
+    @staticmethod
+    def _validate_table_references(sql: str, masked: str, schema: GrammarSchema) -> None:
+        # Keep quoted identifiers distinct from SQL words while parsing FROM
+        # lists. Strings and comments are already masked by the read-only lexer.
+        tokens: list[tuple[str, str]] = []
+        for match in re.finditer(r"[A-Za-z_][A-Za-z0-9_]*|\d+|\S", masked):
+            value = match.group()
+            if sql[match.start()] == "`":
+                quoted = re.match(r"`(?:``|[^`])+`", sql[match.start() :])
+                if quoted is None:  # pragma: no cover - read-only lexer checks quotes
+                    raise PqIneligible("PQ table identifier is malformed")
+                tokens.append((quoted.group()[1:-1].replace("``", "`"), ""))
+            else:
+                tokens.append((value, value.upper() if value[0].isalpha() else ""))
+        ctes: set[str] = set()
+        for index, (value, word) in enumerate(tokens[:-2]):
+            if word != "WITH" and value != ",":
+                continue
+            name = tokens[index + 1][0]
+            cursor = index + 2
+            if tokens[cursor][0] == "(":
+                nesting = 1
+                cursor += 1
+                while cursor < len(tokens) and nesting:
+                    nesting += (tokens[cursor][0] == "(") - (tokens[cursor][0] == ")")
+                    cursor += 1
+            if (
+                cursor + 1 < len(tokens)
+                and tokens[cursor][1] == "AS"
+                and tokens[cursor + 1][0] == "("
+            ):
+                ctes.add(name.casefold())
+        tables = {table.name.casefold(): table for table in schema.tables}
+        states = [{"query": False, "from": False, "expect": False}]
+        base_references = 0
+        for index, (value, word) in enumerate(tokens):
+            state = states[-1]
+            index_hint_scope = index > 0 and tokens[index - 1][1] == "FOR"
+            if value == "(":
+                relation_group = state["expect"]
+                state["expect"] = False
+                states.append({"query": False, "from": relation_group, "expect": relation_group})
+                continue
+            if value == ")":
+                states.pop()
+                continue
+            if word == "SELECT":
+                state.update(query=True, **{"from": False, "expect": False})
+                continue
+            if (word == "FROM" and state["query"]) or (
+                word in {"JOIN", "STRAIGHT_JOIN"} and state["from"] and not index_hint_scope
+            ):
+                state.update(**{"from": True, "expect": True})
+                continue
+            if (
+                word in {"WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "UNION"}
+                and not index_hint_scope
+            ):
+                state.update(**{"from": False, "expect": False})
+            if value == "," and state["from"]:
+                state["expect"] = True
+                continue
+            if not state["expect"]:
+                continue
+            state["expect"] = False
+            name = value.casefold()
+            if name in ctes:
+                continue
+            table = tables.get(name)
+            if table is None:
+                raise PqIneligible(f"PQ query references a table outside the schema: {value}")
+            base_references += 1
+            following = tokens[index + 1 :]
+            if following and following[0][0] == ".":
+                raise PqIneligible("PQ table references must use the bound schema")
+            partition = bool(following and following[0][1] == "PARTITION")
+            if table.partitions and not partition:
+                raise PqIneligible("PQ partitioned table requires an explicit single partition")
+            if partition and (
+                len(following) < 4
+                or following[1][0] != "("
+                or following[2][0] not in table.partitions
+                or following[3][0] != ")"
+            ):
+                raise PqIneligible("PQ partition selection is outside the table metadata")
+        if base_references == 0:
+            raise PqIneligible("PQ query has no bound base table")
 
     def _expand(
         self,
@@ -1009,9 +1100,6 @@ class GrammarQueryGenerator:
         if symbol == "_scope_begin_isolated":
             context.scopes.append(_QueryScope())
             return ""
-        if symbol == "_scope_enable_named_window":
-            context.scope.named_window_enabled = True
-            return ""
         if symbol == "_scope_end":
             completed = context.scope
             context.scopes.pop()
@@ -1024,7 +1112,6 @@ class GrammarQueryGenerator:
             context.last_completed_scope = completed
             context.last_query_result = _QueryResult(
                 tuple(completed.output_columns),
-                has_star=completed.projection_has_star,
             )
             return ""
         if symbol == "_prepare_relation":
@@ -1097,39 +1184,29 @@ class GrammarQueryGenerator:
                 index_hint=True,
             )
         if symbol == "_derived_relation":
-            return self._derived_relation(context, depth=depth, lateral=False)
+            return self._derived_relation(
+                context,
+                depth=depth,
+            )
         if symbol == "_derived_relation_implicit_alias":
             return self._derived_relation(
                 context,
                 depth=depth,
-                lateral=False,
                 explicit_as=False,
             )
         if symbol == "_derived_relation_columns":
             return self._derived_relation(
                 context,
                 depth=depth,
-                lateral=False,
                 explicit_columns=True,
             )
         if symbol == "_derived_query_expression_relation":
             return self._derived_relation(
                 context,
                 depth=depth,
-                lateral=False,
                 explicit_columns=True,
                 full_query_expression=True,
             )
-        if symbol == "_lateral_derived_relation":
-            return self._derived_relation(context, depth=depth, lateral=True)
-        if symbol == "_json_table_relation":
-            return self._json_table_relation(context)
-        if symbol == "_json_table_literal_relation":
-            return self._json_table_literal_relation(context, shape="value")
-        if symbol == "_json_table_exists_relation":
-            return self._json_table_literal_relation(context, shape="exists")
-        if symbol == "_json_table_nested_relation":
-            return self._json_table_literal_relation(context, shape="nested")
         if symbol == "_common_column":
             return self._common_column(context)
         if symbol == "_common_columns":
@@ -1148,48 +1225,6 @@ class GrammarQueryGenerator:
             return self._column(context, TypeFamily.TEMPORAL)
         if symbol == "_strict_temporal_column":
             return self._strict_column(context, TypeFamily.TEMPORAL)
-        if symbol == "_binary_column":
-            return self._column(context, TypeFamily.BINARY)
-        if symbol == "_strict_binary_column":
-            return self._strict_column(context, TypeFamily.BINARY)
-        if symbol == "_json_column":
-            return self._column(context, TypeFamily.JSON)
-        if symbol == "_strict_json_column":
-            return self._strict_column(context, TypeFamily.JSON)
-        if symbol == "_spatial_column":
-            return self._column(context, TypeFamily.SPATIAL)
-        if symbol == "_strict_spatial_column":
-            return self._strict_column(context, TypeFamily.SPATIAL)
-        if symbol == "_table_alias_star":
-            if not context.scope.table_aliases:
-                raise CandidateRejected("qualified star requires a table alias")
-            alias = context.rng.choice(context.scope.table_aliases)
-            if any(
-                binding.relation_alias == alias
-                and binding.column.family.value in context.excluded_families
-                for binding in context.scope.local_columns
-            ):
-                raise CandidateRejected("qualified star would expose an excluded type family")
-            context.scope.output_columns.extend(
-                binding.column
-                for binding in context.scope.local_columns
-                if binding.relation_alias == alias
-            )
-            context.scope.projection_has_star = True
-            context.scope.last_value_family = TypeFamily.ANY
-            return f"{_quote_identifier(alias)}.*"
-        if symbol == "_bare_star":
-            if any(
-                binding.column.family.value in context.excluded_families
-                for binding in context.scope.local_columns
-            ):
-                raise CandidateRejected("star would expose an excluded type family")
-            context.scope.output_columns.extend(
-                binding.column for binding in context.scope.local_columns
-            )
-            context.scope.projection_has_star = True
-            context.scope.last_value_family = TypeFamily.ANY
-            return "*"
         if symbol == "_projection_alias":
             alias = f"q{len(context.scope.projection_columns) + 1}"
             column = GrammarColumn(
@@ -1200,25 +1235,13 @@ class GrammarQueryGenerator:
             context.scope.output_columns.append(column)
             return _quote_identifier(alias)
         if symbol == "_order_item":
-            if context.scope.projection_has_star:
-                return self._column(context, TypeFamily.ANY)
             if context.scope.projection_columns:
                 return _quote_identifier(context.rng.choice(context.scope.projection_columns).name)
             return self._column(context, TypeFamily.ANY)
         if symbol == "_projection_order_item":
-            if context.scope.projection_has_star:
-                return "1"
             if not context.scope.projection_columns:
                 raise CandidateRejected("projection ORDER BY requires a projected alias")
             return _quote_identifier(context.rng.choice(context.scope.projection_columns).name)
-        if symbol == "_scalar_subquery":
-            sql = _render_tokens(self._expand("scalar_subquery", context, depth=depth))
-            result = context.last_query_result
-            if result is not None and result.columns:
-                context.scope.last_value_family = result.columns[0].family
-            return sql
-        if symbol == "_membership_subquery":
-            return _render_tokens(self._expand("membership_subquery", context, depth=depth))
         if symbol == "_prepare_cte":
             self._prepare_cte(context, depth=depth)
             return ""
@@ -1248,23 +1271,6 @@ class GrammarQueryGenerator:
                 raise CandidateRejected("no CTE frame is active")
             context.cte_frames.pop()
             return ""
-        if symbol == "_prepare_recursive_cte":
-            context.cte_counter += 1
-            context.pending_cte = _PendingCte(
-                f"cte{context.cte_counter}",
-                (GrammarColumn("n", "BIGINT"),),
-            )
-            return ""
-        if symbol == "_prepare_recursive_pair_cte":
-            context.cte_counter += 1
-            context.pending_cte = _PendingCte(
-                f"cte{context.cte_counter}",
-                (
-                    GrammarColumn("n", "BIGINT"),
-                    GrammarColumn("total", "BIGINT"),
-                ),
-            )
-            return ""
         if symbol == "_emit_cte_name":
             if context.pending_cte is None:
                 raise CandidateRejected("no CTE name is pending")
@@ -1290,70 +1296,16 @@ class GrammarQueryGenerator:
         if symbol == "_clear_cte":
             context.pending_cte = None
             return ""
-        if symbol == "_bare_table":
-            table = context.rng.choice(context.schema.tables)
-            return _quote_identifier(table.name)
-        if symbol == "_query_table":
-            tables = [
-                table
-                for table in context.schema.tables
-                if all(
-                    column.family.value not in context.excluded_families for column in table.columns
-                )
-            ]
-            if not tables:
-                raise CandidateRejected("TABLE would expose an excluded type family")
-            table = context.rng.choice(tables)
-            context.last_query_result = _QueryResult(tuple(table.columns))
-            return _quote_identifier(table.name)
         if symbol.startswith("_prepare_") and symbol.endswith("_set_signature"):
             self._prepare_set_signature(context, symbol)
             return ""
-        if symbol == "_set_table_operand":
-            return self._set_table_operand(context)
         if symbol == "_set_select_operand":
             return self._set_select_operand(context)
         if symbol == "_set_select_topn_operand":
             return f"({self._set_select_operand(context)} ORDER BY 1 LIMIT 2)"
-        if symbol == "_set_values_operand":
-            return self._set_values_operand(context)
-        if symbol == "_set_scalar_operand":
-            return self._set_scalar_operand(context)
-        if symbol == "_values_row":
-            return self._values_row(context)
         if symbol == "_clear_set_signature":
             self._clear_set_signature(context)
             return ""
-        if symbol == "_prepare_row_signature":
-            self._prepare_row_signature(context)
-            return ""
-        if symbol == "_row_lhs":
-            return self._row_lhs(context)
-        if symbol == "_row_rhs_projection":
-            return self._row_rhs_projection(context)
-        if symbol == "_clear_row_signature":
-            if not context.row_signatures:
-                raise CandidateRejected("no row signature is active")
-            context.row_signatures.pop()
-            return ""
-        if symbol == "_prepare_membership_signature":
-            context.membership_signatures.append(
-                _MembershipSignature(self._select_column_binding(context, TypeFamily.ANY))
-            )
-            return ""
-        if symbol == "_membership_lhs":
-            return self._active_membership_signature(context).lhs.render()
-        if symbol == "_membership_rhs_projection":
-            return self._membership_rhs_projection(context)
-        if symbol == "_clear_membership_signature":
-            if not context.membership_signatures:
-                raise CandidateRejected("no membership signature is active")
-            context.membership_signatures.pop()
-            return ""
-        if symbol == "_standalone_int":
-            return str(context.rng.choice((0, 1, -1, 7, 42)))
-        if symbol == "_recursive_limit":
-            return str(context.rng.choice((2, 3, 5, 10)))
         if symbol == "_optimizer_hint":
             return self._optimizer_hint(context, kind="random")
         if symbol == "_optimizer_hint_merge":
@@ -1395,18 +1347,11 @@ class GrammarQueryGenerator:
             result = context.last_query_result
             if result is None or not result.columns:
                 raise CandidateRejected("query expression has no output columns")
-            if result.has_star:
-                return "1"
             return str(context.rng.randint(1, len(result.columns)))
         if symbol == "_query_output_item":
             result = context.last_query_result
             if result is None or not result.columns:
                 raise CandidateRejected("query expression has no output columns")
-            # An unqualified star over NATURAL/USING joins coalesces common
-            # columns.  The minimal metadata input has no relation-output AST,
-            # so ordinal 1 is the only universally valid outer reference.
-            if result.has_star:
-                return "1"
             aliases = [
                 column.name
                 for column in result.columns
@@ -1416,7 +1361,7 @@ class GrammarQueryGenerator:
                 return _quote_identifier(context.rng.choice(aliases))
             return str(context.rng.randint(1, len(result.columns)))
         if symbol == "_limit":
-            return str(context.rng.choice((0, 1, 2, 5, 10, 100)))
+            return str(context.rng.choice((1, 2, 5, 10, 100)))
         if symbol == "_offset":
             return str(context.rng.choice((0, 1, 2, 5, 10)))
         if symbol == "_text":
@@ -1425,9 +1370,6 @@ class GrammarQueryGenerator:
         if symbol == "_text_boundary":
             context.scope.last_value_family = TypeFamily.TEXT
             return context.rng.choice(("''", "' '", "'\\0'", "'Alpha beta'"))
-        if symbol == "_regexp_pattern":
-            context.scope.last_value_family = TypeFamily.TEXT
-            return context.rng.choice(("'a'", "'^$'", "'.*'", "'[[:digit:]]+'"))
         if symbol == "_like_escape_pattern":
             context.scope.last_value_family = TypeFamily.TEXT
             return context.rng.choice(("'a!_%'", "'!%%'", "'abc'"))
@@ -1445,108 +1387,29 @@ class GrammarQueryGenerator:
                 (
                     "CAST('1000-01-01 00:00:00.000000' AS DATETIME(6))",
                     "CAST('9999-12-31 23:59:59.999999' AS DATETIME(6))",
-                    "TIMESTAMP('1970-01-01 00:00:01.000000')",
-                    "TIMESTAMP('2038-01-19 03:14:07.499999')",
+                    "CAST('1970-01-01 00:00:01.000000' AS DATETIME(6))",
+                    "CAST('2038-01-19 03:14:07.499999' AS DATETIME(6))",
                 )
             )
-        if symbol == "_binary_literal":
-            context.scope.last_value_family = TypeFamily.BINARY
-            return context.rng.choice(("X'00'", "X'616263'", "X'FF'"))
         if symbol == "_bit_literal":
             context.scope.last_value_family = TypeFamily.NUMERIC
             return context.rng.choice(("b'0'", "b'1'", "b'1010'"))
-        if symbol == "_json_literal":
-            context.scope.last_value_family = TypeFamily.JSON
-            return "CAST('{\"k\":1}' AS JSON)"
         if symbol == "_cast_type":
             cast_types = [
                 ("SIGNED", TypeFamily.NUMERIC),
                 ("UNSIGNED", TypeFamily.NUMERIC),
                 ("DECIMAL(20,6)", TypeFamily.NUMERIC),
                 ("CHAR(64)", TypeFamily.TEXT),
-                ("BINARY(64)", TypeFamily.BINARY),
                 ("DATE", TypeFamily.TEMPORAL),
                 ("DATETIME", TypeFamily.TEMPORAL),
             ]
             cast_type, family = context.rng.choice(cast_types)
             context.scope.last_value_family = family
             return cast_type
-        if symbol == "_window_name":
-            if not context.scope.named_window_enabled:
-                raise CandidateRejected("named window must be registered before it is referenced")
-            return _quote_identifier("w1")
-        if symbol == "_window_name2":
-            if not context.scope.named_window_enabled:
-                raise CandidateRejected("named window must be registered before it is referenced")
-            return _quote_identifier("w2")
-        if symbol == "_window_partition_list":
-            bindings = self._window_order_bindings(context)
-            if len(bindings) < 2:
-                raise CandidateRejected("multi-expression window partition requires two columns")
-            width = context.rng.randint(2, min(3, len(bindings)))
-            return ", ".join(binding.render() for binding in context.rng.sample(bindings, width))
-        if symbol == "_window_total_order":
-            bindings = self._window_order_bindings(context)
-            if not bindings:
-                raise CandidateRejected("window ordering requires a sortable column")
-            return ", ".join(binding.render() for binding in bindings)
-        if symbol == "_window_numeric_order":
-            return self._strict_column(context, TypeFamily.NUMERIC)
-        if symbol == "_window_temporal_order":
-            return self._strict_column(context, TypeFamily.TEMPORAL)
-        if symbol == "_deterministic_group_concat":
-            binding = self._strict_binding(context, TypeFamily.TEXT)
-            expression = f"LEFT(HEX({binding.render()}), 1)"
-            context.scope.last_value_family = TypeFamily.TEXT
-            return f"GROUP_CONCAT(DISTINCT {expression} ORDER BY {expression} SEPARATOR ',')"
-        if symbol == "_json_object_aggregate":
-            binding = self._strict_binding(context, TypeFamily.TEXT)
-            expression = f"COALESCE({binding.render()}, '__null__')"
-            context.scope.last_value_family = TypeFamily.JSON
-            return f"JSON_OBJECTAGG({expression}, {expression})"
-        if symbol == "_right_lateral_join_relation":
-            right = self._bind_table(context)
-            left = self._derived_relation(context, depth=depth, lateral=True)
-            predicate = _render_tokens(self._expand("predicate", context, depth=depth))
-            join = context.rng.choice(("RIGHT JOIN", "RIGHT OUTER JOIN"))
-            return f"{left} {join} {right} ON {predicate}"
-        if symbol == "_natural_join_relation":
-            left = self._bind_table(context)
-            right = self._bind_table(context)
-            left_alias, right_alias = context.scope.table_aliases[-2:]
-            left_columns = {
-                binding.column.name: binding.column.family
-                for binding in context.scope.local_columns
-                if binding.relation_alias == left_alias
-            }
-            right_columns = {
-                binding.column.name: binding.column.family
-                for binding in context.scope.local_columns
-                if binding.relation_alias == right_alias
-            }
-            if any(
-                left_columns[name].value in context.excluded_families
-                or right_columns[name].value in context.excluded_families
-                for name in left_columns.keys() & right_columns.keys()
-            ):
-                raise CandidateRejected("NATURAL JOIN would use an excluded type family")
-            join = _render_tokens(self._expand("natural_join_type", context, depth=depth))
-            return f"{left} {join} {right}"
-        if symbol == "_window_value_column":
-            selected = self._select_column_binding(context, TypeFamily.ANY)
-            context.scope.window_value_family = selected.column.family
-            context.scope.last_value_family = selected.column.family
-            return selected.render()
-        if symbol == "_result_window_value":
-            context.scope.last_value_family = context.scope.window_value_family
-            return ""
         result_family = {
             "_result_numeric": TypeFamily.NUMERIC,
             "_result_text": TypeFamily.TEXT,
-            "_result_binary": TypeFamily.BINARY,
             "_result_temporal": TypeFamily.TEMPORAL,
-            "_result_json": TypeFamily.JSON,
-            "_result_spatial": TypeFamily.SPATIAL,
         }.get(symbol)
         if result_family is not None:
             context.scope.last_value_family = result_family
@@ -1559,7 +1422,7 @@ class GrammarQueryGenerator:
                 signature,
                 null_position=null_position,
             )
-        raise GrammarError(f"unknown semantic symbol: {symbol}")
+        raise CandidateRejected(f"PQ does not admit semantic symbol: {symbol}")
 
     @staticmethod
     def _family_type(family: TypeFamily) -> str:
@@ -1572,17 +1435,6 @@ class GrammarQueryGenerator:
             TypeFamily.SPATIAL: "GEOMETRY",
             TypeFamily.ANY: "VARCHAR(64)",
         }[family]
-
-    def _window_order_bindings(
-        self,
-        context: _GenerationContext,
-    ) -> list[_ColumnBinding]:
-        bindings = {
-            binding.identity: binding
-            for binding in self._visible_column_pool(context)
-            if binding.column.family is not TypeFamily.SPATIAL
-        }
-        return [bindings[identity] for identity in sorted(bindings)]
 
     @staticmethod
     def _render_registered_function(
@@ -1618,48 +1470,17 @@ class GrammarQueryGenerator:
         context.relation_alias_counter += 1
         return f"r{context.relation_alias_counter}"
 
-    @staticmethod
-    def _literal_for_family(
-        family: TypeFamily,
-        *,
-        excluded_families: frozenset[str] = frozenset(),
-    ) -> str:
-        if family.value in excluded_families:
-            return "NULL"
-        return {
-            TypeFamily.NUMERIC: "7",
-            TypeFamily.TEXT: "'Alpha beta'",
-            TypeFamily.TEMPORAL: "'2024-02-29'",
-            TypeFamily.BINARY: "X'616263'",
-            TypeFamily.JSON: "CAST('{\"k\":1}' AS JSON)",
-            TypeFamily.SPATIAL: "ST_GeomFromText('POINT(0 0)')",
-            TypeFamily.ANY: "NULL",
-        }[family]
-
     def _prepare_set_signature(
         self,
         context: _GenerationContext,
         symbol: str,
     ) -> None:
-        if symbol == "_prepare_table_set_signature":
-            tables = [
-                table
-                for table in context.schema.tables
-                if all(
-                    column.family.value not in context.excluded_families for column in table.columns
-                )
-            ]
-            if not tables:
-                raise CandidateRejected("table set operand would expose an excluded type family")
-            table = context.rng.choice(tables)
-            context.set_signatures.append(_SetSignature(tuple(table.columns), source_table=table))
-            return
         match = re.fullmatch(
-            r"_prepare_(numeric|text|temporal|binary)_([12])_set_signature",
+            r"_prepare_(numeric|text|temporal)_([12])_set_signature",
             symbol,
         )
         if match is None:
-            raise GrammarError(f"unknown set signature symbol: {symbol}")
+            raise CandidateRejected(f"PQ does not admit set signature: {symbol}")
         family = TypeFamily(match.group(1))
         arity = int(match.group(2))
         context.set_signatures.append(
@@ -1679,12 +1500,6 @@ class GrammarQueryGenerator:
         if not context.set_signatures:
             raise CandidateRejected("no set signature is active")
         return context.set_signatures[-1]
-
-    def _set_table_operand(self, context: _GenerationContext) -> str:
-        signature = self._active_set_signature(context)
-        if signature.source_table is None:
-            raise CandidateRejected("TABLE operand requires a table set signature")
-        return f"TABLE {_quote_identifier(signature.source_table.name)}"
 
     def _signature_bindings(
         self,
@@ -1723,86 +1538,15 @@ class GrammarQueryGenerator:
             for index, binding in enumerate(bindings, start=1)
         )
         return (
-            f"SELECT {projection} FROM {_quote_identifier(table.name)} "
+            f"SELECT {projection} FROM {_quote_identifier(table.name)}{self._partition_clause(table, context)} "
             f"AS {_quote_identifier(alias)}"
         )
-
-    def _values_row(self, context: _GenerationContext) -> str:
-        signature = self._active_set_signature(context)
-        values = ", ".join(
-            self._literal_for_family(
-                column.family,
-                excluded_families=context.excluded_families,
-            )
-            for column in signature.columns
-        )
-        return f"ROW({values})"
-
-    def _set_values_operand(self, context: _GenerationContext) -> str:
-        return f"VALUES {self._values_row(context)}"
-
-    def _set_scalar_operand(self, context: _GenerationContext) -> str:
-        signature = self._active_set_signature(context)
-        projection = ", ".join(
-            f"{self._literal_for_family(column.family, excluded_families=context.excluded_families)} "
-            f"AS {_quote_identifier(f'q{index}')}"
-            for index, column in enumerate(signature.columns, start=1)
-        )
-        return f"SELECT {projection}"
 
     @staticmethod
     def _clear_set_signature(context: _GenerationContext) -> None:
         signature = GrammarQueryGenerator._active_set_signature(context)
         context.set_signatures.pop()
         context.last_query_result = _QueryResult(signature.columns)
-
-    def _prepare_row_signature(self, context: _GenerationContext) -> None:
-        lhs = tuple(self._select_column_binding(context, TypeFamily.ANY) for _ in range(2))
-        context.row_signatures.append(_RowSignature(lhs))
-
-    @staticmethod
-    def _active_row_signature(context: _GenerationContext) -> _RowSignature:
-        if not context.row_signatures:
-            raise CandidateRejected("no row signature is active")
-        return context.row_signatures[-1]
-
-    def _row_lhs(self, context: _GenerationContext) -> str:
-        signature = self._active_row_signature(context)
-        return "ROW(" + ", ".join(binding.render() for binding in signature.lhs) + ")"
-
-    def _row_rhs_projection(self, context: _GenerationContext) -> str:
-        signature = self._active_row_signature(context)
-        rendered: list[str] = []
-        for expected in signature.lhs:
-            binding = self._select_column_binding(context, expected.column.family)
-            context.scope.last_value_family = binding.column.family
-            alias = f"q{len(context.scope.projection_columns) + 1}"
-            column = GrammarColumn(alias, self._family_type(binding.column.family))
-            context.scope.projection_columns.append(column)
-            context.scope.output_columns.append(column)
-            rendered.append(f"{binding.render()} AS {_quote_identifier(alias)}")
-        return ", ".join(rendered)
-
-    @staticmethod
-    def _active_membership_signature(
-        context: _GenerationContext,
-    ) -> _MembershipSignature:
-        if not context.membership_signatures:
-            raise CandidateRejected("no membership signature is active")
-        return context.membership_signatures[-1]
-
-    def _membership_rhs_projection(self, context: _GenerationContext) -> str:
-        signature = self._active_membership_signature(context)
-        binding = self._select_column_binding(
-            context,
-            signature.lhs.column.family,
-        )
-        context.scope.last_value_family = binding.column.family
-        alias = f"q{len(context.scope.projection_columns) + 1}"
-        column = GrammarColumn(alias, self._family_type(binding.column.family))
-        context.scope.projection_columns.append(column)
-        context.scope.output_columns.append(column)
-        return f"{binding.render()} AS {_quote_identifier(alias)}"
 
     def _bind_table(
         self,
@@ -1829,13 +1573,7 @@ class GrammarQueryGenerator:
             _ColumnBinding(alias, column) for column in table.columns
         )
         context.scope.table_indexes[alias] = tuple(table.indexes)
-        partition_clause = ""
-        if partitioned:
-            width = context.rng.randint(1, min(2, len(table.partitions)))
-            selected = context.rng.sample(list(table.partitions), width)
-            partition_clause = (
-                " PARTITION (" + ", ".join(_quote_identifier(name) for name in selected) + ")"
-            )
+        partition_clause = self._partition_clause(table, context)
         alias_clause = " AS " if explicit_as else " "
         hint_clause = ""
         if index_hint:
@@ -1852,6 +1590,13 @@ class GrammarQueryGenerator:
             f"{_quote_identifier(table.name)}{partition_clause}"
             f"{alias_clause}{_quote_identifier(alias)}{hint_clause}"
         )
+
+    @staticmethod
+    def _partition_clause(table: GrammarTable, context: _GenerationContext) -> str:
+        if not table.partitions:
+            return ""
+        name = context.rng.choice(table.partitions)
+        return f" PARTITION ({_quote_identifier(name)})"
 
     def _optimizer_hint(self, context: _GenerationContext, *, kind: str) -> str:
         aliases = context.scope.table_aliases
@@ -1885,10 +1630,7 @@ class GrammarQueryGenerator:
                 "INDEX_SECONDARY": "INDEX",
                 "NO_RANGE_OPTIMIZATION": "NO_RANGE_OPTIMIZATION",
             }[kind]
-            return (
-                f"/*+ {hint_name}({_quote_identifier(alias)} "
-                f"{_quote_identifier(index)}) */"
-            )
+            return f"/*+ {hint_name}({_quote_identifier(alias)} {_quote_identifier(index)}) */"
         if kind == "random":
             index_candidates = [
                 (alias, index)
@@ -1898,7 +1640,9 @@ class GrammarQueryGenerator:
             if index_candidates and context.rng.randrange(3) == 0:
                 return self._optimizer_hint(
                     context,
-                    kind=context.rng.choice(("INDEX_PRIMARY", "INDEX_SECONDARY", "NO_RANGE_OPTIMIZATION")),
+                    kind=context.rng.choice(
+                        ("INDEX_PRIMARY", "INDEX_SECONDARY", "NO_RANGE_OPTIMIZATION")
+                    ),
                 )
             if len(aliases) >= 2:
                 return self._optimizer_hint(context, kind="JOIN_ORDER")
@@ -2019,19 +1763,12 @@ class GrammarQueryGenerator:
         context: _GenerationContext,
         *,
         depth: int,
-        lateral: bool,
         explicit_columns: bool = False,
         explicit_as: bool = True,
         full_query_expression: bool = False,
     ) -> str:
         parent_scope_depth = len(context.scopes)
-        production = (
-            "lateral_derived_select"
-            if lateral
-            else "derived_query_expression"
-            if full_query_expression
-            else "derived_select"
-        )
+        production = "derived_query_expression" if full_query_expression else "derived_select"
         context.last_completed_scope = None
         context.last_query_result = None
         sql = _render_tokens(self._expand(production, context, depth=depth))
@@ -2062,64 +1799,8 @@ class GrammarQueryGenerator:
         parent.local_columns.extend(
             _ColumnBinding(alias, column, strict_compatible=False) for column in output_columns
         )
-        prefix = "LATERAL " if lateral else ""
         alias_clause = " AS " if explicit_as else " "
-        return f"{prefix}({sql}){alias_clause}{_quote_identifier(alias)}{column_clause}"
-
-    def _json_table_relation(self, context: _GenerationContext) -> str:
-        json_expression = self._strict_column(context, TypeFamily.JSON)
-        alias = self._next_relation_alias(context)
-        columns = (
-            GrammarColumn("jt_ord", "BIGINT"),
-            GrammarColumn("jt_value", "VARCHAR(128)"),
-        )
-        context.scope.table_aliases.append(alias)
-        context.scope.derived_aliases.append(alias)
-        context.scope.local_columns.extend(_ColumnBinding(alias, column) for column in columns)
-        return (
-            f"JSON_TABLE({json_expression}, '$[*]' COLUMNS ("
-            "`jt_ord` FOR ORDINALITY, `jt_value` VARCHAR(128) PATH '$')) "
-            f"AS {_quote_identifier(alias)}"
-        )
-
-    def _json_table_literal_relation(
-        self,
-        context: _GenerationContext,
-        *,
-        shape: str,
-    ) -> str:
-        alias = self._next_relation_alias(context)
-        columns: tuple[GrammarColumn, ...]
-        if shape == "value":
-            document = "'[1,2,3]'"
-            columns_sql = (
-                "`jt_ord` FOR ORDINALITY, `jt_value` BIGINT PATH '$' NULL ON EMPTY NULL ON ERROR"
-            )
-            columns = (
-                GrammarColumn("jt_ord", "BIGINT"),
-                GrammarColumn("jt_value", "BIGINT"),
-            )
-        elif shape == "exists":
-            document = "'{\"a\":1}'"
-            columns_sql = "`jt_exists` INT EXISTS PATH '$.a'"
-            columns = (GrammarColumn("jt_exists", "INT"),)
-        elif shape == "nested":
-            document = "'[{\"a\":[1,2]}]'"
-            columns_sql = (
-                "`jt_ord` FOR ORDINALITY, NESTED PATH '$.a[*]' COLUMNS (`jt_value` BIGINT PATH '$')"
-            )
-            columns = (
-                GrammarColumn("jt_ord", "BIGINT"),
-                GrammarColumn("jt_value", "BIGINT"),
-            )
-        else:  # pragma: no cover - closed semantic dispatch
-            raise GrammarError(f"unknown JSON_TABLE shape: {shape}")
-        context.scope.table_aliases.append(alias)
-        context.scope.derived_aliases.append(alias)
-        context.scope.local_columns.extend(_ColumnBinding(alias, column) for column in columns)
-        return (
-            f"JSON_TABLE({document}, '$[*]' COLUMNS ({columns_sql})) AS {_quote_identifier(alias)}"
-        )
+        return f"({sql}){alias_clause}{_quote_identifier(alias)}{column_clause}"
 
     def _prepare_cte(self, context: _GenerationContext, *, depth: int) -> None:
         body = _render_tokens(self._expand("derived_select", context, depth=depth))

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields, is_dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
@@ -23,7 +23,10 @@ def _json_value(value: object) -> object:
     if isinstance(value, Path):
         return str(value)
     if is_dataclass(value) and not isinstance(value, type):
-        return _json_value(asdict(value))
+        return {
+            field.name: _json_value(getattr(value, field.name))
+            for field in fields(value)
+        }
     if isinstance(value, Mapping):
         return {str(key): _json_value(child) for key, child in value.items()}
     if isinstance(value, (tuple, list)):

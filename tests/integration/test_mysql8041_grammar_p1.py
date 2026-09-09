@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import time
 
 import mysql.connector
@@ -132,7 +131,7 @@ query:
 relation:
     _derived_query_expression_relation
 derived_query_expression:
-    _prepare_numeric_2_set_signature _set_select_operand UNION ALL _set_values_operand INTERSECT _set_scalar_operand _clear_set_signature
+    _prepare_numeric_2_set_signature _set_select_operand UNION ALL _set_select_operand UNION _set_select_operand _clear_set_signature
 """,
                 19,
             ),
@@ -145,22 +144,11 @@ derived_query_expression:
 query:
     _prepare_query_expression_cte WITH _emit_cte_name _emit_cte_column_list AS ( _emit_cte_body ) _emit_cte_outer _clear_cte
 derived_query_expression:
-    _prepare_numeric_2_set_signature _set_select_operand UNION ALL _set_values_operand _clear_set_signature
+    _prepare_numeric_2_set_signature _set_select_operand UNION ALL _set_select_operand _clear_set_signature
 cte_outer_select:
     _scope_begin_isolated _prepare_cte_relation SELECT _any_column AS _projection_alias FROM _emit_relation _scope_end
 """,
                 23,
-            ),
-        ),
-        (
-            "recursive_pair_cte",
-            _generate(
-                manifest,
-                """
-query:
-    _prepare_recursive_pair_cte WITH RECURSIVE _emit_cte_name ( `n` , `total` ) AS ( SELECT 1 , 1 UNION ALL SELECT `n` + 1 , `total` + `n` FROM _emit_cte_name WHERE `n` < 5 ) SELECT `n` AS `q1` , `total` AS `q2` FROM _emit_cte_name ORDER BY `q1` _clear_cte
-""",
-                29,
             ),
         ),
         (
@@ -169,33 +157,20 @@ query:
                 manifest,
                 """
 query:
-    _scope_begin _prepare_base_relation SELECT _optimizer_hint DISTINCT HIGH_PRIORITY STRAIGHT_JOIN SQL_SMALL_RESULT SQL_BUFFER_RESULT SQL_NO_CACHE SQL_CALC_FOUND_ROWS _any_column AS _projection_alias FROM _emit_relation _scope_end
+    _scope_begin _prepare_base_relation SELECT _optimizer_hint DISTINCT _any_column AS _projection_alias FROM _emit_relation _scope_end
 """,
                 31,
             ),
         ),
         (
-            "cast_convert_interval",
+            "cast_interval",
             _generate(
                 manifest,
                 """
 query:
-    _scope_begin SELECT CAST ( 1 AS FLOAT ) _result_numeric AS _projection_alias , CAST ( 1 AS DOUBLE ) _result_numeric AS _projection_alias , CAST ( 'Alpha beta' AS CHAR ( 64 ) CHARACTER SET utf8mb4 ) _result_text AS _projection_alias , CAST ( '12:34:56.123456' AS TIME ( 6 ) ) _result_temporal AS _projection_alias , CAST ( '2024-02-29 12:34:56.123456' AS DATETIME ( 6 ) ) _result_temporal AS _projection_alias , CAST ( 2024 AS YEAR ) _result_temporal AS _projection_alias , CONVERT ( 'Alpha beta' USING utf8mb4 ) _result_text AS _projection_alias , DATE_ADD ( CAST ( '2024-02-29' AS DATE ) , INTERVAL '1 02:03:04.000005' DAY_MICROSECOND ) _result_temporal AS _projection_alias , DATE_ADD ( CAST ( '2024-02-29' AS DATE ) , INTERVAL '1-2' YEAR_MONTH ) _result_temporal AS _projection_alias _scope_end
+    _scope_begin _prepare_base_relation SELECT CAST ( 1 AS FLOAT ) _result_numeric AS _projection_alias , CAST ( 1 AS DOUBLE ) _result_numeric AS _projection_alias , CAST ( 'Alpha beta' AS CHAR ( 64 ) CHARACTER SET utf8mb4 ) _result_text AS _projection_alias , CAST ( '12:34:56.123456' AS TIME ( 6 ) ) _result_temporal AS _projection_alias , CAST ( '2024-02-29 12:34:56.123456' AS DATETIME ( 6 ) ) _result_temporal AS _projection_alias , CAST ( 2024 AS YEAR ) _result_temporal AS _projection_alias , CAST ( 'Alpha beta' AS CHAR ( 64 ) CHARACTER SET utf8mb4 ) _result_text AS _projection_alias , DATE_ADD ( CAST ( '2024-02-29' AS DATE ) , INTERVAL '1 02:03:04.000005' DAY_MICROSECOND ) _result_temporal AS _projection_alias , DATE_ADD ( CAST ( '2024-02-29' AS DATE ) , INTERVAL '1-2' YEAR_MONTH ) _result_temporal AS _projection_alias FROM _emit_relation _scope_end
 """,
                 37,
-            ),
-        ),
-        (
-            "window_empty_multi_named_and_frames",
-            _generate(
-                manifest,
-                """
-query:
-    _scope_begin _prepare_relation _scope_enable_named_window SELECT RANK ( ) OVER ( ) _result_numeric AS _projection_alias , LAG ( _window_value_column ) OVER _window_name2 _result_window_value AS _projection_alias , SUM ( _strict_numeric_column ) OVER ( ORDER BY _window_numeric_order RANGE BETWEEN 1 PRECEDING AND CURRENT ROW ) _result_numeric AS _projection_alias , COUNT ( * ) OVER ( ORDER BY _window_total_order ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING ) _result_numeric AS _projection_alias FROM _emit_relation WINDOW _window_name AS ( PARTITION BY _window_partition_list ) , _window_name2 AS ( _window_name ORDER BY _window_total_order ) _scope_end
-relation:
-    _table
-""",
-                41,
             ),
         ),
         (
@@ -204,7 +179,7 @@ relation:
                 manifest,
                 """
 query:
-    _scope_begin _prepare_relation SELECT _deterministic_group_concat AS _projection_alias , JSON_ARRAYAGG ( 1 ) _result_json AS _projection_alias , _json_object_aggregate AS _projection_alias FROM _emit_relation _scope_end
+    _scope_begin _prepare_relation SELECT COUNT ( * ) _result_numeric AS _projection_alias , SUM ( _strict_numeric_column ) _result_numeric AS _projection_alias , MAX ( _strict_temporal_column ) _result_temporal AS _projection_alias FROM _emit_relation _scope_end
 relation:
     _table
 """,
@@ -213,34 +188,10 @@ relation:
         ),
     ]
 
-    lateral_grammar = """
-query:
-    _scope_begin _prepare_relation SELECT _any_column AS _projection_alias FROM _emit_relation _scope_end
-relation:
-    _right_lateral_join_relation
-    | _table
-lateral_derived_select:
-    _scope_begin _prepare_relation SELECT _any_column AS _projection_alias FROM _emit_relation _scope_end
-predicate:
-    _any_column IS NOT NULL
-"""
-    for seed in range(100):
-        sql = _generate(manifest, lateral_grammar, 100 + seed)
-        match = re.search(r"LATERAL \((.+)\) AS `r\d+` RIGHT", sql)
-        if match is not None and "`r1`." in match.group(1):
-            cases.append(("correlated_right_lateral", sql))
-            break
-    else:  # pragma: no cover - deterministic seed contract
-        raise AssertionError("unable to render a correlated RIGHT LATERAL witness")
-
     operators = (
         "UNION",
         "UNION ALL",
         "UNION DISTINCT",
-        "INTERSECT",
-        "INTERSECT ALL",
-        "EXCEPT",
-        "EXCEPT ALL",
     )
     for left in operators:
         for right in operators:
@@ -251,7 +202,7 @@ predicate:
                         manifest,
                         f"""
 query:
-    _prepare_numeric_1_set_signature _set_select_operand {left} _set_values_operand {right} _set_scalar_operand _clear_set_signature
+    _prepare_numeric_1_set_signature _set_select_operand {left} _set_select_operand {right} _set_select_operand _clear_set_signature
 """,
                         47,
                     ),
@@ -275,7 +226,7 @@ def test_grammar_p1_witnesses_on_three_exact_8041_sockets() -> None:
         scenario=DataScenario.MIXED_NULL,
     )
     cases = _queries(manifest)
-    assert len(cases) == 60
+    assert len(cases) == 17
     database = f"sf_grammar_p1_{time.time_ns():x}"[-64:]
     connections = [
         mysql.connector.connect(unix_socket=socket, user="root", autocommit=True)

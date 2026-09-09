@@ -21,6 +21,7 @@ from select_fuzz.modes.fuzz.materialization import (
     FuzzMaterializer,
     fuzz_database_name,
 )
+from select_fuzz.modes.fuzz.models import FuzzRowBudget
 from select_fuzz.modes.fuzz.diagnostics import FuzzProcesslistCollector
 from select_fuzz.modes.fuzz.forensics import (
     FuzzErrorAggregator,
@@ -434,12 +435,26 @@ def test_error_sample_uses_fresh_processlist_connection_ids_without_persisting_t
 class _EmptyCursor:
     affected_rows = 0
 
+    def warnings(self):
+        return ()
+
     def fetchmany(self, size: int):  # type: ignore[no-untyped-def]
         del size
         return ()
 
     def close(self) -> None:
         return None
+
+
+class _PlanCursor(_EmptyCursor):
+    def __init__(self, text="Gather: 4 workers, parallel scan on fuzz_t0"):
+        from select_fuzz.domain import ColumnMeta
+        self.columns = (ColumnMeta("EXPLAIN", 253, False, False, False),)
+        self._rows = ((text,),)
+
+    def fetchmany(self, size):
+        rows, self._rows = self._rows[:size], self._rows[size:]
+        return rows
 
 
 class _RecordingSession:
@@ -700,6 +715,8 @@ class _ErrorSession:
         self._stop_event = stop_event
 
     def execute(self, sql: str) -> _EmptyCursor:
+        if sql.startswith("EXPLAIN "):
+            return _PlanCursor()
         if sql.startswith("SELECT"):
             self._stop_event.set()
             raise _SqlError("ordinary generated SQL error")
@@ -782,6 +799,8 @@ class _ScriptedReaderSession:
         self._stop_event = stop_event
 
     def execute(self, sql: str) -> _EmptyCursor:
+        if sql.startswith("EXPLAIN "):
+            return _PlanCursor()
         if not sql.startswith("SELECT"):
             return _EmptyCursor()
         if not self._actions:
@@ -861,6 +880,274 @@ def _reader_backoff_service(
     pipeline.register_database(0, "sf_f_reader", _schema("sf_f_reader").grammar_schema)
     service._query_pipeline = pipeline  # type: ignore[attr-defined]
     return service, primary, pipeline
+
+
+def test_reader_keeps_preconfigured_parameters_and_worker_tag(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    stop = _ScriptedStopEvent(stop_after_waits=1)
+    executed: list[str] = []
+
+    class Session(_ScriptedReaderSession):
+        def execute(self, sql: str) -> _EmptyCursor:
+            executed.append(sql)
+            return super().execute(sql)
+
+    class Factory(_ScriptedReaderFactory):
+        @contextmanager
+        def query_session(self, node, database):  # type: ignore[no-untyped-def]
+            yield Session([], stop)
+
+    factory = Factory([], stop)
+    service, primary, pipeline = _reader_backoff_service(tmp_path, factory)
+    try:
+        service._reader_loop(
+            RunRequest("run_preconfigured", "fuzz", 1, 1, None, 1),
+            _schema("sf_f_reader"), 0, 0, primary, "primary", stop,
+        )
+    finally:
+        pipeline.close()
+
+    assert [sql for sql in executed if sql.startswith("SET ")] == [
+        "SET @select_fuzz_worker = 'primary_reader'",
+    ]
+    assert not any(sql.startswith("EXPLAIN ") for sql in executed)
+    assert "SELECT 1" in executed
+    assert service._counters.snapshot().reconnects == 0
+
+
+def test_writer_keeps_preconfigured_parameters_and_transaction_control(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    stop = _ScriptedStopEvent(stop_after_waits=1)
+    executed: list[str] = []
+
+    class Session(_ScriptedReaderSession):
+        def execute(self, sql: str) -> _EmptyCursor:
+            executed.append(sql)
+            if sql in {"COMMIT", "ROLLBACK"}:
+                stop.set()
+            return _EmptyCursor()
+
+    class Factory(_ScriptedReaderFactory):
+        @contextmanager
+        def query_session(self, node, database):  # type: ignore[no-untyped-def]
+            yield Session([], stop)
+
+    factory = Factory([], stop)
+    service, _primary, pipeline = _reader_backoff_service(tmp_path, factory)
+    try:
+        service._writer_loop(
+            RunRequest("run_preconfigured", "fuzz", 1, 1, None, 1),
+            _schema("sf_f_writer"),
+            FuzzRowBudget(initial_rows=100, maximum_rows=1000),
+            0, 0, stop,
+        )
+    finally:
+        pipeline.close()
+
+    assert [sql for sql in executed if sql.startswith("SET ")] == [
+        "SET @select_fuzz_worker = 'primary_writer'",
+    ]
+    assert "START TRANSACTION" in executed
+    assert executed[-1] == "COMMIT"
+    assert service._counters.snapshot().writes == 1
+    assert service._counters.snapshot().reconnects == 0
+
+
+def _run_writer_budget_transaction(
+    tmp_path, monkeypatch, budget, operations, *, before_finish=None, commit_error=None,
+    record_sql_error=None,
+):  # type: ignore[no-untyped-def]
+    from types import SimpleNamespace
+
+    from select_fuzz.modes.fuzz.dml import FuzzDmlStatement
+
+    stop = _ScriptedStopEvent(stop_after_waits=1)
+    executed: list[str] = []
+    statements = [
+        FuzzDmlStatement(operation, f"{operation.upper()} /* {index} */ LIMIT {target}", target)
+        for index, (operation, target, _outcome) in enumerate(operations)
+    ]
+    outcomes = {
+        statement.sql: outcome
+        for statement, (_operation, _target, outcome) in zip(statements, operations, strict=True)
+    }
+    generated = iter(statements)
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.service.FuzzDmlGenerator",
+        lambda *args, **kwargs: SimpleNamespace(generate=lambda **kwargs: next(generated)),
+    )
+    monkeypatch.setattr(
+        "select_fuzz.modes.fuzz.service.random",
+        SimpleNamespace(Random=lambda seed: SimpleNamespace(randint=lambda low, high: len(operations))),
+    )
+
+    class Session(_ScriptedReaderSession):
+        def execute(self, sql: str) -> _EmptyCursor:
+            executed.append(sql)
+            if sql in {"COMMIT", "ROLLBACK"}:
+                if before_finish is not None:
+                    before_finish(sql)
+                stop.set()
+                if sql == "COMMIT" and commit_error is not None:
+                    raise commit_error
+                return _EmptyCursor()
+            outcome = outcomes.get(sql, 0)
+            if isinstance(outcome, Exception):
+                raise outcome
+            cursor = _EmptyCursor()
+            cursor.affected_rows = outcome
+            return cursor
+
+    class Factory(_ScriptedReaderFactory):
+        @contextmanager
+        def query_session(self, node, database):  # type: ignore[no-untyped-def]
+            yield Session([], stop)
+
+    service, _primary, pipeline = _reader_backoff_service(tmp_path, Factory([], stop))
+    if record_sql_error is not None:
+        def fail_to_record(*args):  # type: ignore[no-untyped-def]
+            raise record_sql_error
+
+        monkeypatch.setattr(service, "_record_query_sql", fail_to_record)
+    try:
+        service._writer_loop(
+            RunRequest("run_budget", "fuzz", 1, 1, None, 1),
+            _schema("sf_f_writer"), budget, 0, 0, stop,
+        )
+    finally:
+        pipeline.close()
+    return service, executed
+
+
+@pytest.mark.parametrize("operation,affected", [("insert", 3), ("delete", 4)])
+@pytest.mark.parametrize("errno", [1213, 1062])
+def test_writer_rollback_discards_all_transaction_row_changes(
+    tmp_path, monkeypatch, operation, affected, errno,
+):  # type: ignore[no-untyped-def]
+    budget = FuzzRowBudget(initial_rows=90, maximum_rows=100)
+    service, executed = _run_writer_budget_transaction(
+        tmp_path, monkeypatch, budget,
+        [(operation, 5, affected), ("update", 1, _ScriptedSqlError(errno))],
+    )
+
+    assert executed[-1] == "ROLLBACK"
+    assert service._counters.snapshot().writes == 0
+    assert service._counters.snapshot().errors == 1
+    assert budget.current == 90
+    assert budget.reserve_insert(100) == 10
+
+
+def test_writer_does_not_offer_uncommitted_deletes_to_other_writers(
+    tmp_path, monkeypatch,
+):  # type: ignore[no-untyped-def]
+    budget = FuzzRowBudget(initial_rows=100, maximum_rows=100)
+    other_writer_reservations = []
+    _run_writer_budget_transaction(
+        tmp_path, monkeypatch, budget, [("delete", 5, 5)],
+        before_finish=lambda sql: other_writer_reservations.append(budget.reserve_insert(5)),
+    )
+
+    assert other_writer_reservations == [0]
+    assert budget.current == 95
+    assert budget.reserve_insert(5) == 5
+
+
+def test_writer_rollback_releases_only_its_own_insert_reservations(
+    tmp_path, monkeypatch,
+):  # type: ignore[no-untyped-def]
+    budget = FuzzRowBudget(initial_rows=90, maximum_rows=100)
+    other_writer_reservations = []
+    _run_writer_budget_transaction(
+        tmp_path, monkeypatch, budget,
+        [("insert", 4, 3), ("insert", 2, 1), ("update", 1, _ScriptedSqlError(1213))],
+        before_finish=lambda sql: other_writer_reservations.append(budget.reserve_insert(4)),
+    )
+
+    assert other_writer_reservations == [4]
+    assert budget.current == 94
+
+
+def test_writer_commit_accounts_for_actual_rows_across_all_statements(
+    tmp_path, monkeypatch,
+):  # type: ignore[no-untyped-def]
+    budget = FuzzRowBudget(initial_rows=90, maximum_rows=100)
+    service, executed = _run_writer_budget_transaction(
+        tmp_path, monkeypatch, budget,
+        [("insert", 5, 3), ("delete", 4, 4), ("insert", 4, 2)],
+    )
+
+    assert executed[-1] == "COMMIT"
+    assert service._counters.snapshot().writes == 1
+    assert budget.current == 91
+
+
+def test_writer_releases_reservation_after_exception_before_dml_execution(
+    tmp_path, monkeypatch,
+):  # type: ignore[no-untyped-def]
+    budget = FuzzRowBudget(initial_rows=90, maximum_rows=100)
+    _service, executed = _run_writer_budget_transaction(
+        tmp_path, monkeypatch, budget, [("insert", 5, 5)],
+        record_sql_error=OSError("SQL recording failed"),
+    )
+
+    assert executed[-1] == "ROLLBACK"
+    assert not any(sql.startswith("INSERT") for sql in executed)
+    assert budget.current == 90
+
+
+def test_writer_keeps_conservative_budget_when_commit_response_is_lost(
+    tmp_path, monkeypatch,
+):  # type: ignore[no-untyped-def]
+    budget = FuzzRowBudget(initial_rows=90, maximum_rows=100)
+    service, executed = _run_writer_budget_transaction(
+        tmp_path, monkeypatch, budget,
+        [("insert", 5, 5), ("delete", 4, 4)],
+        commit_error=_ScriptedSqlError(2013),
+    )
+
+    # ROLLBACK succeeding after COMMIT was sent does not prove COMMIT failed.
+    assert executed[-2:] == ["COMMIT", "ROLLBACK"]
+    assert service._counters.snapshot().writes == 0
+    assert budget.current == 95
+    assert budget.reserve_insert(100) == 5
+
+
+def test_reader_executes_ordinary_mysql_queries_without_pq(tmp_path):
+    stop = _ScriptedStopEvent(stop_after_waits=3)
+
+    class SerialSession(_ScriptedReaderSession):
+        workload_calls = 0
+
+        def execute(self, sql):
+            if sql.startswith("EXPLAIN "):
+                return _PlanCursor("Table scan on fuzz_t0")
+            if sql.startswith("SELECT"):
+                self.workload_calls += 1
+                stop.set()
+            return _EmptyCursor()
+
+    session = SerialSession([], stop)
+
+    class SerialFactory(_ScriptedReaderFactory):
+        @contextmanager
+        def query_session(self, node, database):
+            yield session
+
+    factory = SerialFactory([], stop)
+    service, primary, pipeline = _reader_backoff_service(tmp_path, factory)
+    try:
+        service._reader_loop(
+            RunRequest("run_pq_gate", "fuzz", 1, workers=1, rounds=1, queries_per_round=1),
+            _schema("sf_f_reader"), 0, 0, primary, "primary", stop,
+        )
+    finally:
+        pipeline.close()
+    assert session.workload_calls == 1
+    counts = service._counters.snapshot()
+    assert counts.reads == 1
+    assert counts.errors == counts.pq_rejected == 0
+    assert stop.waits == []
+    records = read_jsonl(tmp_path / "events.jsonl")
+    exclusions = [r for r in records if r["type"] == "fuzz_pq_rejected"]
+    assert exclusions == []
 
 
 def test_reader_compatibility_errors_back_off_on_one_long_lived_connection(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -1127,6 +1414,8 @@ class _PrefetchSession:
         return 91
 
     def execute(self, sql: str) -> _EmptyCursor:
+        if sql.startswith("EXPLAIN "):
+            return _PlanCursor()
         if sql.startswith("SELECT"):
             assert ("submit", 0, 0, 1) in self._pipeline.events
             self._pipeline.events.append(("execute", sql))

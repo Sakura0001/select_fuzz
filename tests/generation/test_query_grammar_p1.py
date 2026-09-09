@@ -5,6 +5,7 @@ import re
 import pytest
 
 from select_fuzz.generation.query_grammar import (
+    CandidateRejected,
     GrammarColumn,
     GrammarQueryGenerator,
     GrammarSchema,
@@ -137,13 +138,13 @@ query:
 relation:
     _derived_query_expression_relation
 derived_query_expression:
-    _prepare_numeric_2_set_signature _set_select_operand UNION ALL _set_values_operand _clear_set_signature
+    _prepare_numeric_2_set_signature _set_select_operand UNION ALL _set_select_operand _clear_set_signature
 """
     )
 
     sql = GrammarQueryGenerator(grammar).generate(_rich_schema(), seed=31).sql
 
-    assert "UNION ALL VALUES ROW(7, 7)" in sql
+    assert "UNION ALL SELECT" in sql
     assert re.search(r"AS `r\d+` \(`d1`, `d2`\)", sql)
     assert re.search(r"`r\d+`\.`d[12]`", sql)
 
@@ -165,32 +166,29 @@ def test_every_ordered_set_operator_pair_is_renderable(left: str, right: str) ->
     grammar = SelectGrammar.from_text(
         f"""
 query:
-    _prepare_numeric_1_set_signature _set_select_operand {left} _set_values_operand {right} _set_scalar_operand _clear_set_signature
+    _prepare_numeric_1_set_signature _set_select_operand {left} _set_select_operand {right} _set_select_operand _clear_set_signature
 """
     )
 
+    if any(operator.startswith(("INTERSECT", "EXCEPT")) for operator in (left, right)):
+        with pytest.raises(CandidateRejected, match="PQ"):
+            GrammarQueryGenerator(grammar).generate(_rich_schema(), seed=37)
+        return
     sql = GrammarQueryGenerator(grammar).generate(_rich_schema(), seed=37).sql
 
     assert left in sql
     assert right in sql
 
 
-def test_safe_window_cast_interval_and_aggregate_forms_are_renderable() -> None:
-    grammar = SelectGrammar.from_text(
-        """
+def test_supported_cast_interval_and_aggregate_forms_are_renderable() -> None:
+    grammar = SelectGrammar.from_text("""
 query:
-    _scope_begin _prepare_relation _scope_enable_named_window SELECT RANK ( ) OVER ( ) _result_numeric AS _projection_alias , LAG ( _window_value_column ) OVER _window_name2 _result_window_value AS _projection_alias , CAST ( '12:34:56.123456' AS TIME ( 6 ) ) _result_temporal AS _projection_alias , DATE_ADD ( _strict_temporal_column , INTERVAL '1 02:03:04.000005' DAY_MICROSECOND ) _result_temporal AS _projection_alias , _deterministic_group_concat AS _projection_alias , _json_object_aggregate AS _projection_alias FROM _emit_relation WINDOW _window_name AS ( PARTITION BY _window_partition_list ) , _window_name2 AS ( _window_name ORDER BY _window_total_order ) _scope_end
+    _scope_begin _prepare_relation SELECT CAST ( '12:34:56.123456' AS TIME ( 6 ) ) _result_temporal AS _projection_alias , DATE_ADD ( MAX ( _strict_temporal_column ) , INTERVAL '1 02:03:04.000005' DAY_MICROSECOND ) _result_temporal AS _projection_alias , COUNT ( * ) _result_numeric AS _projection_alias FROM _emit_relation _scope_end
 relation:
     _table
-"""
-    )
-
+""")
     sql = GrammarQueryGenerator(grammar).generate(_rich_schema(), seed=41).sql
-
-    assert "RANK() OVER ()" in sql
-    assert "LAG(" in sql and "OVER `w2`" in sql
     assert "TIME(6)" in sql
     assert "DAY_MICROSECOND" in sql
-    assert "GROUP_CONCAT(DISTINCT LEFT(HEX(" in sql
-    assert "JSON_OBJECTAGG(" in sql
-    assert "`w2` AS (`w1` ORDER BY" in sql
+    assert "COUNT(*)" in sql
+    assert "MAX(" in sql

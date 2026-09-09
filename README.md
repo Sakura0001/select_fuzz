@@ -3,22 +3,31 @@
 Select Fuzz is a deterministic MySQL differential test product for three
 primary/replica pairs:
 
-- `baseline`: unmodified open-source MySQL 8.0.41;
-- `custom_off`: the custom engine with parallel query disabled globally;
-- `custom_on`: the custom engine with parallel query enabled globally.
+- `baseline`: reference MySQL;
+- `custom_off`: the first comparison MySQL configuration;
+- `custom_on`: the second comparison MySQL configuration.
+
+These role names come from the original parallel-query comparison setup. All
+three roles can use ordinary MySQL without PQ support.
 
 Each role has one primary for setup/DML and one replica for SELECT/analysis.
 It has three independently registered modes: correctness comparison, performance
 comparison, and concurrent read/write fuzzing. Correctness compares typed
 results or normalized errors on all three replicas. Both comparison modes use seed-reproducible
-weighted random schemas, tables, ordinary MySQL types and ranges, indexes, data,
+weighted random schemas, tables, documented PQ-compatible types and ranges, indexes, data,
 and table-reading SELECTs. Performance uses exactly one logical worker. Each
 performance round fills its random tables once through bounded deterministic
 stored procedures, waits for all replicas, and then executes the configured
 number of distinct `EXPLAIN ANALYZE FORMAT=TREE` queries sequentially. Each query
 is launched concurrently on the three replicas and reports regressions against
 both baseline and `custom_off`. JSON, FULLTEXT, SPATIAL, and multi-valued
-JSON-array indexes are excluded from the default fuzz scope.
+JSON-array indexes are excluded from the default fuzz scope. Automatic SELECT
+generation retains its conservative PQ-compatible subset. The three main modes
+and replay accept serial execution plans; they do not require PQ support or
+probe for parallel workers. Correctness still uses baseline EXPLAIN to validate
+candidates, and performance measures the actual EXPLAIN ANALYZE tree. The
+separate `select_fuzz.pq` harness keeps its explicit PQ admission contract. See
+the [query contract](docs/testing/pq-query-contract.md) for scope and limits.
 
 ## Install
 
@@ -38,8 +47,9 @@ cp config/replica-parameters.example.yaml config/replica-parameters.yaml
 
 Edit the six endpoints and optional role probes in the ignored
 `config/local.yaml`, then point `replica_parameters_file` at the separate
-replica parameter file. Only typed `SET SESSION` values are accepted there;
-credentials remain environment-only. The three role pairs must have isolated,
+replica parameter file. Its typed values are retained as configuration metadata;
+the test runner uses preconfigured database parameters and does not apply session
+overrides. Credentials remain environment-only. The three role pairs must have isolated,
 comparable resources and working primary-to-replica replication. For a fuzz-only
 load-balancing proxy, copy `config/intranet-fuzz.example.yaml`; fuzz uses only
 `fuzz.target_role` and permits one proxy endpoint to represent both primary and
@@ -121,8 +131,12 @@ uv run select-fuzz run --mode fuzz --config config/intranet-fuzz.yaml \
 
 1. 复制 `config/example.yaml` 为未纳入 Git 的 `config/local.yaml`，填写六个
    endpoint；用户名和密码只通过环境变量提供。
-2. 确认三组主备复制已经由外部环境配置完成，PQ 等目标开关已经由服务端配置完成。
-   本程序只验证连接和副本追平，不会创建复制拓扑，也不会修改 PQ 开关。
+2. 确认三组主备复制已经由外部环境配置完成。普通 MySQL 即可运行；如需对比特定
+   数据库配置，由服务端预先配置。
+   本程序验证连接和副本追平，直接使用你预先配置的数据库运行参数。
+   测试期间不自动设置 PQ、DOP、成本阈值、回退开关、时区、SQL 模式或服务端超时；
+   correctness 使用 baseline EXPLAIN 校验候选，performance 保存实际 ANALYZE 计划。
+   超时控制使用客户端 watchdog 与连接超时。
 3. 先执行 `doctor`，再执行目标模式：
 
    ```bash
@@ -167,10 +181,11 @@ uv run select-fuzz run --mode correctness --config config/local.yaml \
 - 每张表默认生成 10～500 行、1～8 张表、2～16 列；单个 query block 默认最多
   绑定 4 张表。
 - 每张表最多 65 个索引（默认上限 8）；单节点结果默认限制为 10000 行或 32 MiB。
-- 使用 MySQL 8.0.22 SELECT grammar 和 schema-aware 绑定；默认生产范围排除
-  JSON、FULLTEXT、SPATIAL 和 multi-valued JSON-array index。
+- 使用 MySQL 8.0.22 SELECT grammar 的 PQ 子集和 schema-aware 绑定；生产生成仅用
+  普通 InnoDB 表和外键图，移除了临时表、非支持类型及不支持的查询构造。
 - `query_grammar_path` 可以指向自定义 grammar；`grammar_compatible_type_percent`
-  默认 80%，用于控制严格类型兼容表达式的选择概率。
+  默认 80%，用于控制严格类型兼容表达式的选择概率。自定义 grammar 同样必须通过
+  PQ 语法和 schema 检查，不能重新引入已删除路径。
 - 这是结果差分模式，不以查询耗时退化作为 finding；数据库状态差异会进入 finding。
 - DML 是小事务锁步差分，不是持续高并发写压测；不负责读取服务端 crash/error 日志。
 
@@ -227,9 +242,9 @@ uv run select-fuzz run --mode fuzz --config config/local.yaml \
   `target_role`，不会因为未使用的 baseline/custom_off 地址不可达而阻塞启动。
 - 每个 database 有独立 writer 和 reader；writer 全部连接 primary，reader 严格按
   primary:replica = 1:2 分配。
-- 每次读查询 50% 选择负载型查询，50% 选择完全随机 SQL grammar。负载型查询覆盖扫描、
-  聚合、JOIN、GROUP BY、窗口函数和子查询；随机 grammar 覆盖 CTE、LATERAL、派生表、
-  嵌套子查询、窗口、HAVING、Hints、类型转换和随机表达式。
+- 每次读查询 50% 选择负载型查询，50% 选择 PQ 子集 grammar。覆盖扫描、基础聚合、
+  有界 INNER JOIN、GROUP BY、HAVING、派生表、非递归 CTE、UNION 和支持的表达式。
+  已移除窗口、ROLLUP、LATERAL、递归 CTE、条件/标量子查询及不支持的函数。
 - reader 的下一条 SELECT 由有界多进程流水线提前生成，每个 reader 最多预取三条；
   每代内 seed、SQL 顺序、长期连接和固定 endpoint 保持稳定，换代时使用新 schema seed
   并重建连接。writer 的 DML 仍在线程内按事务即时生成。
@@ -264,15 +279,18 @@ uv run select-fuzz run --mode fuzz --config config/local.yaml \
   统计。内存最多跟踪先出现的 64 个指纹，额外种类汇总到 `other_count`。连接 ID 明细只在
   进程内用于关联 PROCESSLIST，不写入周期快照。
 - 每张表默认随机生成 200～500 列，包含固定业务列和随机类型列；候选类型池包含整数、精确数值、
-  浮点、BIT、日期时间、字符、二进制、TEXT/BLOB、ENUM、SET 等 56 个变体。每张表随机
+  浮点、BIT、日期时间、字符、BINARY/VARBINARY、ENUM、SET 等 56 个变体。每张表随机
   抽样，不保证单表一次运行出现全部 56 个变体。
-- 每张表至少包含主键、降序索引、唯一索引、表达式索引，并追加随机普通索引。JSON 和
-  空间数据类型不进入表字段类型池。
+- 每张表至少包含主键、降序索引、唯一索引和复合 BTREE 索引，并追加随机普通索引。
+  表字段类型池排除 JSON、空间、TEXT/BLOB 和生成列；表达式索引
+  已移除，避免引入 PQ 不支持的隐藏生成列。
 - writer 混合执行 INSERT、UPDATE、UPSERT 和 DELETE。DELETE 支持点删和 10～100 行的
   小批量删除，但固定保留初始化的 `id = 1`，因此不会把整张表清空。
 - 读结果只流式消费后丢弃，不比较结果正确性，也不执行 `EXPLAIN ANALYZE`。普通 SQL
   错误记为 fuzz error，当前长连接继续复用；只有 lost connection 或连接失效异常才
   触发指数退避重连。
+- reader 直接执行生成的 SELECT；普通 MySQL 串行查询按实际成功、错误或超时计数，
+  不要求 PQ 计划，也不在每次读取前额外执行 EXPLAIN。
 
 当前边界：
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 import os
@@ -297,6 +298,70 @@ def test_every_schema_type_has_a_deterministic_executable_value(declaration: str
         assert all(isinstance(value, bytes) for value in values)
     if base in geometry_types:
         assert all(isinstance(value, GeometryValue) for value in values)
+
+
+@pytest.mark.parametrize("fsp", range(7))
+def test_timestamp_boundaries_keep_utc_instants_in_preconfigured_time_zones(fsp: int) -> None:
+    manifest = _schema(_regular_table(ColumnDef("recorded_at", f"TIMESTAMP({fsp})", False)))
+    bundle = DataGenerator().generate(
+        manifest, seed=19, rows_per_table=4, scenario=DataScenario.BOUNDARY,
+    )
+    minimum = datetime(1970, 1, 1, 0, 0, 1, tzinfo=UTC)
+    maximum_fraction = 0 if fsp == 0 else (5 * 10 ** (fsp - 1) - 1) * 10 ** (6 - fsp)
+    maximum = datetime(2038, 1, 19, 3, 14, 7, maximum_fraction, tzinfo=UTC)
+    unit = timedelta(seconds=1) if fsp == 0 else timedelta(microseconds=10 ** (6 - fsp))
+    expected = (minimum, minimum + unit, maximum - unit, maximum)
+    literals = [row[1] for row in bundle.rows_by_table["t0"]]
+    actual = tuple(datetime.fromisoformat(value) for value in literals)
+
+    assert actual == expected
+    # Check every minute offset in MySQL's supported range. A +00:00 literal
+    # identifies the same stored instant even when local display crosses 1970.
+    for offset_minutes in range(-13 * 60 - 59, 14 * 60 + 1):
+        session_zone = timezone(timedelta(minutes=offset_minutes))
+        assert tuple(value.astimezone(session_zone).astimezone(UTC) for value in actual) == expected
+    for literal in literals:
+        assert f"'{literal}'" in bundle.inserts_sql[0]
+        assert literal.encode("ascii") in bundle.payload["t0"]
+    assert not any(sql.startswith("SET ") for sql in bundle.inserts_sql)
+
+
+@pytest.mark.parametrize("fsp", (0, 1, 6))
+@pytest.mark.parametrize("scenario", tuple(DataScenario))
+def test_timestamp_distributions_are_absolute_bounded_and_deterministic(
+    fsp: int, scenario: DataScenario,
+) -> None:
+    manifest = _schema(_regular_table(ColumnDef("recorded_at", f"TIMESTAMP({fsp})", True)))
+    generator = DataGenerator()
+    bundle = generator.generate(manifest, seed=8041, rows_per_table=128, scenario=scenario)
+    repeated = generator.generate(manifest, seed=8041, rows_per_table=128, scenario=scenario)
+    values = [row[1] for row in bundle.rows_by_table["t0"] if row[1] is not None]
+    assert bundle.canonical_bytes() == repeated.canonical_bytes()
+    assert values or scenario is DataScenario.ALL_NULL
+    minimum = datetime(1970, 1, 1, 0, 0, 1, tzinfo=UTC)
+    maximum = datetime(2038, 1, 19, 3, 14, 7, 499999, tzinfo=UTC)
+    for value in values:
+        parsed = datetime.fromisoformat(value)
+        assert parsed.utcoffset() == timedelta(0)
+        assert minimum <= parsed <= maximum
+        assert parsed.microsecond % 10 ** (6 - fsp) == 0
+    if scenario is DataScenario.SEEDED_RANDOM:
+        assert len(set(values)) > 100
+        changed = generator.generate(manifest, seed=8042, rows_per_table=128, scenario=scenario)
+        assert bundle.canonical_bytes() != changed.canonical_bytes()
+
+
+def test_timestamp_unique_keys_retain_distinct_absolute_values() -> None:
+    table = _regular_table(ColumnDef("recorded_at", "TIMESTAMP(6)", False))
+    table = TableDef(
+        table.name, table.temporary, table.columns,
+        (*table.indexes, IndexDef("uq_recorded_at", (IndexPart(column_name="recorded_at"),), unique=True)),
+    )
+    bundle = DataGenerator().generate(_schema(table), seed=19, rows_per_table=128)
+    values = [datetime.fromisoformat(row[1]) for row in bundle.rows_by_table["t0"]]
+
+    assert all(value.utcoffset() == timedelta(0) for value in values)
+    assert len(set(values)) == 128
 
 
 def test_regular_lob_and_json_actual_values_are_capped_at_64_kib() -> None:
@@ -984,7 +1049,7 @@ def test_insert_batches_respect_both_row_and_byte_ceilings() -> None:
     assert all(len(statement.encode("utf-8")) <= 220 for statement in bundle.inserts_sql)
 
 
-def test_setup_bundle_orders_session_preamble_ddl_and_data() -> None:
+def test_setup_bundle_orders_ddl_and_data_without_changing_session_parameters() -> None:
     table = TableDef(
         "t0",
         True,
@@ -1002,9 +1067,9 @@ def test_setup_bundle_orders_session_preamble_ddl_and_data() -> None:
     )
 
     assert setup.requires_same_session
-    assert setup.statements[0] == "SET time_zone = '+00:00';"
-    assert setup.statements[1].startswith("CREATE TEMPORARY TABLE")
-    assert setup.statements[2].startswith("INSERT INTO `t0`")
+    assert setup.statements[0].startswith("CREATE TEMPORARY TABLE")
+    assert setup.statements[1].startswith("INSERT INTO `t0`")
+    assert not any(statement.startswith("SET ") for statement in setup.statements)
     assert setup.payload_sha256 == setup.data.payload_sha256
     assert setup.canonical_bytes() == SetupBundleBuilder(DataGenerator()).build(
         schema, seed=99, rows_per_table=3

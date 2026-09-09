@@ -9,6 +9,7 @@ import pytest
 from select_fuzz.generation.function_registry import DETERMINISTIC_FUNCTION_SIGNATURES
 from select_fuzz.generation.query_grammar import (
     CandidateRejected,
+    FunctionValueProfile,
     GrammarColumn,
     GrammarQueryConfig,
     GrammarQueryGenerator,
@@ -184,30 +185,17 @@ query:
         GrammarQueryGenerator(derived_hint).generate(schema, seed=7)
 
 
-def test_canonical_anti_matrix_is_explicit_and_unsupported_frame_syntax_is_absent() -> None:
-    grammar = SelectGrammar.from_path(
-        Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.22-select.grammar.yy"
+def test_canonical_unsupported_anti_and_window_paths_are_absent() -> None:
+    grammar = SelectGrammar.default()
+    assert "anti_membership_predicate" not in grammar.productions
+    assert not any("window" in name or "frame_" in name for name in grammar.productions)
+    assert not any(
+        "subquery" in name and name != "non_subquery_expression" for name in grammar.productions
     )
-    anti = grammar.productions["anti_membership_predicate"]
-    assert len(anti.alternatives) == 12
-    assert {"anti_empty_subquery", "anti_nullable_subquery"}.issubset(
-        grammar.productions
-    )
-    grammar_text = (
-        Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.22-select.grammar.yy"
-    ).read_text(encoding="utf-8")
-    assert "GROUPS" not in grammar_text
-    assert "IGNORE NULLS" not in grammar_text
-    assert "FROM LAST" not in grammar_text
-    assert "EXCLUDE" not in grammar_text
 
 
 def test_canonical_grammar_targets_mysql_8022() -> None:
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "catalog"
-        / "mysql-8.0.22-select.grammar.yy"
-    )
+    path = Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.22-select.grammar.yy"
     text = path.read_text(encoding="utf-8")
 
     for forbidden in (
@@ -222,8 +210,8 @@ def test_canonical_grammar_targets_mysql_8022() -> None:
         "utf8mb4_0900_ai_ci",
     ):
         assert forbidden not in text
-    assert "VALUES values_rows" in text
-    assert "TABLE _query_table" in text
+    assert "VALUES values_rows" not in text
+    assert "TABLE _query_table" not in text
     assert "UNION ALL" in text
 
     grammar = SelectGrammar.from_path(path)
@@ -243,18 +231,13 @@ def test_canonical_grammar_targets_mysql_8022() -> None:
         for alternative in grammar.productions["cast_expression"].alternatives
     }
     assert all(
-        not alternative.startswith("CAST ( ST_GEOMFROMTEXT")
-        for alternative in cast_expressions
+        not alternative.startswith("CAST ( ST_GEOMFROMTEXT") for alternative in cast_expressions
     )
     assert all(" AS POINT " not in f" {alternative} " for alternative in cast_expressions)
 
 
 def test_default_grammar_is_the_packaged_mysql_8022_asset() -> None:
-    checkout = (
-        Path(__file__).resolve().parents[2]
-        / "catalog"
-        / "mysql-8.0.22-select.grammar.yy"
-    )
+    checkout = Path(__file__).resolve().parents[2] / "catalog" / "mysql-8.0.22-select.grammar.yy"
 
     assert SelectGrammar.default().sha256 == SelectGrammar.from_path(checkout).sha256
 
@@ -284,20 +267,13 @@ def test_generated_identifiers_are_bound_to_real_schema_or_derived_outputs() -> 
                 assert re.fullmatch(r"(?:q|d|c)\d+|jt_(?:ord|value|exists)", column), candidate.sql
 
 
-def test_mysql_8022_grammar_reaches_supported_families() -> None:
+def test_mysql_8022_grammar_reaches_supported_pq_families() -> None:
     grammar = SelectGrammar.default()
-    # Semantic hooks deliberately expand these productions from Python rather
-    # than through a grammar symbol. They form explicit, audited reachability
-    # roots in addition to the grammar's public root.
     semantic_targets = {
         "cte_outer_select",
         "derived_query_expression",
         "derived_select",
-        "lateral_derived_select",
-        "membership_subquery",
-        "natural_join_type",
         "relation",
-        "scalar_subquery",
     }
     pending = [grammar.root, *sorted(semantic_targets)]
     reachable: set[str] = set()
@@ -313,65 +289,51 @@ def test_mysql_8022_grammar_reaches_supported_families() -> None:
                     pending.append(symbol.value)
                 else:
                     terminals.add(symbol.value)
-
     assert reachable == set(grammar.productions)
-
-    for syntax in (
-        {"RECURSIVE"},
-        {"JSON_TABLE", "_json_table_relation"},
-        {"LATERAL", "_lateral_derived_relation"},
-        {"WINDOW"},
-        {"MATCH"},
-        {"ST_ISVALID"},
-    ):
-        assert syntax & terminals
-
-    for production in (
+    assert {
         "query_expression",
         "typed_set_chain",
         "registered_scalar_function",
         "typed_expression",
         "interval_expression",
         "aggregate_expression",
-        "ranking_window_function",
-        "value_window_function",
-        "aggregate_window_function",
-        "peer_safe_ranking_window_function",
-        "numeric_range_frame_clause",
-        "temporal_range_frame_clause",
-    ):
-        assert production in grammar.productions
-
-    for token in (
+        "scan_aggregate_expression",
+    } <= reachable
+    assert {
         "ESCAPE",
-        "REGEXP",
-        "RLIKE",
-        "SOUNDS",
-        "TABLE",
-        "VALUES",
-        "JSON_ARRAYAGG",
-        "LAG",
-        "LEAD",
-        "GROUPING",
         "YEAR_MONTH",
         "DAY_MICROSECOND",
-    ):
-        assert token in terminals
-
-    for semantic_hook in (
+        "GROUP",
+        "ORDER",
+        "HAVING",
+        "COUNT",
+        "SUM",
+        "AVG",
+        "MIN",
+        "MAX",
+        "UNION",
+    } <= terminals
+    assert {
         "_define_independent_cte",
         "_define_dependent_cte",
         "_prepare_cte_reuse_relation",
-        "_prepare_row_signature",
-        "_prepare_membership_signature",
-        "_result_window_value",
         "_table_partition_index_hint",
-        "_right_lateral_join_relation",
-        "_window_total_order",
-        "_json_object_aggregate",
-        "_deterministic_group_concat",
-    ):
-        assert semantic_hook in terminals
+    } <= terminals
+    assert terminals.isdisjoint(
+        {
+            "RECURSIVE",
+            "JSON_TABLE",
+            "LATERAL",
+            "WINDOW",
+            "MATCH",
+            "ST_ISVALID",
+            "VALUES",
+            "TABLE",
+            "GROUPING",
+            "ROLLUP",
+            "REGEXP",
+        }
+    )
 
 
 def test_alternative_coverage_identity_is_stable_across_line_number_changes() -> None:
@@ -418,7 +380,7 @@ def test_mysql_8022_grammar_exposes_every_registered_function_and_null_lane() ->
             for position in signature.null_argument_positions
         )
 
-    assert len(alternatives) == len(expected) == 335
+    assert len(alternatives) == len(expected) == 105
     assert actual == expected
 
 
@@ -525,7 +487,7 @@ def test_query_result_ordinal_comes_from_real_projection_width() -> None:
     grammar = SelectGrammar.from_text(
         """
 query:
-    _scope_begin SELECT _int AS _projection_alias , _text AS _projection_alias _scope_end ORDER BY _query_output_ordinal
+    _scope_begin _prepare_base_relation SELECT _int AS _projection_alias , _text AS _projection_alias FROM _emit_relation _scope_end ORDER BY _query_output_ordinal
 """
     )
 
@@ -534,56 +496,45 @@ query:
         assert candidate.sql.endswith(("ORDER BY 1", "ORDER BY 2"))
 
 
-def test_outer_order_uses_safe_ordinal_when_projection_contains_star() -> None:
-    grammar = SelectGrammar.from_text(
-        """
+def test_wildcard_projection_semantic_hook_is_removed() -> None:
+    grammar = SelectGrammar.from_text("""
 query:
-    _scope_begin _prepare_relation SELECT _bare_star , _int AS _projection_alias FROM _emit_relation _scope_end ORDER BY _query_output_item
+    _scope_begin _prepare_relation SELECT _bare_star FROM _emit_relation _scope_end ORDER BY _query_output_item
 relation:
-    _table NATURAL JOIN _table
-"""
-    )
-
-    for seed in range(20):
-        candidate = GrammarQueryGenerator(grammar).generate(_schema(), seed=seed)
-        assert candidate.sql.endswith("ORDER BY 1")
+    _table
+""")
+    with pytest.raises(CandidateRejected):
+        GrammarQueryGenerator(grammar).generate(_schema(), seed=1)
 
 
 def test_typed_set_signature_keeps_every_operand_at_the_same_arity() -> None:
     grammar = SelectGrammar.from_text(
         """
 query:
-    _prepare_numeric_2_set_signature _set_select_operand UNION ALL _set_values_operand INTERSECT _set_scalar_operand _clear_set_signature
+    _prepare_numeric_2_set_signature _set_select_operand UNION ALL _set_select_operand UNION _set_select_operand _clear_set_signature
 """
     )
 
     candidate = GrammarQueryGenerator(grammar).generate(_schema(), seed=31)
 
-    assert candidate.sql.count(" AS `q") == 4
-    assert "VALUES ROW(7, 7)" in candidate.sql
+    assert candidate.sql.count(" AS `q") == 6
+    assert candidate.sql.count("FROM") == 3
     assert candidate.sql.count(",") >= 3
 
 
-def test_row_subquery_signature_uses_real_columns_and_matching_arity() -> None:
-    grammar = SelectGrammar.from_text(
-        """
+def test_row_subquery_construction_hook_is_removed() -> None:
+    grammar = SelectGrammar.from_text("""
 query:
-    _scope_begin _prepare_relation SELECT _any_column AS _projection_alias FROM _emit_relation WHERE _prepare_row_signature _row_lhs = ( row_rhs ) _clear_row_signature _scope_end
-relation:
-    _table
-row_rhs:
-    _scope_begin _prepare_relation SELECT _row_rhs_projection FROM _emit_relation LIMIT 1 _scope_end
-"""
-    )
-
-    candidate = GrammarQueryGenerator(grammar).generate(_schema(), seed=41)
-
-    assert "ROW(" in candidate.sql
-    assert candidate.sql.count(" AS `q") == 3
-    assert "LIMIT 1" in candidate.sql
+    _scope_begin _prepare_base_relation SELECT _any_column AS _projection_alias FROM _emit_relation WHERE _prepare_row_signature _row_lhs = (SELECT 1, 2) _scope_end
+""")
+    with pytest.raises(CandidateRejected):
+        GrammarQueryGenerator(grammar).generate(_schema(), seed=41)
 
 
-def test_every_registered_function_signature_and_null_lane_is_renderable() -> None:
+@pytest.mark.parametrize("profile", tuple(FunctionValueProfile))
+def test_every_registered_function_signature_and_null_lane_is_renderable(
+    profile: FunctionValueProfile,
+) -> None:
     for signature in DETERMINISTIC_FUNCTION_SIGNATURES:
         symbols = [f"_fn_{signature.signature_id}"]
         symbols.extend(
@@ -592,9 +543,11 @@ def test_every_registered_function_signature_and_null_lane_is_renderable() -> No
         )
         for ordinal, symbol in enumerate(symbols):
             grammar = SelectGrammar.from_text(
-                f"query:\n    _scope_begin SELECT {symbol} AS _projection_alias _scope_end"
+                f"query:\n    _scope_begin _prepare_base_relation SELECT {symbol} AS _projection_alias FROM _emit_relation _scope_end"
             )
-            candidate = GrammarQueryGenerator(grammar).generate(
+            candidate = GrammarQueryGenerator(
+                grammar, config=GrammarQueryConfig(function_value_profile=profile)
+            ).generate(
                 _schema(),
                 seed=ordinal,
             )

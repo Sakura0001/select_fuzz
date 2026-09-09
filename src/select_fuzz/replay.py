@@ -16,6 +16,7 @@ from select_fuzz.artifacts.reader import (
 )
 from select_fuzz.config import AppConfig, NodeRole
 from select_fuzz.domain import ExecutionStatus, NodeExecution
+from select_fuzz.execution.pq_gate import is_pq_rejection
 from select_fuzz.execution.setup import validate_database_name
 from select_fuzz.execution.triad import (
     DatabaseNameFactory,
@@ -324,6 +325,24 @@ class ReplayService:
             executions = coordinator_result.executions
         else:
             executions = tuple(coordinator_result)
+        if any(
+            is_pq_rejection(
+                execution.error.errno if execution.error is not None else None,
+                execution.performance_payload,
+            )
+            for execution in executions
+        ):
+            # Admission is part of preparing a comparable replay. Its rejection
+            # can abort peer barriers and must precede infrastructure/oracle handling.
+            return ReplayResult(
+                case_id=replay_case.case_id,
+                database=database,
+                status=ReplayStatus.PREPARATION_FAILED,
+                original_verdict=replay_case.original_verdict,
+                replay_verdict=None,
+                executions=executions,
+                replay_classification="pq_rejected",
+            )
         if any(
             execution.status is ExecutionStatus.INFRA_ERROR
             for execution in executions

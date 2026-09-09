@@ -11,6 +11,9 @@ from typing import Any
 from select_fuzz.config import NodeConfig
 from select_fuzz.execution.protocols import ConnectionFactory, QuerySession
 from select_fuzz.execution.timeout import KillQueryWatchdog
+from select_fuzz.execution.pq_gate import (
+    PQAdmissionRejected, PQAdmissionTimeout, admit_pq, check_pq_warnings,
+)
 from select_fuzz.modes.fuzz.forensics import (
     capture_exception_evidence,
     watchdog_diagnostic_snapshot,
@@ -109,6 +112,7 @@ class StreamingQueryExecutor:
         started_ns: int | None = None,
         timeout_seconds: float | None = None,
         on_stage: Callable[[str], None] | None = None,
+        require_pq: bool = False,
     ) -> FuzzExecutionResult:
         started = time.monotonic_ns() if started_ns is None else started_ns
         deadline_ns = None
@@ -146,6 +150,13 @@ class StreamingQueryExecutor:
         fetch_started_ns: int | None = None
         cursor_close_elapsed_ns = 0
         failure_stage = "connection_id"
+        pq_evidence: dict[str, object] | None = None
+
+        def check_admission_deadline() -> None:
+            if (handle is not None and handle.timed_out) or (
+                deadline_ns is not None and time.monotonic_ns() >= deadline_ns
+            ):
+                raise PQAdmissionTimeout()
         try:
             if timeout_seconds is not None:
                 assert node is not None
@@ -164,6 +175,12 @@ class StreamingQueryExecutor:
                     statement_done=statement_done,
                 )
                 self._register_active(handle, statement_token)
+            if require_pq:
+                failure_stage = "pq_admission"
+                if on_stage is not None:
+                    on_stage("pq_admission")
+                pq_evidence = admit_pq(session, sql, check_deadline=check_admission_deadline)
+                check_admission_deadline()
             if on_stage is not None:
                 on_stage("executing")
             execute_started_ns = time.monotonic_ns()
@@ -183,6 +200,14 @@ class StreamingQueryExecutor:
                     break
                 rows_seen += len(batch)
             fetch_elapsed_ns = max(0, time.monotonic_ns() - fetch_started_ns)
+            if require_pq:
+                failure_stage = "pq_evidence"
+                assert pq_evidence is not None
+                try:
+                    warnings = cursor.warnings()
+                except Exception as error:
+                    raise PQAdmissionRejected("warnings_unavailable", pq_evidence) from error
+                check_pq_warnings(warnings, pq_evidence)
             success = True
         except Exception as error:
             failed_at_ns = time.monotonic_ns()
@@ -194,33 +219,14 @@ class StreamingQueryExecutor:
             error_stage = failure_stage
             client_deadline_exceeded = isinstance(error, TimeoutError)
             failure_evidence = capture_exception_evidence(error, failure_stage)
+            if isinstance(error, (PQAdmissionRejected, PQAdmissionTimeout)):
+                failure_evidence.update(error.evidence)
+                if error.evidence.get("pq_connection_reusable") is False:
+                    connection_lost = True
         finally:
-            if statement_done is not None:
-                statement_done.set()
-            if handle is not None and statement_token is not None:
-                try:
-                    handle.cancel(statement_token=statement_token)
-                except Exception as error:
-                    secondary_identity, secondary_lost, secondary_errno = _error_identity(
-                        error
-                    )
-                    if failure_evidence is None:
-                        failure_evidence = capture_exception_evidence(
-                            error,
-                            "watchdog_cancel",
-                        )
-                        error_identity = secondary_identity
-                        connection_lost = secondary_lost
-                        errno = secondary_errno
-                        error_stage = "watchdog_cancel"
-                    else:
-                        failure_evidence["watchdog_cancel_error"] = (
-                            capture_exception_evidence(error, "watchdog_cancel")
-                        )
-                        connection_lost |= secondary_lost
-                    success = False
-                finally:
-                    self._remove_active(statement_token)
+            # Connector/Python may drain unread rows in cursor.close()/nextset().
+            # Keep cancellation and its abort fallback alive until that finishes;
+            # otherwise a client-side deadline can leave an unbounded server query.
             if cursor is not None:
                 cursor_close_started_ns = time.monotonic_ns()
                 try:
@@ -241,12 +247,40 @@ class StreamingQueryExecutor:
                         error_stage = "cursor_close"
                     else:
                         connection_lost |= secondary_lost
+                    # A failed close leaves unread packets/protocol state even
+                    # when Connector/Python reports InternalError with errno -1.
+                    connection_lost = True
                     success = False
                 finally:
                     cursor_close_elapsed_ns = max(
                         0,
                         time.monotonic_ns() - cursor_close_started_ns,
                     )
+            if statement_done is not None:
+                statement_done.set()
+            if handle is not None and statement_token is not None:
+                try:
+                    handle.cancel(statement_token=statement_token)
+                except Exception as error:
+                    secondary_identity, secondary_lost, secondary_errno = _error_identity(
+                        error
+                    )
+                    if failure_evidence is None:
+                        failure_evidence = capture_exception_evidence(
+                            error, "watchdog_cancel",
+                        )
+                        error_identity = secondary_identity
+                        connection_lost = secondary_lost
+                        errno = secondary_errno
+                        error_stage = "watchdog_cancel"
+                    else:
+                        failure_evidence["watchdog_cancel_error"] = (
+                            capture_exception_evidence(error, "watchdog_cancel")
+                        )
+                        connection_lost |= secondary_lost
+                    success = False
+                finally:
+                    self._remove_active(statement_token)
         elapsed_ns = max(0, time.monotonic_ns() - started)
         timed_out = client_deadline_exceeded or bool(
             handle is not None and handle.timed_out
@@ -254,6 +288,13 @@ class StreamingQueryExecutor:
         stopped = bool(
             statement_token is not None and self._consume_manual_stop(statement_token)
         )
+        watchdog_evidence = watchdog_diagnostic_snapshot(handle)
+        if watchdog_evidence.get("abort_attempted") or watchdog_evidence.get(
+            "kill_connection_attempted"
+        ):
+            # A disconnect can make cleanup finish normally; it need not raise
+            # errno 2013. Never hand that socket back to a persistent worker.
+            connection_lost = True
         if timed_out and failure_evidence is None:
             failure_evidence = capture_exception_evidence(
                 TimeoutError("watchdog deadline fired without connector exception"),
@@ -261,7 +302,7 @@ class StreamingQueryExecutor:
             )
         if failure_evidence is not None:
             failure_evidence["connection_id"] = connection_id
-            failure_evidence["watchdog"] = watchdog_diagnostic_snapshot(handle)
+            failure_evidence["watchdog"] = watchdog_evidence
             if cursor_close_evidence is not None:
                 failure_evidence["cursor_close_error"] = cursor_close_evidence
             failure_evidence["timings"] = {

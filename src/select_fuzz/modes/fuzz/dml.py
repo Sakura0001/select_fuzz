@@ -120,11 +120,14 @@ class FuzzDmlGenerator:
         rows = self._batch(rng)
         start = rng.randint(1, max(1, known_high_watermark))
         table_name = _quote_identifier(table.name)
+        suffix = f"-i{seed % 10007}"
+        # Cloning a previously grown value must still fit payload VARCHAR(255).
+        payload_prefix_length = 255 - len(suffix)
         sql = (
             f"INSERT INTO {table_name} (`tenant_id`,`amount`,`status`,`updated_at`,`payload`) "
             "SELECT MOD(`tenant_id` + 17, 1024) + 1, `amount` + 1, "
             "MOD(`status` + 1, 16), UTC_TIMESTAMP(6), "
-            f"CONCAT(`payload`, '-i{seed % 10007}') FROM {table_name} "
+            f"CONCAT(LEFT(`payload`, {payload_prefix_length}), '{suffix}') FROM {table_name} "
             f"WHERE `id` >= {start} ORDER BY `id` LIMIT {rows}"
         )
         return FuzzDmlStatement("insert", sql, rows)

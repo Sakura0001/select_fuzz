@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from dataclasses import dataclass
 from threading import Event
 
@@ -99,6 +101,36 @@ class _Recorder:
         attempt_number: int = 1,
     ) -> None:
         raise AssertionError((template, attempts, failure, attempt_number))
+
+
+@pytest.mark.parametrize("reason, errno", [("not_pq", 65004), ("admission_timeout", 3024)])
+def test_non_pq_samples_are_logged_but_excluded_from_performance_results(reason, errno):
+    from dataclasses import replace
+    trace = []
+
+    class RejectedFormal(_Formal):
+        def run(self, frozen):
+            run = super().run(frozen)
+            measurements = dict(run.measurements)
+            measurements[NodeRole.CUSTOM_ON] = replace(
+                measurements[NodeRole.CUSTOM_ON], outcome=Outcome.EXECUTION_ERROR,
+                root_end_ms=None, error_code=errno, metrics={"pq_rejection": reason},
+            )
+            return replace(run, measurements=measurements)
+
+    class Recorder(_Recorder):
+        rejected = 0
+
+        def record_pq_rejection(self, frozen, run):
+            self.rejected += 1
+
+    recorder = Recorder(trace)
+    result = PerformanceService(
+        _Preparation(trace), RejectedFormal(trace), recorder,
+        database_name=lambda n: f"perf_{n}", policy=PerformancePolicy(queries_per_round=2),
+    ).run([_Template("case", 1)], rounds=1)
+    assert result.queries_completed == 0 and result.rejected == 2
+    assert recorder.rejected == 2 and not recorder.records
 
 
 def test_service_runs_cases_strictly_sequentially_and_persists_each_result() -> None:

@@ -49,7 +49,12 @@ class FuzzExecutionResult:
 
 
 class FuzzRowBudget:
-    """Thread-safe approximate row cap shared by writers for one database."""
+    """Thread-safe cap including committed rows and in-flight insert reservations.
+
+    Writers retain reservations until transaction completion and only record
+    deletes after a confirmed commit, so a confirmed rollback releases only
+    that transaction's reservations.
+    """
 
     def __init__(self, *, initial_rows: int, maximum_rows: int) -> None:
         if initial_rows < 0 or maximum_rows < initial_rows:

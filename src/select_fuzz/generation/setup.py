@@ -64,7 +64,6 @@ class SetupBundleBuilder:
         )
         tables = {table.name: table for table in schema.tables}
         statements = (
-            "SET time_zone = '+00:00';",
             *(tables[name].render() for name in data.table_order),
             *data.inserts_sql,
         )

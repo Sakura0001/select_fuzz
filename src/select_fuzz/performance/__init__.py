@@ -32,7 +32,6 @@ from select_fuzz.performance.templates import (
     CpuDenseRangeSortTemplate,
     CpuDenseScanTemplate,
     CpuDenseSetupManifest,
-    CpuDenseWindowTemplate,
 )
 from select_fuzz.performance.tree import (
     Family,
@@ -58,7 +57,6 @@ __all__ = [
     "CpuDenseRangeSortTemplate",
     "CpuDenseJoinTemplate",
     "CpuDenseGroupSortTemplate",
-    "CpuDenseWindowTemplate",
     "Family",
     "FormalRun",
     "FormalRunner",

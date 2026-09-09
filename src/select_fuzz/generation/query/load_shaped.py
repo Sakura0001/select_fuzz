@@ -30,7 +30,7 @@ class LoadShapedQueryGenerator:
             sql = (
                 "SELECT COUNT(*) AS row_count, "
                 "SUM(MOD((`amount` * `amount`) + `id`, 1000003)) AS checksum, "
-                "BIT_XOR(CRC32(`payload`)) AS payload_digest "
+                "MAX(ABS(`amount`)) AS maximum_amount "
                 f"FROM `{left.name}` WHERE MOD(`tenant_id`, {modulus}) <= {tenant % modulus}"
             )
             tags = {"scan", "aggregate"}
@@ -38,35 +38,35 @@ class LoadShapedQueryGenerator:
             sql = (
                 "SELECT COUNT(*) AS row_count, "
                 "SUM(MOD((l.`amount` * r.`amount`) + l.`id` + r.`id`, 1000003)) "
-                f"AS checksum FROM `{left.name}` AS l JOIN `{right.name}` AS r "
-                f"ON r.`tenant_id` = l.`tenant_id` AND MOD(r.`id`, {modulus}) = "
-                f"MOD(l.`id`, {modulus}) WHERE l.`tenant_id` <= {tenant}"
+                f"AS checksum FROM `{left.name}` AS l INNER JOIN `{right.name}` AS r "
+                "ON r.`id` BETWEEN l.`id` AND l.`id` + 8 "
+                f"WHERE l.`tenant_id` <= {tenant}"
             )
             tags = {"scan", "join", "aggregate"}
         elif shape == 2:
             sql = (
                 "SELECT COUNT(*), SUM(group_total), MAX(group_total) FROM ("
                 "SELECT `tenant_id`, SUM(`amount`) AS group_total "
-                f"FROM `{left.name}` GROUP BY `tenant_id` HAVING COUNT(*) >= 1"
+                f"FROM `{left.name}` GROUP BY `tenant_id`"
                 ") AS grouped_rows"
             )
             tags = {"scan", "aggregate", "group"}
         elif shape == 3:
             sql = (
-                "SELECT COUNT(*), SUM(window_value) FROM ("
-                "SELECT SUM(`amount`) OVER (PARTITION BY `tenant_id` ORDER BY `id` "
-                "ROWS BETWEEN 32 PRECEDING AND CURRENT ROW) AS window_value "
-                f"FROM `{left.name}`"
-                ") AS window_rows"
+                "SELECT `tenant_id`, COUNT(*) AS row_count, SUM(`amount`) AS group_total "
+                f"FROM `{left.name}` GROUP BY `tenant_id` "
+                "ORDER BY group_total DESC, `tenant_id` LIMIT 64"
             )
-            tags = {"scan", "window", "sort"}
+            tags = {"scan", "aggregate", "group", "sort"}
         else:
             sql = (
-                "SELECT COUNT(*), SUM(`amount`) FROM "
-                f"`{left.name}` WHERE `tenant_id` IN (SELECT `tenant_id` "
-                f"FROM `{right.name}` WHERE MOD(`status`, {modulus}) = {tenant % modulus})"
+                "SELECT COUNT(*), SUM(l.`amount`) "
+                f"FROM `{left.name}` AS l INNER JOIN (SELECT `tenant_id` "
+                f"FROM `{right.name}` WHERE `status` <= {tenant % 16} "
+                "GROUP BY `tenant_id`) AS matched_tenants "
+                "ON matched_tenants.`tenant_id` = l.`tenant_id`"
             )
-            tags = {"scan", "subquery", "aggregate"}
+            tags = {"scan", "subquery", "join", "aggregate", "group"}
         return GeneratedQuery(sql, seed, self.name, frozenset(tags))
 
 

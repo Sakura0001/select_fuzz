@@ -31,7 +31,7 @@ def test_catalog_ast_terms_are_normalized_for_discovered_shape_matching() -> Non
     capability = adapter.find_capability(signature)
 
     assert {"select", "function_expression", "json_function"} <= set(signature.nodes)
-    assert capability.feature_id == "json_create_extract"
+    assert capability.feature_id == "pq_excluded"
     assert capability.evidence_ready is True
 
 
@@ -95,20 +95,20 @@ def test_discovered_relation_and_ordering_requirements_match_real_catalog(
 @pytest.mark.parametrize(
     ("sql", "expected_status"),
     [
-        ("SELECT COUNT(*)", Reachability.SUPPORTED),
-        ("SELECT t.id FROM t LEFT JOIN u ON t.id = u.id", Reachability.SUPPORTED),
+        ("SELECT COUNT(*)", Reachability.GAP),
+        ("SELECT t.id FROM t LEFT JOIN u ON t.id = u.id", Reachability.GAP),
         (
             "SELECT t.id FROM t LEFT JOIN u ON t.id = u.id WHERE EXISTS (SELECT 1 FROM u)",
-            Reachability.SUPPORTED,
+            Reachability.GAP,
         ),
-        ("VALUES ROW(1)", Reachability.SUPPORTED),
+        ("VALUES ROW(1)", Reachability.GAP),
         (
             "SELECT * FROM JSON_TABLE('[1]', '$[*]' COLUMNS(value INT PATH '$')) AS jt",
-            Reachability.SUPPORTED,
+            Reachability.GAP,
         ),
     ],
 )
-def test_actionable_discovered_shapes_have_real_dynamic_witnesses(
+def test_disallowed_discovered_shapes_remain_pq_gaps(
     sql: str, expected_status: Reachability
 ) -> None:
     adapter = ProductionGeneratorAdapter()
@@ -133,25 +133,25 @@ def test_actionable_discovered_shapes_have_real_dynamic_witnesses(
 @pytest.mark.parametrize(
     ("sql", "expected_status"),
     [
-        ("VALUES ROW(1) LIMIT 1", Reachability.SUPPORTED),
+        ("VALUES ROW(1) LIMIT 1", Reachability.GAP),
         (
             "SELECT CAST(t.id AS SIGNED) FROM t INNER JOIN u ON t.id = u.id",
             Reachability.SUPPORTED,
         ),
         (
             "SELECT 1 INTERSECT SELECT 1 EXCEPT SELECT 2",
-            Reachability.SUPPORTED,
+            Reachability.GAP,
         ),
         ("SELECT * FROM (SELECT id FROM t) AS d", Reachability.SUPPORTED),
         (
             "SELECT id FROM t WHERE EXISTS (SELECT 1 FROM u) ORDER BY 1 LIMIT 1",
-            Reachability.SUPPORTED,
+            Reachability.GAP,
         ),
-        ("SELECT (SELECT 1) LIMIT 1", Reachability.SUPPORTED),
-        ("SELECT 1 GROUP BY 1 WITH ROLLUP", Reachability.SUPPORTED),
+        ("SELECT (SELECT 1) LIMIT 1", Reachability.GAP),
+        ("SELECT 1 GROUP BY 1 WITH ROLLUP", Reachability.GAP),
         (
             "SELECT t.id FROM t INNER JOIN u ON t.id = u.id WHERE EXISTS (SELECT 1 FROM u)",
-            Reachability.SUPPORTED,
+            Reachability.GAP,
         ),
     ],
 )
@@ -196,7 +196,8 @@ def test_discovered_limit_and_scalar_literal_are_reachable(sql: str) -> None:
         budget=3,
     )
 
-    assert result.status is Reachability.SUPPORTED, (
+    expected = Reachability.GAP if sql == "SELECT 1" else Reachability.SUPPORTED
+    assert result.status is expected, (
         capability.feature_id,
         result.reasons,
     )
@@ -223,11 +224,12 @@ def test_explicit_table_discovery_routes_to_real_directed_witness(
     signature = SignatureExtractor("8.0.41").extract(sql)
     capability = adapter.find_capability(signature)
 
-    witness = adapter.generate_for_validation(capability.feature_id, seed=0)
-
-    assert capability.feature_id == expected_feature
-    assert "explicit_table" in witness.signature.nodes
-    assert witness.sql.endswith("ORDER BY 1") or "ORDER BY 1," in witness.sql
+    with pytest.raises(ValueError, match="PQ"):
+        adapter.generate_for_validation(capability.feature_id, seed=0)
+    assert capability.feature_id == "pq_excluded"
+    assert expected_feature.startswith("validation_table")
+    result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=3)
+    assert result.status is Reachability.GAP
 
 
 def test_table_in_subquery_is_not_claimed_by_an_exists_witness() -> None:
@@ -269,13 +271,11 @@ def test_table_values_union_distinct_uses_a_distinct_witness() -> None:
         "TABLE one_col UNION DISTINCT VALUES ROW(1) ORDER BY 1"
     )
     capability = adapter.find_capability(signature)
-    witness = adapter.generate_for_validation(capability.feature_id, seed=0)
+    with pytest.raises(ValueError, match="PQ"):
+        adapter.generate_for_validation(capability.feature_id, seed=0)
     result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
-
-    assert capability.feature_id == "validation_table_values_union_distinct"
-    assert "set_union_distinct" in witness.signature.nodes
-    assert "set_union_all" not in witness.signature.nodes
-    assert result.status is Reachability.SUPPORTED
+    assert capability.feature_id == "pq_excluded"
+    assert result.status is Reachability.GAP
 
 
 def test_branch_local_top_n_routes_to_an_isomorphic_directed_witness() -> None:
@@ -294,8 +294,7 @@ def test_branch_local_top_n_routes_to_an_isomorphic_directed_witness() -> None:
 def test_right_branch_local_top_n_routes_to_the_directed_witness() -> None:
     adapter = ProductionGeneratorAdapter()
     signature = SignatureExtractor("8.0.41").extract(
-        "SELECT id FROM t UNION "
-        "(SELECT id FROM u ORDER BY 1 LIMIT 2) ORDER BY 1"
+        "SELECT id FROM t UNION (SELECT id FROM u ORDER BY 1 LIMIT 2) ORDER BY 1"
     )
     capability = adapter.find_capability(signature)
     result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
@@ -307,8 +306,7 @@ def test_right_branch_local_top_n_routes_to_the_directed_witness() -> None:
 def test_nested_parenthesized_top_n_routes_to_an_isomorphic_witness() -> None:
     adapter = ProductionGeneratorAdapter()
     signature = SignatureExtractor("8.0.41").extract(
-        "((SELECT id FROM t ORDER BY 1 LIMIT 5) ORDER BY 1 LIMIT 3) "
-        "ORDER BY 1 LIMIT 2"
+        "((SELECT id FROM t ORDER BY 1 LIMIT 5) ORDER BY 1 LIMIT 3) ORDER BY 1 LIMIT 2"
     )
     capability = adapter.find_capability(signature)
     result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
@@ -338,15 +336,14 @@ def test_wrapped_set_branch_local_top_n_routes_to_the_directed_witness() -> None
     capability = adapter.find_capability(signature)
     result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
 
-    assert capability.feature_id == "validation_scalar_set_branch_local_top_n"
-    assert result.status is Reachability.SUPPORTED, result.reasons
+    assert capability.feature_id == "pq_excluded"
+    assert result.status is Reachability.GAP, result.reasons
 
 
 def test_nested_parenthesized_top_n_in_derived_subquery_remains_a_composite_gap() -> None:
     adapter = ProductionGeneratorAdapter()
     signature = SignatureExtractor("8.0.41").extract(
-        "SELECT id FROM (((SELECT 1 AS id ORDER BY 1 LIMIT 5) "
-        "ORDER BY 1 LIMIT 3)) AS d ORDER BY 1"
+        "SELECT id FROM (((SELECT 1 AS id ORDER BY 1 LIMIT 5) ORDER BY 1 LIMIT 3)) AS d ORDER BY 1"
     )
     capability = adapter.find_capability(signature)
     result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
@@ -360,7 +357,7 @@ def test_nested_parenthesized_top_n_in_derived_subquery_remains_a_composite_gap(
     [
         (
             "SELECT 1 ORDER BY 1 LIMIT 0",
-            "validation_scalar_limit_zero",
+            "pq_excluded",
             "limit_zero",
         ),
         (
@@ -376,6 +373,11 @@ def test_limit_boundary_discovery_routes_to_real_directed_witness(
     adapter = ProductionGeneratorAdapter()
     signature = SignatureExtractor("8.0.41").extract(sql)
     capability = adapter.find_capability(signature)
+    if expected_feature == "pq_excluded":
+        with pytest.raises(ValueError, match="PQ"):
+            adapter.generate_for_validation(capability.feature_id, seed=0)
+        assert capability.feature_id == expected_feature
+        return
     witness = adapter.generate_for_validation(capability.feature_id, seed=0)
 
     assert capability.feature_id == expected_feature
@@ -393,10 +395,10 @@ def test_comma_limit_offset_routes_to_offset_not_limit_zero() -> None:
 @pytest.mark.parametrize(
     ("sql", "expected_feature"),
     [
-        ("SELECT id FROM t ORDER BY 1 LIMIT 0", "validation_table_limit_zero"),
+        ("SELECT id FROM t ORDER BY 1 LIMIT 0", "pq_excluded"),
         (
             "SELECT 1 ORDER BY 1 LIMIT 2 OFFSET 1",
-            "validation_scalar_offset_limit",
+            "pq_excluded",
         ),
     ],
 )
@@ -409,7 +411,7 @@ def test_limit_requirement_routing_produces_same_domain_witness(
     result = CapabilityAuditor().audit(signature, capability, generator=adapter, budget=4)
 
     assert capability.feature_id == expected_feature
-    assert result.status is Reachability.SUPPORTED, result.reasons
+    assert result.status is Reachability.GAP, result.reasons
 
 
 @pytest.mark.parametrize(
@@ -424,7 +426,8 @@ def test_zero_limit_with_offset_routes_to_combined_real_witness(sql: str) -> Non
     signature = SignatureExtractor("8.0.41").extract(sql)
     capability = adapter.find_capability(signature)
 
-    witness = adapter.generate_for_validation(capability.feature_id, seed=0)
+    with pytest.raises(ValueError, match="PQ"):
+        adapter.generate_for_validation(capability.feature_id, seed=0)
     result = CapabilityAuditor().audit(
         signature,
         capability,
@@ -432,9 +435,9 @@ def test_zero_limit_with_offset_routes_to_combined_real_witness(sql: str) -> Non
         budget=4,
     )
 
-    assert capability.feature_id == "validation_table_offset_limit_zero"
-    assert {"limit_zero", "offset"} <= set(witness.signature.nodes)
-    assert result.status is Reachability.SUPPORTED
+    assert capability.feature_id == "pq_excluded"
+    assert {"limit_zero", "offset"} <= set(signature.nodes)
+    assert result.status is Reachability.GAP
 
 
 def test_scalar_zero_limit_with_offset_routes_to_scalar_real_witness() -> None:
@@ -448,8 +451,8 @@ def test_scalar_zero_limit_with_offset_routes_to_scalar_real_witness() -> None:
         budget=4,
     )
 
-    assert capability.feature_id == "validation_scalar_offset_limit_zero"
-    assert result.status is Reachability.SUPPORTED
+    assert capability.feature_id == "pq_excluded"
+    assert result.status is Reachability.GAP
 
 
 def test_derived_explicit_column_discovery_routes_to_real_directed_witness() -> None:

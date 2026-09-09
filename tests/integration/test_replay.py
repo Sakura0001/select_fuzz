@@ -8,7 +8,7 @@ import pytest
 
 from select_fuzz.artifacts.bundle import CaseBundleWriter, FindingRecord
 from select_fuzz.artifacts.reader import ArtifactReader, ArtifactValidationError
-from select_fuzz.config import NodeRole
+from select_fuzz.config import AppConfig, NodeConfig, NodeRole
 from select_fuzz.domain import ColumnMeta, ErrorInfo, ExecutionStatus, NodeExecution
 from select_fuzz.execution import DatabaseNameFactory, PrepareStatus, QueryLimits
 from select_fuzz.generation.query_contract import ExpectedErrorKind
@@ -18,6 +18,7 @@ from select_fuzz.replay import (
     ReplayService,
     ReplayStatus,
     TriadReplayAdapter,
+    build_replay_service,
 )
 
 
@@ -161,6 +162,106 @@ def test_replay_infrastructure_result_never_enters_semantic_oracle(
     assert result.status is ReplayStatus.INFRASTRUCTURE_ERROR
     assert result.replay_verdict is None
     assert result.replay_classification is None
+
+
+@pytest.mark.parametrize("peer_aborted", [False, True])
+@pytest.mark.parametrize(
+    ("status", "errno", "evidence"),
+    [
+        (ExecutionStatus.ERROR, 65004, None),
+        (ExecutionStatus.ERROR, 65004, {"pq_rejection": "not_pq"}),
+        (ExecutionStatus.TIMEOUT, 3024, {"pq_rejection": "admission_timeout"}),
+        (ExecutionStatus.INFRA_ERROR, 2013, {"pq_rejection": "plan_budget"}),
+    ],
+)
+def test_pq_rejected_replay_is_inconclusive_before_oracle_or_peer_infrastructure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: ExecutionStatus,
+    errno: int,
+    evidence: dict[str, object] | None,
+    peer_aborted: bool,
+) -> None:
+    CaseBundleWriter(tmp_path).write_finding(_finding())
+    executions = list(_mismatch())
+    executions[2] = NodeExecution.failure(
+        role=NodeRole.CUSTOM_ON,
+        status=status,
+        started_ns=1,
+        ended_ns=2,
+        connection_id=102,
+        error=ErrorInfo(errno, "HY000", "PQ admission failed"),
+        performance_payload=evidence,
+    )
+    if peer_aborted:
+        executions[0] = NodeExecution.failure(
+            role=NodeRole.BASELINE,
+            status=ExecutionStatus.INFRA_ERROR,
+            started_ns=1,
+            ended_ns=2,
+            connection_id=100,
+            error=ErrorInfo(65002, "HY000", "measurement barrier was aborted"),
+        )
+
+    def fail_oracle(*args: object) -> None:
+        pytest.fail("a PQ admission rejection must never enter the semantic oracle")
+
+    monkeypatch.setattr("select_fuzz.replay.compare_three_nodes", fail_oracle)
+    monkeypatch.setattr("select_fuzz.replay.analyze_query_errors", fail_oracle)
+
+    result = _service(tmp_path, _ReplayCoordinator(executions)).replay("case_finding_1")
+
+    assert result.status is ReplayStatus.PREPARATION_FAILED
+    assert result.replay_verdict is None
+    assert result.replay_classification == "pq_rejected"
+    assert result.executions == tuple(executions)
+
+
+def test_workload_timeout_without_admission_evidence_still_enters_replay_oracle(
+    tmp_path: Path,
+) -> None:
+    CaseBundleWriter(tmp_path).write_finding(_finding())
+    executions = list(_mismatch())
+    executions[2] = NodeExecution.failure(
+        role=NodeRole.CUSTOM_ON,
+        status=ExecutionStatus.TIMEOUT,
+        started_ns=1,
+        ended_ns=2,
+        connection_id=102,
+        error=ErrorInfo(3024, "HYT00", "workload exceeded the query deadline"),
+        performance_payload={"pq_triggered": True},
+    )
+
+    result = _service(tmp_path, _ReplayCoordinator(executions)).replay("case_finding_1")
+
+    assert result.status is ReplayStatus.NOT_REPRODUCED
+    assert result.replay_verdict is OracleVerdict.OVER_BUDGET
+    assert result.replay_classification == OracleVerdict.OVER_BUDGET.value
+
+
+def test_production_replay_service_does_not_require_pq_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from select_fuzz.execution import NodeQueryRunner
+
+    required: list[bool] = []
+
+    def query_runner(factory: object, *, require_pq: bool = False) -> NodeQueryRunner:
+        required.append(require_pq)
+        return NodeQueryRunner(factory, require_pq=require_pq)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("select_fuzz.replay.NodeQueryRunner", query_runner)
+    config = AppConfig(
+        mode="correctness",
+        nodes=tuple(
+            NodeConfig(role=role, host="127.0.0.1", port=3306 + index)
+            for index, role in enumerate(NodeRole)
+        ),
+    )
+
+    build_replay_service(config, tmp_path)
+
+    assert required == [False]
 
 
 class _Prepared:

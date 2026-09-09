@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import re
+
 from select_fuzz.config import NodeRole
+from select_fuzz import performance
+from select_fuzz.performance import templates as builtin_templates
 from select_fuzz.performance.calibration import CostModel
 from select_fuzz.performance.models import ScaleKnobs
 from select_fuzz.performance.templates import (
@@ -9,7 +13,6 @@ from select_fuzz.performance.templates import (
     CpuDenseRangeSortTemplate,
     CpuDenseScanTemplate,
     CpuDenseSetupManifest,
-    CpuDenseWindowTemplate,
 )
 from select_fuzz.performance.tree import parse_tree
 
@@ -45,7 +48,24 @@ def test_cpu_dense_template_carries_reproducible_ddl_dml_and_bounded_sql() -> No
     assert template.render(scale).endswith("ORDER BY 1")
 
 
-def test_cpu_dense_catalog_consumes_range_join_group_sort_and_window_knobs() -> None:
+def test_cpu_dense_templates_only_render_pq_supported_query_shapes() -> None:
+    unsupported = re.compile(
+        r"\b(?:SHA2|CONCAT|REPEAT|OVER|WINDOW|GROUP_CONCAT|BIT_XOR|DIV)\b",
+        re.IGNORECASE,
+    )
+    scale = ScaleKnobs(table_rows=1000, scan_rows=800, sort_rows=500)
+    for name in builtin_templates.__all__:
+        if name.endswith("Template"):
+            template = getattr(builtin_templates, name)(seed=1, case_id="pq_template")
+            assert unsupported.search(template.render(scale)) is None, name
+
+
+def test_unsupported_window_template_is_not_exported_or_constructible() -> None:
+    assert not hasattr(builtin_templates, "CpuDenseWindowTemplate")
+    assert not hasattr(performance, "CpuDenseWindowTemplate")
+
+
+def test_cpu_dense_catalog_consumes_range_join_group_and_sort_knobs() -> None:
     scale = ScaleKnobs(
         table_rows=1000,
         scan_rows=800,
@@ -56,15 +76,11 @@ def test_cpu_dense_catalog_consumes_range_join_group_sort_and_window_knobs() -> 
         aggregate_input_rows=600,
         aggregate_groups=40,
         sort_rows=500,
-        sort_key_bytes=16,
-        window_partition_rows=100,
-        window_frame_rows=10,
     )
     templates = (
         CpuDenseRangeSortTemplate(seed=1, case_id="range", initial_scale=scale),
         CpuDenseJoinTemplate(seed=2, case_id="join", initial_scale=scale),
         CpuDenseGroupSortTemplate(seed=3, case_id="group", initial_scale=scale),
-        CpuDenseWindowTemplate(seed=4, case_id="window", initial_scale=scale),
     )
 
     rendered = [template.render(scale) for template in templates]
@@ -73,4 +89,3 @@ def test_cpu_dense_catalog_consumes_range_join_group_sort_and_window_knobs() -> 
     assert "250" in rendered[0]
     assert "200" in rendered[1] and "700" in rendered[1]
     assert "40" in rendered[2] and "600" in rendered[2]
-    assert "100" in rendered[3] and "10 PRECEDING" in rendered[3]

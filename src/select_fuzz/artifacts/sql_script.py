@@ -29,10 +29,8 @@ _ROUTINE_START = re.compile(
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
-DEFAULT_SESSION_STATEMENTS = (
-    "SET NAMES utf8mb4",
-    "SET SESSION time_zone = '+00:00'",
-)
+# Reproduction scripts inherit externally preconfigured connection parameters.
+DEFAULT_SESSION_STATEMENTS: tuple[str, ...] = ()
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:

@@ -240,14 +240,18 @@ def test_runner_preserves_dml_affected_rows(node: NodeConfig) -> None:
     assert result.affected_rows == 23
 
 
-def test_runner_initializes_query_session_to_utc_before_user_sql(
-    node: NodeConfig,
+@pytest.mark.parametrize("pinned_session", (False, True))
+def test_runner_preserves_preconfigured_session_before_user_sql(
+    node: NodeConfig, pinned_session: bool,
 ) -> None:
     session = _Session(_Cursor())
     factory = _Factory(session)
+    runner = _runner(factory)
+    run = runner.run_session if pinned_session else runner.run
+    session_args = (session,) if pinned_session else ()
 
-    result = _runner(factory).run_session(
-        session,
+    result = run(
+        *session_args,
         node,
         "sf_temp_1",
         "SELECT 1",
@@ -257,15 +261,11 @@ def test_runner_initializes_query_session_to_utc_before_user_sql(
     )
 
     assert result.status is ExecutionStatus.SUCCESS
-    assert session.executed == [
-        "SET SESSION time_zone = '+00:00'",
-        "SELECT 1",
-    ]
-    assert len(session.initialization_cursors) == 1
-    assert session.initialization_cursors[0].closed is True
+    assert session.executed == ["SELECT 1"]
+    assert session.initialization_cursors == []
 
 
-def test_session_initialization_failure_is_infrastructure_and_skips_user_sql(
+def test_runner_does_not_require_permission_to_change_time_zone(
     node: NodeConfig,
 ) -> None:
     session = _Session(
@@ -282,26 +282,31 @@ def test_session_initialization_failure_is_infrastructure_and_skips_user_sql(
         session,
         node,
         "sf_temp_1",
-        "SELECT must_not_run",
+        "SELECT 1",
         timeout_s=15,
         row_limit=10,
         byte_limit=1024,
     )
 
-    assert result.status is ExecutionStatus.INFRA_ERROR
+    assert result.status is ExecutionStatus.SUCCESS
     assert result.connection_id == 41
-    assert result.connection_reusable is False
-    assert result.error is not None
-    assert result.error.message == "query session initialization failed: _DatabaseError"
-    assert session.executed == ["SET SESSION time_zone = '+00:00'"]
+    assert result.connection_reusable is True
+    assert result.error is None
+    assert session.executed == ["SELECT 1"]
     assert factory.control_context_entries == 0
 
 
-def test_statement_end_time_excludes_post_execution_warning_diagnostics(
+def test_statement_end_time_excludes_warning_diagnostics_and_cursor_cleanup(
     node: NodeConfig,
 ) -> None:
     now = [100]
-    cursor = _Cursor(on_warnings=lambda: now.__setitem__(0, 10_000))
+
+    class SlowCleanupCursor(_Cursor):
+        def close(self) -> None:
+            now[0] = 20_000
+            super().close()
+
+    cursor = SlowCleanupCursor(on_warnings=lambda: now.__setitem__(0, 10_000))
     factory = _Factory(_Session(cursor))
     runner = NodeQueryRunner(
         factory,
@@ -321,6 +326,112 @@ def test_statement_end_time_excludes_post_execution_warning_diagnostics(
 
     assert result.started_ns == 100
     assert result.ended_ns == 100
+
+
+@pytest.mark.parametrize(
+    ("fetch_error", "expected_status"),
+    (
+        (None, ExecutionStatus.TIMEOUT),
+        (ValueError("could not convert string to float"), ExecutionStatus.INFRA_ERROR),
+        (_DatabaseError(3024, "HY000", "server query deadline"), ExecutionStatus.TIMEOUT),
+    ),
+)
+@pytest.mark.parametrize("cleanup_fails", (False, True))
+def test_watchdog_bounds_cursor_cleanup_even_after_client_fetch_failure(
+    node: NodeConfig, fetch_error: Exception | None,
+    expected_status: ExecutionStatus, cleanup_fails: bool,
+) -> None:
+    aborted = Event()
+
+    class DrainingCursor(_Cursor):
+        released_by_abort = False
+
+        def close(self) -> None:
+            # mysql-connector can consume unread rows/next result sets here,
+            # including after fetchmany raises a Python conversion error.
+            self.released_by_abort = aborted.wait(0.5)
+            super().close()
+
+    class AbortableSession(_Session):
+        def abort(self) -> None:
+            super().abort()
+            aborted.set()
+
+    cursor = DrainingCursor(
+        fetch_error=fetch_error,
+        close_error=_DatabaseError(2013, "HY000", "lost during drain") if cleanup_fails else None,
+    )
+    session = AbortableSession(cursor)
+    factory = _Factory(session)
+    runner = NodeQueryRunner(factory, watchdog=KillQueryWatchdog(factory, kill_grace_s=0.01))
+
+    result = runner.run_session(
+        session, node, "sf_cleanup", "SELECT wide_result FROM t",
+        timeout_s=0.02, row_limit=10, byte_limit=1024,
+    )
+
+    assert cursor.released_by_abort, "cleanup lost its watchdog before unread rows were drained"
+    assert session.aborted and not result.connection_reusable
+    assert factory.kills == ["KILL QUERY 41"]
+    assert result.watchdog_fired
+    assert result.status is expected_status
+    if isinstance(fetch_error, ValueError):
+        assert result.error is not None and "ValueError" in result.error.message
+    elif isinstance(fetch_error, _DatabaseError):
+        assert result.error is not None and result.error.errno == fetch_error.errno
+
+
+def test_cleanup_waits_for_inflight_kill_before_returning_pinned_session(
+    node: NodeConfig,
+) -> None:
+    aborted = Event()
+    cleanup_finished = Event()
+    release_kill = Event()
+    returned = Event()
+    results = []
+
+    class DrainingCursor(_Cursor):
+        def close(self) -> None:
+            aborted.wait(0.5)
+            super().close()
+            cleanup_finished.set()
+
+    class AbortableSession(_Session):
+        def abort(self) -> None:
+            super().abort()
+            aborted.set()
+
+    class DelayedKillFactory(_Factory):
+        @contextmanager
+        def control_session(self, node: NodeConfig, database: str):
+            assert release_kill.wait(1), "test did not release control connection"
+            yield _ControlSession(self)
+
+    session = AbortableSession(DrainingCursor())
+    factory = DelayedKillFactory(session)
+    runner = NodeQueryRunner(factory, watchdog=KillQueryWatchdog(factory, kill_grace_s=0.01))
+
+    def execute() -> None:
+        results.append(runner.run_session(
+            session, node, "sf_cleanup", "SELECT wide_result FROM t",
+            timeout_s=0.02, row_limit=10, byte_limit=1024,
+        ))
+        returned.set()
+
+    worker = Thread(target=execute)
+    worker.start()
+    try:
+        assert cleanup_finished.wait(0.4), "watchdog did not release blocked cleanup"
+        assert session.aborted
+        assert not returned.is_set(), "an in-flight KILL could target the next query"
+    finally:
+        release_kill.set()
+        aborted.set()
+        worker.join(1)
+
+    assert returned.is_set()
+    assert factory.kills == ["KILL QUERY 41"]
+    assert not results[0].connection_reusable
 
 
 @pytest.mark.parametrize(
@@ -1085,9 +1196,12 @@ def test_absolute_control_deadline_rejects_invalid_or_expired_values(
             pass
 
 
-def test_connector_applies_typed_session_variables_when_opening_replica_session(
-    node: NodeConfig,
+@pytest.mark.parametrize("role", tuple(NodeRole))
+@pytest.mark.parametrize("session_kind", ("query", "control", "bounded", "deadline"))
+def test_connector_preserves_preconfigured_variables_for_all_session_kinds(
+    role: NodeRole, session_kind: str,
 ) -> None:
+    node = NodeConfig(role=role, host="127.0.0.1")
     connection = _RawConnection()
     factory = MySQLConnectorFactory(
         environ={
@@ -1096,17 +1210,23 @@ def test_connector_applies_typed_session_variables_when_opening_replica_session(
         },
         connect=lambda **kwargs: connection,
         session_variables_by_role={
-            NodeRole.BASELINE: {
+            role: {
                 "optimizer_switch": "index_merge=off",
                 "sql_safe_updates": 0,
             }
         },
     )
 
-    with factory.query_session(node, "sf_case_1"):
+    contexts = {
+        "query": lambda: factory.query_session(node, "sf_case_1"),
+        "control": lambda: factory.control_session(node, "sf_case_1"),
+        "bounded": lambda: factory.control_session_with_timeout(node, "sf_case_1", 2),
+        "deadline": lambda: factory.control_session_until(
+            node, "sf_case_1", time.monotonic() + 3,
+        ),
+    }
+    with contexts[session_kind]():
         pass
 
-    assert connection.query_cursor.executed == [
-        "SET SESSION optimizer_switch = 'index_merge=off'",
-        "SET SESSION sql_safe_updates = 0",
-    ]
+    assert connection.query_cursor.executed == []
+    assert connection.closed is True

@@ -28,6 +28,10 @@ from select_fuzz.execution.protocols import (
     QuerySession,
 )
 from select_fuzz.execution.timeout import KillQueryWatchdog
+from select_fuzz.execution.pq_gate import (
+    PQAdmissionRejected, PQAdmissionTimeout, admit_pq, check_pq_analyze,
+    check_pq_warnings, is_pq_workload,
+)
 
 
 INTERNAL_RESULT_LIMIT_ERRNO = 65001
@@ -36,7 +40,6 @@ INTERNAL_WATCHDOG_TIMEOUT_ERRNO = 65003
 _INTERNAL_SQLSTATE = "HY000"
 _TIMEOUT_SQLSTATE = "HYT00"
 _MYSQL_CLIENT_ERROR_RANGE = range(2000, 3000)
-_QUERY_SESSION_INITIALIZATION_SQL = "SET SESSION time_zone = '+00:00'"
 
 
 def _session_value_sql(value: bool | int | float | str) -> str:
@@ -56,7 +59,7 @@ def _session_value_sql(value: bool | int | float | str) -> str:
 def render_session_variable_sql(
     variables: Mapping[str, bool | int | float | str],
 ) -> tuple[str, ...]:
-    """Render validated non-secret SET SESSION statements deterministically."""
+    """Render legacy session configuration deterministically without executing it."""
 
     statements: list[str] = []
     for name in sorted(variables):
@@ -151,11 +154,6 @@ def _database_error(error: Exception) -> ErrorInfo | None:
     return None
 
 
-def _initialize_query_session(session: QuerySession) -> None:
-    cursor = session.execute(_QUERY_SESSION_INITIALIZATION_SQL)
-    cursor.close()
-
-
 class NodeQueryRunner:
     """Execute one statement, stream bounded rows, and return only typed outcomes."""
 
@@ -165,10 +163,12 @@ class NodeQueryRunner:
         *,
         watchdog: KillQueryWatchdog | None = None,
         monotonic_ns: Callable[[], int] = time_module.monotonic_ns,
+        require_pq: bool = False,
     ) -> None:
         self._factory = factory
         self._watchdog = watchdog or KillQueryWatchdog(factory)
         self._monotonic_ns = monotonic_ns
+        self._require_pq = require_pq
 
     def run(
         self,
@@ -243,23 +243,7 @@ class NodeQueryRunner:
                 connection_reusable=False,
             )
 
-        try:
-            _initialize_query_session(session)
-        except Exception as error:
-            ended_ns = self._monotonic_ns()
-            return NodeExecution.failure(
-                role=node.role,
-                status=ExecutionStatus.INFRA_ERROR,
-                started_ns=initial_ns,
-                ended_ns=max(initial_ns, ended_ns),
-                connection_id=connection_id,
-                error=_internal_error(
-                    f"query session initialization failed: {type(error).__name__}"
-                ),
-                connection_reusable=False,
-            )
-
-        if barrier is not None:
+        if barrier is not None and not self._require_pq:
             try:
                 barrier.wait(timeout=float(timeout_s))
             except Exception as error:
@@ -307,7 +291,26 @@ class NodeQueryRunner:
         cleanup_error: Exception | None = None
         statement_ended_ns: int | None = None
         connection_reusable = True
+        pq_evidence: dict[str, object] | None = None
+        pq_required = False
+        admission_deadline_ns = started_ns + int(timeout_s * 1_000_000_000)
+
+        def check_admission_deadline() -> None:
+            if handle.timed_out or self._monotonic_ns() >= admission_deadline_ns:
+                raise PQAdmissionTimeout()
+
         try:
+            pq_required = self._require_pq and node.role is NodeRole.CUSTOM_ON and is_pq_workload(sql)
+            if pq_required:
+                pq_evidence = admit_pq(session, sql, check_deadline=check_admission_deadline)
+            if self._require_pq:
+                check_admission_deadline()
+                if barrier is not None:
+                    barrier.wait(timeout=max(0.001, (
+                        admission_deadline_ns - self._monotonic_ns()) / 1_000_000_000))
+                check_admission_deadline()
+                # Admission time belongs to the deadline, not to the query timing.
+                started_ns = self._monotonic_ns()
             cursor = session.execute(sql)
             columns = cursor.columns
             affected_rows = getattr(cursor, "affected_rows", None)
@@ -328,16 +331,19 @@ class NodeQueryRunner:
                     rows.append(row)
                     retained_bytes += row_bytes
             statement_ended_ns = self._monotonic_ns()
-            statement_done.set()
-            handle.cancel(statement_token=statement_token)
             try:
                 warnings = cursor.warnings()
             except Exception:
                 warnings = ()
                 connection_reusable = False
+                if pq_required:
+                    raise PQAdmissionRejected("warnings_unavailable", pq_evidence)
+            if pq_required:
+                assert pq_evidence is not None
+                check_pq_warnings(warnings, pq_evidence)
+                check_pq_analyze(sql, tuple(rows), tuple(c.name for c in columns), pq_evidence)
         except _ResultLimitExceeded as limit_error:
             handle.trigger(statement_token=statement_token)
-            statement_done.set()
             statement_ended_ns = self._monotonic_ns()
             connection_reusable = False
             if handle.timed_out:
@@ -353,8 +359,14 @@ class NodeQueryRunner:
             rows.clear()
             columns = ()
         except Exception as execution_error:
-            statement_done.set()
-            statement_ended_ns = self._monotonic_ns()
+            if self._require_pq and barrier is not None:
+                abort_barrier = getattr(barrier, "abort", None)
+                if callable(abort_barrier):
+                    abort_barrier()
+            if isinstance(execution_error, (PQAdmissionRejected, PQAdmissionTimeout)):
+                pq_evidence = execution_error.evidence
+            if statement_ended_ns is None:
+                statement_ended_ns = self._monotonic_ns()
             error_info = _database_error(execution_error)
             if error_info is None:
                 status = (
@@ -383,27 +395,27 @@ class NodeQueryRunner:
                 connection_reusable = False
             else:
                 status = ExecutionStatus.ERROR
+            if pq_evidence is not None and pq_evidence.get("pq_connection_reusable") is False:
+                connection_reusable = False
             rows.clear()
             columns = ()
         finally:
-            statement_done.set()
-            handle.cancel(statement_token=statement_token)
-            if cursor is not None:
-                try:
-                    cursor.close()
-                except Exception as close_error:
-                    cleanup_error = close_error
+            try:
+                if cursor is not None:
+                    try:
+                        cursor.close()
+                    except Exception as close_error:
+                        cleanup_error = close_error
+            finally:
+                # close() can still drain unread rows or procedure result sets,
+                # even after fetch raises a client conversion error. Keep the
+                # deadline and abort fallback active until that drain ends.
+                statement_done.set()
+                # Join an already-fired KILL before a caller can reuse this ID.
+                handle.cancel(statement_token=statement_token)
 
         ended_ns = self._monotonic_ns() if statement_ended_ns is None else statement_ended_ns
-        if cleanup_error is not None and status is ExecutionStatus.SUCCESS:
-            status = ExecutionStatus.INFRA_ERROR
-            error_info = _internal_error(f"cursor cleanup failed: {type(cleanup_error).__name__}")
-            rows.clear()
-            columns = ()
-            connection_reusable = False
-        elif cleanup_error is not None:
-            connection_reusable = False
-        elif handle.timed_out and status is ExecutionStatus.SUCCESS:
+        if handle.timed_out and status is ExecutionStatus.SUCCESS:
             status = ExecutionStatus.TIMEOUT
             error_info = ErrorInfo(
                 INTERNAL_WATCHDOG_TIMEOUT_ERRNO,
@@ -412,6 +424,12 @@ class NodeQueryRunner:
             )
             rows.clear()
             columns = ()
+        elif cleanup_error is not None and status is ExecutionStatus.SUCCESS:
+            status = ExecutionStatus.INFRA_ERROR
+            error_info = _internal_error(f"cursor cleanup failed: {type(cleanup_error).__name__}")
+            rows.clear()
+            columns = ()
+        if cleanup_error is not None or handle.timed_out:
             connection_reusable = False
 
         if status is ExecutionStatus.SUCCESS:
@@ -425,6 +443,7 @@ class NodeQueryRunner:
                 warnings=warnings,
                 connection_reusable=connection_reusable,
                 affected_rows=affected_rows,
+                performance_payload=pq_evidence,
             )
         assert error_info is not None
         return NodeExecution.failure(
@@ -438,6 +457,7 @@ class NodeQueryRunner:
             watchdog_fired=handle.timed_out,
             watchdog_error_type=handle.kill_error_type,
             connection_reusable=connection_reusable,
+            performance_payload=pq_evidence,
         )
 
 
@@ -562,7 +582,11 @@ class _ConnectorSession:
 
 
 class MySQLConnectorFactory:
-    """Late-resolving secret-safe mysql-connector-python connection factory."""
+    """Late-resolving secret-safe mysql-connector-python connection factory.
+
+    Database parameters are preconfigured externally. ``session_variables_by_role``
+    remains accepted and validated for compatibility; none of its values are applied.
+    """
 
     def __init__(
         self,
@@ -607,10 +631,8 @@ class MySQLConnectorFactory:
         # connect() together on macOS. Serialize only connection construction;
         # established sessions still execute concurrently.
         self._cext_connect_lock = Lock()
-        self._session_sql_by_role = {
-            role: render_session_variable_sql(variables)
-            for role, variables in (session_variables_by_role or {}).items()
-        }
+        for variables in (session_variables_by_role or {}).values():
+            render_session_variable_sql(variables)
 
     @contextmanager
     def _session(
@@ -645,9 +667,6 @@ class MySQLConnectorFactory:
                 connection = self._connect(**connect_kwargs)
         session = _ConnectorSession(connection, self._diagnostic_timeout_s)
         try:
-            for sql in self._session_sql_by_role.get(node.role, ()):
-                cursor = session.execute(sql)
-                cursor.close()
             yield session
         finally:
             session.close()

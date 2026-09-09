@@ -127,7 +127,7 @@ _SESSION_VARIABLE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class ReplicaSessionConfig(StrictModel):
-    """SET SESSION values applied only to newly opened replica sessions."""
+    """Legacy session values retained for config validation; never applied at runtime."""
 
     session_variables: dict[str, SessionVariableValue] = Field(default_factory=dict)
 
@@ -151,7 +151,7 @@ def _default_replica_sessions() -> dict[NodeRole, ReplicaSessionConfig]:
 
 
 class ReplicaParametersConfig(StrictModel):
-    """Versioned, non-secret session parameters for all three replicas."""
+    """Versioned legacy replica parameters, retained without changing database settings."""
 
     version: Literal[1] = 1
     replicas: dict[NodeRole, ReplicaSessionConfig] = Field(

@@ -1,4 +1,10 @@
 .git
+.worktrees
+.local
+.env
+.env.*
+config/local*.yaml
+config/intranet-fuzz.yaml
 .venv
 .uv-cache
 .pytest_cache

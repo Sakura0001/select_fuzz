@@ -11,7 +11,7 @@ def test_every_deterministic_function_and_null_witness_on_exact_8041_triad() -> 
 
     for profile in FunctionValueProfile:
         cases = _function_cases(profile)
-        assert len(cases) == 335
+        assert len(cases) == 105
         _run_cases(
             cases,
             artifact_name=f"latest-grammar-function-{profile.value}-20260716",

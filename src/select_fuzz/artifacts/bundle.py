@@ -647,9 +647,11 @@ class CaseBundleWriter:
         if self._thread_sql_log is not None:
             log = self._thread_sql_log
             header = {**metadata, "database": database, "phase": "round_setup"}
-            log.append(worker_id, "SET NAMES utf8mb4", metadata=header)
-            log.append(worker_id, "SET SESSION time_zone = '+00:00'")
-            log.append(worker_id, f"CREATE DATABASE IF NOT EXISTS `{database}`")
+            log.append(
+                worker_id,
+                f"CREATE DATABASE IF NOT EXISTS `{database}`",
+                metadata=header,
+            )
             log.append(worker_id, f"USE `{database}`")
             for statement in setup_sql:
                 if _is_routine_statement(statement):

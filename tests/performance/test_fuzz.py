@@ -82,6 +82,26 @@ def test_performance_fuzz_excludes_special_types_indexes_and_always_reads_genera
         assert ";" not in sql
 
 
+def test_performance_fuzz_schema_and_queries_stay_inside_pq_support() -> None:
+    forbidden = re.compile(
+        r"\b(?:TINYTEXT|TEXT|MEDIUMTEXT|LONGTEXT|TINYBLOB|BLOB|MEDIUMBLOB|LONGBLOB|"
+        r"JSON|GEOMETRY|POINT|VECTOR|OVER|WINDOW|SHA2|CONCAT|REPEAT|LOWER|"
+        r"GENERATED|TEMPORARY|PARTITION|FULLTEXT|SPATIAL)\b",
+        re.IGNORECASE,
+    )
+    for seed in range(100):
+        case = _template(seed)
+        ddl = case.schema.render_setup_sql()
+        sql = case.render(case.initial_scale)
+        assert forbidden.search(ddl) is None, ddl
+        assert forbidden.search(sql) is None, sql
+        assert all(
+            index.kind is IndexKind.BTREE and all(part.expression is None for part in index.parts)
+            for table in case.schema.tables for index in table.indexes
+        )
+        assert case.target_rows(case.initial_scale) <= case.initial_scale.table_rows
+
+
 def test_performance_seed_window_reaches_safe_composite_index_families() -> None:
     reached = {}
     name_to_family = {

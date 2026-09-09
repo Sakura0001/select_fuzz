@@ -216,6 +216,43 @@ def test_declaration_pool_contains_mysql_8041_legal_boundaries() -> None:
     } <= declarations
 
 
+def test_executable_schema_boundaries_exclude_pq_unsupported_types() -> None:
+    limits = SchemaLimits()
+    unsupported = {
+        "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "TINYBLOB", "BLOB",
+        "MEDIUMBLOB", "LONGBLOB", "JSON", "GEOMETRY", "POINT", "LINESTRING",
+        "POLYGON", "MULTIPOINT", "MULTILINESTRING", "MULTIPOLYGON", "GEOMETRYCOLLECTION",
+    }
+    assert not unsupported.intersection(SchemaGenerator.executable_boundary_pool(limits))
+    assert all(
+        boundary.declaration not in unsupported
+        for boundary in SchemaGenerator.executable_boundary_declarations(limits)
+    )
+    with pytest.raises(ValueError, match="PQ"):
+        SchemaGenerator.typed_boundary_column(
+            name="boundary_col", boundary_id=BoundaryDeclarationId.TEXT, limits=limits
+        )
+
+
+@pytest.mark.parametrize("profile", [SchemaProfile.REGULAR_INNODB, SchemaProfile.FOREIGN_KEY_GRAPH])
+def test_comparison_schema_random_lane_uses_pq_supported_physical_columns(
+    profile: SchemaProfile,
+) -> None:
+    for seed in range(100):
+        manifest = SchemaGenerator().generate(
+            _target(profile), seed=seed, limits=SchemaLimits(min_tables=2, max_tables=2)
+        )
+        for table in manifest.tables:
+            assert not table.temporary and table.partition is None
+            assert all(
+                "TEXT" not in column.base_type and "BLOB" not in column.base_type
+                and column.base_type not in {"JSON", "GEOMETRY", "POINT", "VECTOR"}
+                for column in table.columns
+            )
+            assert all(index.kind is IndexKind.BTREE for index in table.indexes)
+            assert all(part.expression is None for index in table.indexes for part in index.parts)
+
+
 def test_non_special_boundaries_have_stable_machine_enumerable_ids() -> None:
     boundaries = SchemaGenerator.boundary_declarations(SchemaLimits())
 
@@ -691,8 +728,8 @@ def test_regular_primary_key_and_secondary_index_matrix_is_reachable() -> None:
         "ix_id_desc",
         "uq_id_payload",
         "ix_payload_prefix",
-        "ix_payload_lower",
     } <= index_names
+    assert "ix_payload_lower" not in index_names
 
 
 def test_correctness_seed_window_reaches_safe_composite_index_families() -> None:

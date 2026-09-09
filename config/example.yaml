@@ -7,13 +7,15 @@ mode: correctness
 # 是否把每条已执行 SQL 追加到 artifacts/sql/worker-NNN.sql。默认关闭，长时间运行时可减少磁盘占用。
 full_thread_sql_log: false
 
-# 副本 SESSION 参数文件。相对路径以本文件所在目录为基准；null 表示使用三个角色的空参数默认值。
+# 副本参数元数据文件，仅用于记录，不下发 SESSION SET。相对路径以本文件所在目录为基准。
+# null 表示不记录额外角色参数。
 replica_parameters_file: null
 
 # setup 完成后等待副本追平的最长秒数；范围 (0, 300]，默认 10 秒。
 replica_sync_timeout_seconds: 10
 
 # 固定三角色拓扑；correctness/performance 必须使用 6 个互不重复的 endpoint。
+# 三种模式及 replay 均支持普通 MySQL，不要求 PQ；角色名沿用原有配置格式。
 # fuzz 模式只使用 fuzz.target_role，主库和备库可以配置为同一个负载均衡代理入口；
 # 可直接参考 config/intranet-fuzz.example.yaml。
 nodes:
@@ -64,7 +66,7 @@ nodes:
       role_probe_sql: null
       # 角色探针期望返回值；默认 null。
       role_probe_expected: null
-    # custom_off 副本：使用 replica 参数文件中的 custom_off SESSION 参数执行查询。
+    # custom_off 副本：直接使用服务端预配置参数执行查询。
     replica:
       # MySQL 主机名或 IP；必填。
       host: 127.0.0.1
@@ -95,7 +97,7 @@ nodes:
       role_probe_sql: null
       # 角色探针期望返回值；默认 null。
       role_probe_expected: null
-    # custom_on 副本：使用 replica 参数文件中的 custom_on SESSION 参数执行查询。
+    # custom_on 副本：直接使用服务端预配置参数执行查询。
     # correctness/performance 中必须与主库不同；fuzz 模式可与主库共享代理入口。
     replica:
       # MySQL 主机名或 IP；必填。
@@ -196,7 +198,7 @@ performance:
 # fuzz：在一个指定角色的主备集群上，为多个独立数据库并发执行读写压力。
 # 该模式不做结果正确性判定，也不使用 EXPLAIN ANALYZE；读结果会流式消费后丢弃。
 fuzz:
-  # 使用哪一组主备连接；PQ 由服务端预先开启，程序不会修改 PQ 会话开关。
+  # 使用哪一组主备连接；支持普通 MySQL，程序不会修改 PQ 或其他会话运行参数。
   target_role: custom_on
   # 同一组集群上并行创建的数据库数量；每个数据库初始化完成后立即开始自己的 worker。
   databases: 1

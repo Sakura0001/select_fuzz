@@ -76,15 +76,13 @@ from select_fuzz.service import (
     RoundContext,
     RoundSummary,
 )
+from select_fuzz.execution.pq_gate import is_pq_rejection
 
 
 _PRODUCTION_SCHEMA_PROFILES = frozenset(
     {
         SchemaProfile.REGULAR_INNODB.value,
-        SchemaProfile.PARTITIONED_INNODB.value,
-        SchemaProfile.TEMPORARY_INNODB.value,
         SchemaProfile.FOREIGN_KEY_GRAPH.value,
-        SchemaProfile.JSON_MULTIVALUE_INNODB.value,
     }
 )
 
@@ -644,6 +642,7 @@ def _query_execution_to_log(execution: NodeExecution) -> dict[str, object]:
         "warnings": execution.warnings,
         "watchdog_error_type": execution.watchdog_error_type,
         "watchdog_fired": execution.watchdog_fired,
+        "pq_evidence": _json_event_value(execution.performance_payload),
     }
 
 
@@ -918,10 +917,21 @@ class CorrectnessRoundEngine:
             )
         legacy_queries = iter(materialized.queries)
         candidate_ordinal = 0
+        candidate_budget = max(100, context.request.queries_per_round * 12)
         try:
             while True:
+                if stop_event.is_set():
+                    break
                 if dynamic_queries:
                     if queries_completed >= context.request.queries_per_round:
+                        break
+                    if candidate_ordinal >= candidate_budget:
+                        events.publish("generation_budget_exhausted", {
+                            "database": current_prepared.database,
+                            "attempts": candidate_ordinal, "budget": candidate_budget,
+                            "queries_completed": queries_completed,
+                            "worker_id": context.worker_id,
+                        })
                         break
                     if dynamic_generate is None:  # pragma: no cover - invariant above
                         raise RuntimeError("dynamic query generator is unavailable")
@@ -1084,7 +1094,8 @@ class CorrectnessRoundEngine:
                     }
                     has_infra_error = any(
                         execution.status is ExecutionStatus.INFRA_ERROR for execution in executions
-                    )
+                    ) and not any(is_pq_rejection(e.error.errno if e.error else None, e.performance_payload)
+                                  for e in executions)
                     if not has_infra_error:
                         break
                     aborting = stop_event.is_set()
@@ -1126,6 +1137,20 @@ class CorrectnessRoundEngine:
                 # stop flag prevents the next query at the top of the loop.
                 if has_infra_error:
                     break
+                if any(is_pq_rejection(e.error.errno if e.error else None, e.performance_payload)
+                       for e in executions):
+                    rejected += 1
+                    self._artifacts.write_query_record(context.worker_id, {
+                        **attempt_context, "nodes": nodes,
+                        "result_database": current_prepared.database,
+                        "type": "query_attempt_finished", "verdict": "pq_rejected",
+                    })
+                    events.publish("query_rejected", {
+                        "case_id": case_id, "database": current_prepared.database,
+                        "query_seed": query.seed, "query_sql": query.sql,
+                        "reason": "pq_rejected", "worker_id": context.worker_id,
+                    })
+                    continue
                 if dynamic_queries and _has_uniform_runtime_error(executions):
                     rejected += 1
                     observed_error_identities = tuple(

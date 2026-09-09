@@ -1264,6 +1264,11 @@ class DataGenerator:
         rng: random.Random,
     ) -> str:
         fsp = _optional_size(column.mysql_type)
+        # MySQL 8.0.19+ accepts an offset in temporal input literals. Keep
+        # TIMESTAMP values absolute so epoch boundaries and DST gaps do not
+        # depend on preconfigured session time zones. This also preserves the
+        # same literal representation in INSERT SQL and LOAD DATA payloads.
+        timezone_suffix = "+00:00" if column.base_type == "TIMESTAMP" else ""
         if column.base_type == "TIMESTAMP":
             minimum = datetime(1970, 1, 1, 0, 0, 1)
             maximum = datetime(2038, 1, 19, 3, 14, 7)
@@ -1295,7 +1300,7 @@ class DataGenerator:
             rendered = value.strftime("%Y-%m-%d %H:%M:%S")
             if fsp:
                 rendered += f".{fraction_value:0{fsp}d}"
-            return rendered
+            return rendered + timezone_suffix
         span_seconds = int((maximum - minimum).total_seconds())
         seconds = DataGenerator._bounded_integer(
             0, span_seconds, distribution, row_index, rng
@@ -1307,7 +1312,7 @@ class DataGenerator:
             if value == maximum:
                 fraction_value = min(fraction_value, maximum_fraction)
             rendered += f".{fraction_value:0{fsp}d}"
-        return rendered
+        return rendered + timezone_suffix
 
     @staticmethod
     def _render_payload(rows: Sequence[RowValue]) -> bytes:

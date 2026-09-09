@@ -37,6 +37,8 @@ RANDOM_COLUMN_TYPES: tuple[str, ...] = (
     "BIGINT UNSIGNED",
     "DECIMAL(20,6)",
     "DECIMAL(30,10)",
+    "DECIMAL(12,2)",
+    "DECIMAL(10,0)",
     "NUMERIC(18,4)",
     "FLOAT",
     "FLOAT(10,4)",
@@ -46,6 +48,8 @@ RANDOM_COLUMN_TYPES: tuple[str, ...] = (
     "BOOL",
     "BIT(1)",
     "BIT(8)",
+    "BIT(16)",
+    "BIT(24)",
     "BIT(32)",
     "BIT(64)",
     "DATE",
@@ -61,50 +65,30 @@ RANDOM_COLUMN_TYPES: tuple[str, ...] = (
     "YEAR",
     "CHAR(16)",
     "CHAR(32)",
+    "CHAR(64)",
     "NCHAR(16)",
     "VARCHAR(64)",
+    "VARCHAR(32)",
     "VARCHAR(128)",
     "VARCHAR(255)",
     "NVARCHAR(64)",
     "BINARY(8)",
     "BINARY(32)",
     "VARBINARY(32)",
+    "VARBINARY(16)",
     "VARBINARY(64)",
+    "VARBINARY(128)",
     "VARBINARY(255)",
-    "TINYTEXT",
-    "TEXT",
-    "MEDIUMTEXT",
-    "LONGTEXT",
-    "TINYBLOB",
-    "BLOB",
-    "MEDIUMBLOB",
-    "LONGBLOB",
     "ENUM('alpha','beta','gamma')",
     "SET('red','green','blue')",
 )
 
-_LOB_TYPES = frozenset(
-    {
-        "TINYTEXT",
-        "TEXT",
-        "MEDIUMTEXT",
-        "LONGTEXT",
-        "TINYBLOB",
-        "BLOB",
-        "MEDIUMBLOB",
-        "LONGBLOB",
-    }
-)
 _CHARACTER_TYPES = frozenset(
     {
         "CHAR",
         "VARCHAR",
         "NCHAR",
         "NVARCHAR",
-        "TINYTEXT",
-        "TEXT",
-        "MEDIUMTEXT",
-        "LONGTEXT",
     }
 )
 _INNODB_INDEX_BYTE_BUDGET = 3072
@@ -229,10 +213,6 @@ def _value_expression(column: FuzzColumnSpec, seed: int) -> str:
         return f"UNHEX(LPAD(HEX(MOD(n + {salt}, 100000000)), {width * 2}, '0'))"
     if normalized.startswith("VARBINARY"):
         return f"CONVERT(CONCAT('b{salt}-', n) USING binary)"
-    if normalized in _LOB_TYPES:
-        if "TEXT" in normalized:
-            return f"CONCAT('text-{salt}-', n)"
-        return f"CONVERT(CONCAT('blob-{salt}-', n) USING binary)"
     raise ValueError(f"unsupported fuzz column type for {name}: {column.mysql_type}")
 
 
@@ -263,20 +243,6 @@ def initial_insert_sql(spec: FuzzTableSpec, rows: int, seed: int) -> str:
         + ", ".join(expressions)
         + f" FROM {_sequence_sql(rows)} WHERE n <= {rows} ORDER BY n"
     )
-
-
-def _expression_index(rng: random.Random, index: int) -> FuzzIndexSpec:
-    choice = rng.choice(("payload", "amount", "status", "tenant_id"))
-    if choice == "payload":
-        expression = "LOWER(`payload`)"
-    else:
-        expression = f"ABS(`{choice}`)"
-    name = f"idx_expr_{index:02d}_{choice}"
-    return FuzzIndexSpec(name, f"KEY {_quote_identifier(name)} (({expression}))")
-
-
-def _is_indexable(column: FuzzColumnSpec) -> bool:
-    return column.mysql_type.upper() not in _LOB_TYPES
 
 
 def _composite_column(column: FuzzColumnSpec) -> CompositeColumn:
@@ -337,12 +303,7 @@ def build_table_specs(
             for column_index in range(column_count - len(CORE_COLUMNS))
         )
         extras = tuple(column.name for column in columns[len(CORE_COLUMNS) :])
-        indexable_extras = tuple(
-            column.name
-            for column in columns[len(CORE_COLUMNS) :]
-            if _is_indexable(column)
-        )
-        if not extras or not indexable_extras:
+        if not extras:
             raise ValueError("fuzz tables require random extension columns")
 
         indexes: list[FuzzIndexSpec] = []
@@ -353,7 +314,7 @@ def build_table_specs(
                 f"PRIMARY KEY (`id`{primary_direction})",
             )
         )
-        descending_column = rng.choice(indexable_extras)
+        descending_column = rng.choice(extras)
         descending_name = f"idx_desc_{descending_column}"
         indexes.append(
             FuzzIndexSpec(
@@ -373,7 +334,9 @@ def build_table_specs(
                 f"UNIQUE KEY {_quote_identifier(unique_name)} ({_quote_identifier(unique_column)})",
             )
         )
-        indexes.append(_expression_index(rng, 0))
+        indexes.append(
+            FuzzIndexSpec("idx_tenant_status", "KEY `idx_tenant_status` (`tenant_id`, `status`)")
+        )
 
         target_indexes = rng.randint(
             config.min_indexes_per_table,
@@ -394,7 +357,7 @@ def build_table_specs(
             indexes.append(_render_composite_index(plan))
         index_number = 1
         while len(indexes) < target_indexes:
-            column = rng.choice(indexable_extras)
+            column = rng.choice(extras)
             index_name = f"idx_rand_{index_number:02d}_{column}"
             indexes.append(
                 FuzzIndexSpec(

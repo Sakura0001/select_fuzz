@@ -30,7 +30,8 @@ def test_fuzz_schema_has_at_least_fifty_random_columns_and_required_index_famili
         assert "PRIMARY KEY" in ddl
         assert " DESC)" in ddl
         assert "UNIQUE KEY" in ddl
-        assert "((" in ddl
+        assert "KEY `idx_tenant_status` (`tenant_id`, `status`)" in ddl
+        assert "((" not in ddl
         assert len(spec.indexes) >= 4
 
 
@@ -92,3 +93,21 @@ def test_fuzz_schema_never_exceeds_a_four_index_ceiling() -> None:
     for seed in range(20):
         spec = build_table_specs(("fuzz_t0",), config, seed=seed)[0]
         assert len(spec.indexes) == 4
+
+
+def test_fuzz_schema_excludes_pq_unsupported_columns_and_hidden_generated_indexes() -> None:
+    unsupported = re.compile(
+        r"\b(?:TINYTEXT|TEXT|MEDIUMTEXT|LONGTEXT|TINYBLOB|BLOB|MEDIUMBLOB|LONGBLOB|"
+        r"JSON|GEOMETRY|POINT|VECTOR|GENERATED|TEMPORARY|PARTITION|FULLTEXT|SPATIAL)\b",
+        re.IGNORECASE,
+    )
+    assert all(unsupported.search(declaration) is None for declaration in RANDOM_COLUMN_TYPES)
+    config = FuzzConfig(min_columns_per_table=50, max_columns_per_table=80)
+    for seed in range(50):
+        spec = build_table_specs(("fuzz_t0",), config, seed=seed)[0]
+        ddl = spec.create_sql()
+        assert unsupported.search(ddl) is None, ddl
+        assert "((" not in ddl
+        assert ddl.endswith("ENGINE=InnoDB")
+        assert 50 <= len(spec.columns) <= 80
+        assert initial_insert_sql(spec, 100, seed).endswith("WHERE n <= 100 ORDER BY n")

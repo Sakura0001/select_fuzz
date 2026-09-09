@@ -79,7 +79,7 @@ class CpuDenseScanTemplate:
 
     def render(self, scale: ScaleKnobs) -> str:
         return (
-            "SELECT SUM(((v * v) + id + (v DIV 7)) % 1000003) AS cpu_checksum "
+            "SELECT SUM(((v * v) + id + FLOOR(v / 7)) % 1000003) AS cpu_checksum "
             f"FROM cpu_data WHERE id <= {scale.scan_rows} ORDER BY 1"
         )
 
@@ -110,8 +110,7 @@ class CpuDenseRangeSortTemplate:
         selected = self.target_rows(scale)
         limit = min(selected, scale.sort_rows)
         return (
-            "SELECT id, SHA2(CONCAT(v, REPEAT('x', "
-            f"{scale.sort_key_bytes})), 256) AS sort_key FROM cpu_data "
+            "SELECT id, MOD((v * v) + id, 1000003) AS sort_key FROM cpu_data "
             f"WHERE id <= {selected} ORDER BY 2, 1 LIMIT {limit}"
         )
 
@@ -186,45 +185,10 @@ class CpuDenseGroupSortTemplate:
         return _setup_manifest(self.template_id, self.seed, scale)
 
 
-@dataclass(frozen=True, slots=True)
-class CpuDenseWindowTemplate:
-    seed: int
-    case_id: str
-    initial_scale: ScaleKnobs = ScaleKnobs()
-    template_id: str = "cpu_dense_window_v1"
-    boundary: ShapeBoundary = ShapeBoundary(
-        required=frozenset({Family.SCAN, Family.WINDOW, Family.SORT})
-    )
-    driver_family: Family = Family.WINDOW
-
-    def for_case(self, round_number: int, query_number: int) -> CpuDenseWindowTemplate:
-        return replace(
-            self,
-            seed=self.seed ^ (round_number << 32) ^ query_number,
-            case_id=_case_id(self.case_id, round_number, query_number),
-        )
-
-    def target_rows(self, scale: ScaleKnobs) -> int:
-        return scale.sort_rows
-
-    def render(self, scale: ScaleKnobs) -> str:
-        partitions = max(1, math.ceil(scale.sort_rows / scale.window_partition_rows))
-        return (
-            "SELECT id, SUM(MOD((v * v) + id, 1000003)) OVER (PARTITION BY "
-            f"MOD(id, {partitions}) ORDER BY id ROWS BETWEEN "
-            f"{scale.window_frame_rows} PRECEDING AND CURRENT ROW) AS window_sum "
-            f"FROM cpu_data WHERE id <= {scale.sort_rows} ORDER BY 2, 1"
-        )
-
-    def data_manifest(self, scale: ScaleKnobs) -> CpuDenseSetupManifest:
-        return _setup_manifest(self.template_id, self.seed, scale)
-
-
 __all__ = [
     "CpuDenseGroupSortTemplate",
     "CpuDenseJoinTemplate",
     "CpuDenseRangeSortTemplate",
     "CpuDenseScanTemplate",
     "CpuDenseSetupManifest",
-    "CpuDenseWindowTemplate",
 ]

@@ -542,7 +542,9 @@ class PerformanceModeRunner:
         preparation = SharedRoundCasePreparer(materializer)
         formal = FormalRunner(
             self._config.replica_nodes,
-            replica_runner,
+            _SqlLoggingQueryRunner(
+                NodeQueryRunner(replica_connector), thread_sql_log,
+            ),
             policy,
             diagnostics=MySQLDiagnosticsCollector(replica_connector),
         )

@@ -5,6 +5,26 @@ from pathlib import Path
 from select_fuzz.artifacts.bundle import CaseBundleWriter
 
 
+def test_round_and_thread_scripts_preserve_preconfigured_session_parameters(
+    tmp_path: Path,
+) -> None:
+    writer = CaseBundleWriter(tmp_path, full_thread_sql_log=True)
+    path = writer.begin_round_sql(
+        2,
+        database="sf_preconfigured_1",
+        setup_sql=("CREATE TABLE `t0` (`id` BIGINT PRIMARY KEY)",),
+        queries=("SELECT COUNT(*) FROM `t0`",),
+        metadata={"round_seed": 41},
+    )
+
+    for script in (path, tmp_path / "sql" / "worker-002.sql"):
+        payload = script.read_text(encoding="utf-8")
+        assert not any(line.startswith("SET ") for line in payload.splitlines())
+        assert "CREATE TABLE `t0`" in payload
+        assert "USE `sf_preconfigured_1`;" in payload
+        assert "-- round_seed: 41" in payload
+
+
 def test_round_script_contains_only_header_comments_and_actual_single_line_sql(
     tmp_path: Path,
 ) -> None:

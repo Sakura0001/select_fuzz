@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import re
+import sqlite3
 
 from select_fuzz.generation.query import (
     GeneratedQuery,
@@ -65,6 +67,7 @@ def _load_shaped_schema() -> GrammarSchema:
                     GrammarColumn("id", "BIGINT"),
                     GrammarColumn("tenant_id", "BIGINT"),
                     GrammarColumn("amount", "BIGINT"),
+                    GrammarColumn("status", "INT"),
                     GrammarColumn("payload", "VARCHAR(32)"),
                 ),
                 (),
@@ -147,3 +150,45 @@ def test_fuzz_query_factory_excludes_unavailable_grammar_families(
         context,
         seed=_LOAD_BOUNDARY_SEED,
     )
+
+
+def test_load_shaped_queries_use_pq_supported_expressions_and_subqueries() -> None:
+    context = QueryGenerationContext("sf_f_case", _load_shaped_schema())
+    generator = LoadShapedQueryGenerator()
+    queries = tuple(generator.generate(context, seed=seed) for seed in range(100))
+    forbidden = re.compile(
+        r"\b(?:BIT_XOR|CRC32|OVER|WINDOW|HAVING|GROUP_CONCAT|SHA2)\b"
+        r"|\bIN\s*\(\s*SELECT\b",
+        re.IGNORECASE,
+    )
+
+    for query in queries:
+        assert forbidden.search(query.sql) is None, query.sql
+        assert query == generator.generate(context, seed=query.seed)
+        assert "window" not in query.tags
+    assert {"scan", "join", "aggregate", "group", "sort"} <= set().union(
+        *(query.tags for query in queries)
+    )
+
+
+def test_load_shaped_join_fanout_stays_bounded_for_one_large_tenant() -> None:
+    context = QueryGenerationContext("sf_f_case", _load_shaped_schema())
+    generator = LoadShapedQueryGenerator()
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute(
+            "CREATE TABLE fuzz_t0 (id INTEGER PRIMARY KEY, tenant_id INTEGER, "
+            "amount INTEGER, status INTEGER, payload TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO fuzz_t0 VALUES (?, 1, 1, 0, 'payload')",
+            ((row_id,) for row_id in range(1, 501)),
+        )
+        joins = tuple(
+            query
+            for seed in range(100)
+            if "join" in (query := generator.generate(context, seed=seed)).tags
+        )
+        assert joins
+        for query in joins:
+            row_count = connection.execute(query.sql).fetchone()[0]
+            assert 0 < row_count <= 500 * 9, query.sql

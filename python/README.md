@@ -1,15 +1,14 @@
 # CentOS 7 portable runtime
 
-This directory contains the builder for a self-contained `select-fuzz` bundle.
-The bundle includes:
+The self-contained `select-fuzz` bundle includes:
 
 - CPython 3.11 built for the CentOS 7 / glibc 2.17 ABI;
 - all runtime Python dependencies, including `mysql-connector-python`;
 - the `select_fuzz` package and its bundled MySQL grammar/catalog files;
-- the intranet fuzz configuration examples.
+- the three-mode configuration template and intranet fuzz examples.
 
-The target machine does not need Python, pip, or uv. A Linux x86_64 machine
-with Docker can build the bundle without Python installed:
+The target machine does not need Python, pip, or uv. To build from a source
+checkout, use a Linux x86_64 machine with Docker; Python is not required:
 
 ```bash
 ./python/build-centos7-bundle.sh
@@ -32,3 +31,15 @@ export SELECT_FUZZ_MYSQL_PASSWORD
 
 The generated binary bundle is architecture-specific. This builder targets
 x86_64; an ARM64 CentOS 7 host needs a separate ARM64 build image and bundle.
+
+For correctness and performance, copy `config/example.yaml` to
+`config/local.yaml` and configure all three primary/replica pairs. Then run:
+
+```bash
+./select-fuzz doctor --mode correctness --config config/local.yaml
+./select-fuzz run --mode correctness --config config/local.yaml --rounds 1
+./select-fuzz run --mode performance --config config/local.yaml --rounds 1
+```
+
+All three main modes support ordinary MySQL. They use the database parameters
+already configured on the server, without enabling PQ or applying tuning SETs.

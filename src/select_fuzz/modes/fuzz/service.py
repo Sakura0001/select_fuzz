@@ -18,6 +18,7 @@ from select_fuzz.config import FuzzConfig, NodeConfig
 from select_fuzz.domain import RunRequest, SeedTree
 from select_fuzz.execution.protocols import ConnectionFactory, QuerySession, StopEventLike
 from select_fuzz.execution.timeout import KillQueryWatchdog
+from select_fuzz.execution.pq_gate import is_pq_rejection
 from select_fuzz.generation.query import GeneratedQuery, WeightedQueryGenerator
 from select_fuzz.generation.query_grammar import CandidateRejected
 from select_fuzz.modes.fuzz.dml import FuzzDmlGenerator
@@ -120,6 +121,7 @@ class FuzzCounterSnapshot:
     timeouts: int
     connection_losses: int
     reconnects: int
+    pq_rejected: int = 0
 
 
 class FuzzCounters:
@@ -134,6 +136,7 @@ class FuzzCounters:
             "timeouts": 0,
             "connection_losses": 0,
             "reconnects": 0,
+            "pq_rejected": 0,
         }
 
     def increment(self, name: str) -> None:
@@ -1115,11 +1118,6 @@ class FuzzModeService:
                         worker_kind="reader",
                         endpoint=endpoint,
                     )
-                    _execute_and_close(
-                        session,
-                        "SET SESSION max_execution_time = "
-                        f"{int(self._config.query_timeout_seconds * 1000)}",
-                    )
                     delay = self._config.reconnect_initial_delay_seconds
                     while not stop_event.is_set():
                         self._telemetry.set_stage(
@@ -1183,6 +1181,21 @@ class FuzzModeService:
                         self._telemetry.observe("read_total_ns", result.elapsed_ns)
                         if result.stopped:
                             break
+                        if is_pq_rejection(result.errno, result.failure_evidence):
+                            self._counters.increment("pq_rejected")
+                            self._records.append({
+                                "type": "fuzz_pq_rejected", "run_id": request.run_id,
+                                "occurred_at": _now(), "database": schema.database,
+                                "endpoint": endpoint, "worker_id": worker_id,
+                                "seed": query.seed, "sql": query.sql,
+                                "evidence": result.failure_evidence,
+                            })
+                            if result.connection_lost:
+                                raise RuntimeError("PQ admission left an unusable connection")
+                            # No PQ/resources must not turn a reader into a busy loop.
+                            if stop_event.wait(0.05):
+                                break
+                            continue
                         compatibility_delay = compatibility_backoff.observe(result)
                         if result.success:
                             self._counters.increment("reads")
@@ -1295,7 +1308,6 @@ class FuzzModeService:
                         worker_kind="writer",
                         endpoint="primary",
                     )
-                    _execute_and_close(session, "SET SESSION innodb_lock_wait_timeout = 10")
                     delay = self._config.reconnect_initial_delay_seconds
                     while not stop_event.is_set():
                         transaction_seed = tree.derive(
@@ -1309,6 +1321,10 @@ class FuzzModeService:
                         _execute_and_close(session, "START TRANSACTION")
                         transaction_failed = False
                         transaction_connection_lost = False
+                        reserved_inserts = 0
+                        inserted_rows = 0
+                        deleted_rows = 0
+                        commit_started = False
                         try:
                             for statement_ordinal in range(rng.randint(1, 5)):
                                 if stop_event.is_set():
@@ -1334,6 +1350,7 @@ class FuzzModeService:
                                     allowed = row_budget.reserve_insert(statement.target_rows)
                                     if allowed == 0:
                                         continue
+                                    reserved_inserts += allowed
                                     statement = statement.with_target_rows(allowed)
                                     reserved_insert = allowed
                                 self._record_query_sql(
@@ -1365,12 +1382,6 @@ class FuzzModeService:
                                     "write_total_ns",
                                     result.elapsed_ns,
                                 )
-                                if reserved_insert is not None:
-                                    row_budget.reconcile_insert(
-                                        reserved_insert,
-                                        result.affected_rows if result.success else 0,
-                                    )
-                                    reserved_insert = None
                                 if not result.success:
                                     transaction_failed = True
                                     transaction_connection_lost = result.connection_lost
@@ -1396,21 +1407,39 @@ class FuzzModeService:
                                 if stop_event.is_set():
                                     transaction_failed = True
                                     break
-                                if result.success and statement.operation == "delete":
-                                    row_budget.record_delete(result.affected_rows)
-                            _execute_and_close(
-                                session,
-                                (
-                                    "ROLLBACK"
-                                    if transaction_failed or stop_event.is_set()
-                                    else "COMMIT"
-                                ),
-                            )
+                                if reserved_insert is not None:
+                                    inserted_rows += (
+                                        reserved_insert
+                                        if result.affected_rows is None
+                                        else max(0, min(reserved_insert, result.affected_rows))
+                                    )
+                                if (
+                                    statement.operation == "delete"
+                                    and result.affected_rows is not None
+                                ):
+                                    deleted_rows += max(0, result.affected_rows)
+                            if transaction_failed or stop_event.is_set():
+                                transaction_failed = True
+                                _execute_and_close(session, "ROLLBACK")
+                                row_budget.reconcile_insert(reserved_inserts, 0)
+                            else:
+                                commit_started = True
+                                _execute_and_close(session, "COMMIT")
+                                # Keep insertion capacity reserved, and do not
+                                # expose deleted rows to peers, until COMMIT.
+                                row_budget.reconcile_insert(reserved_inserts, inserted_rows)
+                                row_budget.record_delete(deleted_rows)
                         except Exception:
                             try:
                                 _execute_and_close(session, "ROLLBACK")
                             except Exception:
                                 pass
+                            else:
+                                # A successful ROLLBACK cannot disambiguate a
+                                # lost COMMIT response. Keep those reservations
+                                # conservatively and never credit its deletes.
+                                if not commit_started:
+                                    row_budget.reconcile_insert(reserved_inserts, 0)
                             raise
                         if transaction_failed:
                             if transaction_connection_lost:

@@ -2,7 +2,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from threading import Event, Thread
 
+import pytest
+
 from select_fuzz.config import NodeConfig, NodeRole
+from select_fuzz.execution.timeout import KillQueryWatchdog
 from select_fuzz.modes.fuzz.compatibility_backoff import CompatibilityErrorBackoff
 from select_fuzz.modes.fuzz.execution import StreamingQueryExecutor, _error_identity
 
@@ -77,6 +80,97 @@ def test_streaming_executor_discards_values_and_counts_rows() -> None:
     assert result.error_stage is None
     assert result.execute_elapsed_ns >= 0
     assert result.fetch_elapsed_ns >= 0
+
+
+def test_client_deadline_keeps_watchdog_armed_while_cursor_drains() -> None:
+    """Closing an unfinished C cursor can keep reading its server result."""
+    killed = Event()
+    closed_under_watchdog: list[bool] = []
+
+    class DrainingCursor(_Cursor):
+        def close(self) -> None:
+            # Bound the regression itself even when the old code cancels the timer.
+            closed_under_watchdog.append(killed.wait(0.5))
+
+    class DrainingSession(_Session):
+        def execute(self, sql: str) -> DrainingCursor:
+            return DrainingCursor()
+
+    class ControlSession(_Session):
+        def execute(self, sql: str) -> _Cursor:
+            assert sql == "KILL QUERY 7"
+            killed.set()
+            class EmptyCursor(_Cursor):
+                def fetchmany(self, size: int):  # type: ignore[no-untyped-def]
+                    return ()
+
+            return EmptyCursor()
+
+    class ControlFactory(_Factory):
+        @contextmanager
+        def control_session(self, node, database):  # type: ignore[no-untyped-def]
+            yield ControlSession()
+
+    node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
+    executor = StreamingQueryExecutor(ControlFactory())
+    result = executor.execute_session(
+        DrainingSession(), "SELECT value FROM t", node=node, database="sf_f_case",
+        # The client deadline has elapsed before the watchdog's scheduled callback.
+        started_ns=0, timeout_seconds=0.02,
+    )
+
+    assert closed_under_watchdog == [True]
+    assert result.timed_out and not result.success
+    assert result.failure_evidence is not None
+    assert result.failure_evidence["watchdog"]["kill_query_succeeded"] is True
+    assert executor.active_queries == 0
+
+
+@pytest.mark.parametrize("local_abort_available", [True, False])
+def test_cleanup_force_disconnect_cannot_be_reused(local_abort_available: bool) -> None:
+    disconnected = Event()
+
+    class DrainingCursor(_Cursor):
+        def close(self) -> None:
+            assert disconnected.wait(0.5)
+
+    class DrainingSession(_Session):
+        def execute(self, sql: str) -> DrainingCursor:
+            return DrainingCursor()
+
+        def abort(self) -> None:
+            if not local_abort_available:
+                raise NotImplementedError("local abort unavailable")
+            disconnected.set()
+
+    class ControlCursor(_Cursor):
+        def fetchmany(self, size: int):  # type: ignore[no-untyped-def]
+            return ()
+
+    class ControlSession(_Session):
+        def execute(self, sql: str) -> ControlCursor:
+            if sql == "KILL CONNECTION 7":
+                disconnected.set()
+            else:
+                assert sql == "KILL QUERY 7"  # Acknowledged but does not unblock cleanup.
+            return ControlCursor()
+
+    class ControlFactory(_Factory):
+        @contextmanager
+        def control_session(self, node, database):  # type: ignore[no-untyped-def]
+            yield ControlSession()
+
+    node = NodeConfig(role=NodeRole.CUSTOM_ON, host="127.0.0.1")
+    factory = ControlFactory()
+    executor = StreamingQueryExecutor(factory, watchdog=KillQueryWatchdog(factory, kill_grace_s=0.01))
+    result = executor.execute_session(
+        DrainingSession(), "SELECT value FROM t", node=node, database="sf_f_case",
+        started_ns=0, timeout_seconds=0.02,
+    )
+
+    assert disconnected.is_set()
+    assert result.timed_out
+    assert result.connection_lost  # The reader must reopen, even when close raised no error.
 
 
 def test_streaming_executor_preserves_connection_open_failure_evidence() -> None:
@@ -303,6 +397,7 @@ def test_streaming_session_turns_cursor_close_failure_into_evidence() -> None:
     )
 
     assert result.success is False
+    assert result.connection_lost  # Unread protocol state must not reach the next query.
     assert result.error == "_InternalConnectorError:errno=-1:sqlstate=HY000"
     assert result.errno == -1
     assert result.error_stage == "cursor_close"

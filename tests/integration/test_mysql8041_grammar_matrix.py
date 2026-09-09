@@ -123,169 +123,6 @@ def _generate(
     )
 
 
-def _anti_cases() -> tuple[_Case, ...]:
-    names = (
-        "not_in_empty",
-        "not_in_single",
-        "not_in_multi",
-        "not_in_outer_nullable",
-        "not_in_inner_nullable",
-        "not_in_both_nullable",
-        "not_exists_empty",
-        "not_exists_single",
-        "not_exists_multi",
-        "nested_not_exists_not_in",
-        "nested_not_in_not_exists",
-        "not_in_any_all_combination",
-    )
-    fragments = (
-        ("NOT IN", "1 = 0"),
-        ("NOT IN", "GROUP BY 1"),
-        ("NOT IN", "SELECT 1"),
-        ("NULL NOT IN", "GROUP BY 1"),
-        ("NOT IN", "SELECT NULL"),
-        ("NULL NOT IN", "SELECT NULL"),
-        ("NOT EXISTS", "1 = 0"),
-        ("NOT EXISTS", "LIMIT 1"),
-        ("NOT EXISTS", "SELECT 1"),
-        ("NOT EXISTS", "NOT IN", "SELECT NULL"),
-        ("NOT IN", "NOT EXISTS", "1 = 0"),
-        ("<> ALL", "NOT EXISTS"),
-    )
-    return tuple(
-        _Case(
-            name,
-            _generate(
-                seed=70_000 + index,
-                case_production="anti_membership_predicate",
-                case_alternative=index,
-                root_symbols=(
-                    "_scope_begin",
-                    "_prepare_relation",
-                    "SELECT",
-                    "1",
-                    "AS",
-                    "_projection_alias",
-                    "FROM",
-                    "_emit_relation",
-                    "WHERE",
-                    "__CASE__",
-                    "_scope_end",
-                ),
-            ),
-            fragments[index],
-        )
-        for index, name in enumerate(names)
-    )
-
-
-def _frame_cases() -> tuple[_Case, ...]:
-    cases: list[_Case] = []
-    frame_count = len(_CANONICAL_GRAMMAR.productions["frame_clause"].alternatives)
-    for index in range(frame_count):
-        cases.append(
-            _Case(
-                f"rows_frame_{index:02d}",
-                _generate(
-                    seed=71_000 + index,
-                    case_production="frame_clause",
-                    case_alternative=index,
-                    root_symbols=(
-                        "_scope_begin",
-                        "_prepare_relation",
-                        "SELECT",
-                        "SUM",
-                        "(",
-                        "_strict_numeric_column",
-                        ")",
-                        "OVER",
-                        "(",
-                        "ORDER",
-                        "BY",
-                        "_window_numeric_order",
-                        "frame_case",
-                        ")",
-                        "AS",
-                        "_projection_alias",
-                        "FROM",
-                        "_emit_relation",
-                        "_scope_end",
-                    ),
-                    overrides={
-                        "frame_case": GrammarProduction(
-                            "frame_case",
-                            (
-                                GrammarAlternative(
-                                    _CANONICAL_GRAMMAR.productions["frame_clause"]
-                                    .alternatives[index]
-                                    .symbols,
-                                    99_998,
-                                ),
-                            ),
-                        )
-                    },
-                ),
-                ("ROWS",) if index < 14 else ("RANGE",),
-            )
-        )
-    for production_name, prefix, count in (
-        ("numeric_range_frame_clause", "numeric_range", 4),
-        ("temporal_range_frame_clause", "temporal_range", 4),
-    ):
-        order_symbol = (
-            "_window_numeric_order"
-            if production_name.startswith("numeric")
-            else "_window_temporal_order"
-        )
-        for index in range(count):
-            cases.append(
-                _Case(
-                    f"{prefix}_{index:02d}",
-                    _generate(
-                        seed=72_000 + len(cases),
-                        case_production=production_name,
-                        case_alternative=index,
-                        root_symbols=(
-                            "_scope_begin",
-                            "_prepare_relation",
-                            "SELECT",
-                            "SUM",
-                            "(",
-                            "_strict_numeric_column",
-                            ")",
-                            "OVER",
-                            "(",
-                            "ORDER",
-                            "BY",
-                            order_symbol,
-                            "frame_case",
-                            ")",
-                            "AS",
-                            "_projection_alias",
-                            "FROM",
-                            "_emit_relation",
-                            "_scope_end",
-                        ),
-                        overrides={
-                            "frame_case": GrammarProduction(
-                                "frame_case",
-                                (
-                                    GrammarAlternative(
-                                        _CANONICAL_GRAMMAR.productions[production_name]
-                                        .alternatives[index]
-                                        .symbols,
-                                        99_997,
-                                    ),
-                                ),
-                            )
-                        },
-                    ),
-                    ("RANGE",),
-                )
-            )
-    return tuple(cases)
-
-
 def _hint_cases() -> tuple[_Case, ...]:
     normal_root = (
         "_scope_begin",
@@ -494,8 +331,7 @@ def _run_cases(
                     cursor.execute("SHOW WARNINGS")
                     explain_warnings = tuple(cursor.fetchall())
                     assert not any(
-                        "hint" in str(warning[2]).casefold()
-                        for warning in explain_warnings
+                        "hint" in str(warning[2]).casefold() for warning in explain_warnings
                     ), (case.name, explain_warnings, case.candidate.sql)
                     cursor.execute(case.candidate.sql)
                     outcomes.append(_normalized_rows(cursor.fetchall()))
@@ -555,18 +391,6 @@ def _run_cases(
 
 @pytest.mark.mysql
 @pytest.mark.timeout(600)
-def test_anti_subquery_cardinality_null_and_nested_matrix_on_three_exact_8041_sockets() -> None:
-    _run_cases(_anti_cases(), artifact_name="latest-grammar-matrix-20260716")
-
-
-@pytest.mark.mysql
-@pytest.mark.timeout(600)
-def test_all_legal_frame_bounds_on_three_exact_8041_sockets() -> None:
-    _run_cases(_frame_cases(), artifact_name="latest-grammar-frame-matrix-20260716")
-
-
-@pytest.mark.mysql
-@pytest.mark.timeout(600)
 def test_optimizer_hint_positive_matrix_on_three_exact_8041_sockets() -> None:
     _run_cases(_hint_cases(), artifact_name="latest-grammar-hint-matrix-20260716")
 
@@ -579,7 +403,10 @@ def _function_cases(
     for signature in DETERMINISTIC_FUNCTION_SIGNATURES:
         variants = (
             signature.signature_id,
-            *(f"{signature.signature_id}_null_{position}" for position in sorted(signature.null_argument_positions)),
+            *(
+                f"{signature.signature_id}_null_{position}"
+                for position in sorted(signature.null_argument_positions)
+            ),
         )
         for variant in variants:
             null_position = (
@@ -594,10 +421,13 @@ def _function_cases(
                         seed=74_000 + ordinal,
                         root_symbols=(
                             "_scope_begin",
+                            "_prepare_base_relation",
                             "SELECT",
                             "function_case",
                             "AS",
                             "_projection_alias",
+                            "FROM",
+                            "_emit_relation",
                             "_scope_end",
                         ),
                         overrides={
@@ -611,3 +441,9 @@ def _function_cases(
             )
             ordinal += 1
     return tuple(cases)
+
+
+def test_removed_pq_families_have_no_acceptance_construction_paths() -> None:
+    assert "anti_membership_predicate" not in _CANONICAL_GRAMMAR.productions
+    assert "frame_clause" not in _CANONICAL_GRAMMAR.productions
+    assert "window_expression" not in _CANONICAL_GRAMMAR.productions

@@ -22,6 +22,7 @@ from select_fuzz.performance.models import (
     Verdict,
 )
 from select_fuzz.performance.oracle import assess
+from select_fuzz.execution.pq_gate import is_pq_rejection
 
 
 class ServiceTemplate(PerformanceTemplate, Protocol):
@@ -43,6 +44,8 @@ class FormalServicePort(Protocol):
 
 class PerformanceRecordPort(Protocol):
     def record(self, frozen: FrozenCase, run: FormalRun, assessment: Assessment) -> object: ...
+
+    def record_pq_rejection(self, frozen: FrozenCase, run: FormalRun) -> object: ...
 
     def record_calibration_failure(
         self,
@@ -183,6 +186,10 @@ class PerformanceService:
                         break
                     continue
                 formal = self._formal.run(frozen)
+                if any(is_pq_rejection(m.error_code, m.metrics) for m in formal.measurements.values()):
+                    rejected += 1
+                    self._recorder.record_pq_rejection(frozen, formal)
+                    continue
                 assessment = assess(
                     formal,
                     threshold=self._policy.regression_threshold,

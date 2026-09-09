@@ -10,9 +10,14 @@ def test_deterministic_function_registry_is_broad_closed_and_unique() -> None:
     signatures = DETERMINISTIC_FUNCTION_SIGNATURES
     signature_ids = {signature.signature_id for signature in signatures}
 
-    assert len(signatures) >= 100
+    assert len(signatures) == 45
     assert len(signature_ids) == len(signatures)
-    assert {signature.family for signature in signatures} == set(FunctionFamily)
+    assert {signature.family for signature in signatures} == {
+        FunctionFamily.MATH,
+        FunctionFamily.STRING,
+        FunctionFamily.TEMPORAL,
+        FunctionFamily.CONTROL,
+    }
     assert all(signature.arguments for signature in signatures if signature.sql_name != "PI")
 
 
@@ -50,15 +55,10 @@ def test_required_deterministic_function_families_have_representative_signatures
         "math_atan_2",
         "math_log_1",
         "math_log_2",
-        "string_locate_2",
-        "string_locate_3",
-        "string_substring_2",
-        "string_substring_3",
-        "temporal_timestamp_1",
-        "temporal_timestamp_2",
+        "string_strcmp_2",
+        "temporal_year_1",
+        "temporal_date_1",
         "control_coalesce_3",
-        "encoding_sha2_2",
-        "network_inet6_ntoa_1",
     } <= ids
 
 
@@ -69,11 +69,8 @@ def test_function_warning_contract_is_explicit_and_closed() -> None:
         if signature.expected_warning_codes_by_null_position
     }
 
-    assert contracts == {"encoding_sha2_2": ((1, (1583,)),)}
-    sha2 = next(
-        signature
-        for signature in DETERMINISTIC_FUNCTION_SIGNATURES
-        if signature.signature_id == "encoding_sha2_2"
-    )
-    assert sha2.expected_warning_codes(None) == ()
-    assert sha2.expected_warning_codes(1) == (1583,)
+    assert contracts == {}
+    for signature in DETERMINISTIC_FUNCTION_SIGNATURES:
+        assert signature.expected_warning_codes(None) == ()
+        for position in signature.null_argument_positions:
+            assert signature.expected_warning_codes(position) == ()

@@ -23,7 +23,6 @@ from select_fuzz.generation.composite_indexes import (
 from select_fuzz.generation.schema import (
     ColumnDef,
     IndexDef,
-    IndexExpression,
     IndexKind,
     IndexPart,
     SchemaLimits,
@@ -38,7 +37,7 @@ from select_fuzz.performance.tree import Family, ShapeBoundary
 
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]*$")
-_TEXT_TYPES = frozenset({"CHAR", "VARCHAR", "TINYTEXT", "TEXT", "ENUM", "SET"})
+_TEXT_TYPES = frozenset({"CHAR", "VARCHAR", "ENUM", "SET"})
 _INDEXABLE_TYPES = frozenset(
     {
         "TINYINT",
@@ -68,7 +67,6 @@ _QUERY_SHAPES = (
     "range_sort",
     "join_aggregate",
     "group_sort",
-    "window_sort",
     "filtered_scan",
 )
 _INNODB_INDEX_BYTE_BUDGET = 3072
@@ -157,7 +155,6 @@ def _column_plan(rng: random.Random, ordinal: int) -> _ColumnPlan:
             "temporal",
             "year",
             "enum_set",
-            "text_blob",
         )
     )
     name = f"c{ordinal}"
@@ -231,7 +228,7 @@ def _column_plan(rng: random.Random, ordinal: int) -> _ColumnPlan:
     elif family == "year":
         column = ColumnDef(name, "YEAR", nullable)
         expression = f"(1901 + MOD({x}, 255))"
-    elif family == "enum_set":
+    else:
         if rng.random() < 0.5:
             column = ColumnDef(
                 name,
@@ -250,20 +247,6 @@ def _column_plan(rng: random.Random, ordinal: int) -> _ColumnPlan:
                 "utf8mb4_0900_ai_ci",
             )
             expression = f"ELT(MOD({x}, 4) + 1, 'a', 'b', 'c', 'a,b')"
-    else:
-        base = rng.choice(("TINYTEXT", "TEXT", "TINYBLOB", "BLOB"))
-        if base.endswith("TEXT"):
-            column = ColumnDef(
-                name,
-                base,
-                nullable,
-                "utf8mb4",
-                "utf8mb4_0900_ai_ci",
-            )
-            expression = f"CONCAT('text_', CONV({x}, 10, 36))"
-        else:
-            column = ColumnDef(name, base, nullable)
-            expression = f"UNHEX(LPAD(HEX(MOD({x}, 4294967295)), 8, '0'))"
     return _ColumnPlan(column, _nullable(column, expression, salt=salt))
 
 
@@ -337,24 +320,14 @@ def _table_plan(
     secondary_candidates: list[IndexDef] = []
     for index_ordinal, column in enumerate(rng.sample(indexable_columns, len(indexable_columns))):
         unique = rng.random() < 0.25
-        if column.base_type in _TEXT_TYPES and rng.random() < 0.25:
-            secondary_candidates.append(
-                IndexDef(
-                    f"idx_{table_ordinal}_{index_ordinal}",
-                    (IndexPart(expression=IndexExpression.lower_char(column.name, 255)),),
-                    kind=IndexKind.FUNCTIONAL,
-                    visible=rng.random() >= 0.15,
-                )
+        secondary_candidates.append(
+            IndexDef(
+                f"idx_{table_ordinal}_{index_ordinal}",
+                _index_parts(rng, column, unique=unique),
+                unique=unique,
+                visible=rng.random() >= 0.15,
             )
-        else:
-            secondary_candidates.append(
-                IndexDef(
-                    f"idx_{table_ordinal}_{index_ordinal}",
-                    _index_parts(rng, column, unique=unique),
-                    unique=unique,
-                    visible=rng.random() >= 0.15,
-                )
-            )
+        )
     composite_rng = random.Random(
         seed_tree.derive("performance_fuzz", "table", table_ordinal, "composite_indexes")
     )
@@ -498,8 +471,6 @@ class PerformanceFuzzTemplate:
         query_shapes = list(_QUERY_SHAPES)
         if self.max_query_tables < 2 or self.max_query_depth < 2:
             query_shapes.remove("join_aggregate")
-        if self.max_query_depth < 2:
-            query_shapes.remove("window_sort")
         query_shape = shape_rng.choice(query_shapes)
         query_salt = shape_rng.randrange(1, 1_000_003)
         table_rng = random.Random(schema_tree.derive("performance_fuzz", "table_count"))
@@ -577,10 +548,6 @@ class PerformanceFuzzTemplate:
                 ShapeBoundary(required=frozenset({Family.SCAN, Family.AGGREGATE, Family.SORT})),
                 Family.AGGREGATE,
             ),
-            "window_sort": (
-                ShapeBoundary(required=frozenset({Family.SCAN, Family.WINDOW, Family.SORT})),
-                Family.WINDOW,
-            ),
             "filtered_scan": (
                 ShapeBoundary(required=frozenset({Family.SCAN})),
                 Family.SCAN,
@@ -616,8 +583,6 @@ class PerformanceFuzzTemplate:
             return scale.join_probe_rows
         if self._query_shape == "group_sort":
             return scale.aggregate_input_rows
-        if self._query_shape == "window_sort":
-            return scale.sort_rows
         return scale.scan_rows
 
     def render(self, scale: ScaleKnobs) -> str:
@@ -632,8 +597,7 @@ class PerformanceFuzzTemplate:
             selected = self.target_rows(scale)
             limit = min(selected, scale.sort_rows)
             return (
-                f"SELECT `q`.`id`, SHA2(CONCAT(`q`.`id`, '{salt}', "
-                f"REPEAT('x', {scale.sort_key_bytes})), 256) AS `sort_key` "
+                f"SELECT `q`.`id`, MOD((`q`.`id` * {salt}) + 17, 1000003) AS `sort_key` "
                 f"FROM `{first}` AS `q` WHERE `q`.`id` <= {selected} "
                 f"ORDER BY `sort_key`, `q`.`id` LIMIT {limit}"
             )
@@ -650,15 +614,6 @@ class PerformanceFuzzTemplate:
                 f"SELECT MOD(`q`.`id` + {salt}, {scale.aggregate_groups}) AS `group_key`, "
                 f"SUM(MOD(`q`.`id` * {salt}, 1000003)) AS `checksum` FROM `{first}` AS `q` "
                 f"WHERE `q`.`id` <= {scale.aggregate_input_rows} GROUP BY 1 ORDER BY 2, 1"
-            )
-        if self._query_shape == "window_sort":
-            partitions = max(1, math.ceil(scale.sort_rows / scale.window_partition_rows))
-            return (
-                f"SELECT `q`.`id`, SUM(MOD(`q`.`id` * {salt}, 1000003)) OVER ("
-                f"PARTITION BY MOD(`q`.`id`, {partitions}) ORDER BY `q`.`id` "
-                f"ROWS BETWEEN {scale.window_frame_rows} PRECEDING AND CURRENT ROW) "
-                f"AS `window_sum` FROM `{first}` AS `q` WHERE `q`.`id` <= {scale.sort_rows} "
-                "ORDER BY 2, 1"
             )
         return (
             f"SELECT `q`.`id` FROM `{first}` AS `q` "

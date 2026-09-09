@@ -176,6 +176,43 @@ def test_production_replay_executor_calls_sync_replay_service() -> None:
     assert result == {"case_id": "case-8", "status": "reproduced"}
 
 
+def test_production_replay_executor_preserves_inconclusive_pq_evidence() -> None:
+    from select_fuzz.config import NodeRole
+    from select_fuzz.domain import ErrorInfo, ExecutionStatus, NodeExecution
+    from select_fuzz.replay import ReplayResult, ReplayStatus
+
+    class Service:
+        def replay(self, case_id: str) -> ReplayResult:
+            return ReplayResult(
+                case_id=case_id,
+                database="replay_db",
+                status=ReplayStatus.PREPARATION_FAILED,
+                original_verdict="result_mismatch",
+                replay_verdict=None,
+                replay_classification="pq_rejected",
+                executions=(NodeExecution.failure(
+                    role=NodeRole.CUSTOM_ON,
+                    status=ExecutionStatus.TIMEOUT,
+                    started_ns=1,
+                    ended_ns=2,
+                    connection_id=7,
+                    error=ErrorInfo(3024, "HYT00", "PQ admission timed out"),
+                    performance_payload={"pq_rejection": "admission_timeout"},
+                ),),
+            )
+
+    result = asyncio.run(ProductionReplayExecutor(Service()).execute("case-pq"))
+
+    assert result["case_id"] == "case-pq"
+    assert result["status"] == "preparation_failed"
+    assert result["replay_verdict"] is None
+    assert result["replay_classification"] == "pq_rejected"
+    execution = result["executions"][0]
+    assert execution["status"] == "timeout"
+    assert execution["error"]["errno"] == 3024
+    assert execution["performance_payload"] == {"pq_rejection": "admission_timeout"}
+
+
 def test_post_replay_is_durable_and_idempotent(tmp_path: Path) -> None:
     from fastapi.testclient import TestClient
 
